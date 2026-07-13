@@ -1,0 +1,14 @@
+.gradle/
+build/
+out/
+run/
+logs/
+
+.idea/
+*.iml
+.vscode/
+
+*.log
+hs_err_pid*
+replay_pid*
+local.properties
