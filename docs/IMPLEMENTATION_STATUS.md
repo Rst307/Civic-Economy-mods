@@ -13,6 +13,9 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Required LC/FTB absence, version drift, or class drift fails closed.
 - Create absence leaves the fiscal core enabled; Create version or class drift disables production scoring without blocking startup.
 - Added a NeoForge runtime detector and enforced the compatibility report during Civic mod construction.
+- Added a real SQLite persistence module with WAL, foreign keys, busy timeout, schema versioning, and persisted world/dependency identity.
+- SQLite open fails closed for a foreign world UUID or an unknown schema version.
+- Bundled exact `sqlite-jdbc` `3.50.3.0` in the NeoForge JAR using jar-in-jar metadata.
 
 ## In progress
 
@@ -21,7 +24,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Not yet completed
 
-- SQLite WAL persistence, migrations, backups, restore validation, transaction journal, and compensation recovery.
+- SQLite migrations beyond schema v1, online backups, restore validation, transaction journal, and compensation recovery.
 - Stable `NationId`, `NationProvider`, FTB Teams binding, citizenship, roles, capital, lifecycle, and nation registration.
 - National Treasury and Organization Fiscal Account LC adapters; budgets, Reservations, Escrow, transfers, refunds, withdrawals, approvals, ledger, audit, and service identities.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
@@ -54,6 +57,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 - `gradlew.bat build` passed on 2026-07-14 and produced a development JAR.
 - This is compilation/build evidence only, not installability or gameplay evidence.
+- JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
+
+### SQLite integration
+
+- `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
+- Verified WAL mode, schema v1, persisted identity across close/reopen, foreign-world rejection, and unknown-schema rejection.
+- These are real database integration tests, not mocks; backup/restore and crash recovery remain unverified.
 
 ### Dedicated-server runtime
 

@@ -68,6 +68,13 @@ configurations {
 }
 
 dependencies {
+    jarJar(implementation("org.xerial:sqlite-jdbc:${sqlite_jdbc_version}")) {
+        version {
+            strictly "[${sqlite_jdbc_version}]"
+            prefer sqlite_jdbc_version
+        }
+    }
+
     localRuntime "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
     localRuntime "dev.ftb.mods:ftb-library-neoforge:${ftb_library_version}"
     localRuntime "dev.ftb.mods:ftb-teams-neoforge:${ftb_teams_version}"
