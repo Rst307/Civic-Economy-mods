@@ -18,6 +18,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Bundled exact `sqlite-jdbc` `3.50.3.0` in the NeoForge JAR using jar-in-jar metadata.
 - Added checked, nonnegative LC-minor-unit `MoneyAmount` values.
 - Added SQLite schema v2 durable Reservations with service-scoped `requestId` idempotency, payload-conflict rejection, available-balance calculation, and per-account concurrency control.
+- Added SQLite schema v3 payment transactions with durable `PREPARED`, `EXTERNAL_APPLIED`, `CIVIC_COMMITTED`, `COMPENSATING`, and `COMPENSATED` states.
+- Added restart recovery for crashes after an external payment and for the ambiguous window between external application and Civic recording the result; retries retain the same transaction UUID.
 
 ## In progress
 
@@ -26,14 +28,14 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v1, online backups, restore validation, transaction journal, and compensation recovery.
+- SQLite migrations beyond schema v3, online backups, restore validation, compensation execution, and recovery audit records.
 - Stable `NationId`, `NationProvider`, FTB Teams binding, citizenship, roles, capital, lifecycle, and nation registration.
-- National Treasury and Organization Fiscal Account LC adapters; budgets, Reservation settlement/release, Escrow, transfers, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
+- National Treasury and Organization Fiscal Account LC adapters; budgets, Reservation release/partial settlement, Escrow, transfers, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
 - Commands, menus, public reports, administration, recovery tools, and isolated `DEBUG WORLD` implementation.
-- Client runtime, GameTest runtime, dedicated-server Create runtime, playable single-player loop, and multiplayer core loop.
+- Client runtime, GameTest runtime, playable single-player loop, and multiplayer core loop.
 - Installation, configuration, player, administrator, debugging, upgrade, backup, and recovery documentation.
 - Release JAR verification, clean worktree, push, and draft pull request.
 
@@ -64,7 +66,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v1, persisted identity across close/reopen, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v3, persisted identity across close/reopen, foreign-world rejection, and unknown-schema rejection.
 - These are real database integration tests, not mocks; backup/restore and crash recovery remain unverified.
 
 ### Fiscal domain and database integration
@@ -72,6 +74,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `MoneyAmountTest` verifies negative rejection, checked overflow, nonnegative subtraction, and exact LC minor-unit arithmetic.
 - `FiscalLedgerTest` uses real temporary SQLite databases to verify durable Reservation replay, changed-balance replay stability, insufficient-funds rejection without a row, conflicting-payload rejection, and active/available balances.
 - The concurrent oversubscription test passed ten repeated runs: two simultaneous 700-unit holds against 1,000 units produce exactly one success and one active 700-unit Reservation.
+- `PaymentRecoveryTest` uses a real temporary SQLite database and controlled external-payment adapter to verify two restart windows: after `EXTERNAL_APPLIED`, and after external application before Civic can record it.
+- Recovery after `EXTERNAL_APPLIED` performs no second external call; ambiguous recovery retries the same transaction UUID, producing two adapter attempts but one idempotent economic effect.
 - LC balances are currently supplied through a test adapter; no claim of real LC debit, credit, or idempotent payment is made yet.
 
 ### Dedicated-server runtime
@@ -96,4 +100,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Add durable Reservation release/settlement and the PREPARED → EXTERNAL_APPLIED → CIVIC_COMMITTED / COMPENSATING transaction states before implementing the version-locked LC write adapter.
+Implement and verify the version-locked LC balance/payment adapter against the real `1.21-2.3.0.5` runtime before extending payment states or starting another functional slice.
