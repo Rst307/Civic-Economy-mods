@@ -23,17 +23,22 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added a version-locked LC player-bank payment adapter using real `BankAPI` withdraw/deposit methods and LC main-chain minor units.
 - Added a required `BankDataCache` Mixin that persists applied Civic transaction UUIDs in the same LC `SavedData` snapshot as player bank balances.
 - Added a real NeoForge GameTest proving one LC player-bank transfer, replay idempotency, exact source/recipient balances, and marker save/reload.
+- Added world-scoped Civic `SavedData` storage for LC-backed National Treasury and Organization Fiscal Account objects keyed by `AccountId`.
+- Registered a Civic LC `BankReferenceType` and `BankAccountSource`; every native LC player access, salary target, salary edit, and reference-persistence path is denied.
+- Civic fiscal accounts ignore LC interest and salary ticking so LC cannot create unaudited fiscal money through those hooks.
+- Generalized the LC payment adapter to transfer among player accounts and Civic fiscal accounts while retaining the LC transaction marker.
+- Added a real LC + real SQLite GameTest that funds a National Treasury, creates a Reservation, injects the ambiguous external-payment crash window, recovers through `PaymentCoordinator`, and pays a player exactly once.
+- Explicitly loads the pinned SQLite JDBC driver and places it on NeoForge development-run additional runtime classpaths as well as in the built jar-in-jar artifact.
 
 ## In progress
 
-- Add Civic-owned LC-backed National Treasury and Organization Fiscal Account storage and references.
 - Add method-level FTB Teams and FTB Chunks adapters and GameTests.
 
 ## Not yet completed
 
 - SQLite migrations beyond schema v3, online backups, restore validation, compensation execution, and recovery audit records.
 - Stable `NationId`, `NationProvider`, FTB Teams binding, citizenship, roles, capital, lifecycle, and nation registration.
-- National Treasury and Organization Fiscal Account LC adapters; player-bank balance adapter; budgets, Reservation release/partial settlement, Escrow, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
+- Player-bank balance adapter; budgets, Reservation release/partial settlement, Escrow, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
@@ -65,7 +70,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `gradlew.bat build` passed on 2026-07-14 and produced a development JAR.
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
-- After the LC adapter slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, GameTest, and generated structure fixture.
+- After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,390,196 bytes, SHA-256 `B37919893D5C7273E097FDDCA2180EE26BD665371A8BC5C5C58F41592FAA9FF0`. This is not yet a release artifact.
 
 ### SQLite integration
 
@@ -84,10 +90,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ### Real Lightman's Currency integration
 
-- `LightmansCurrencyPlayerPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
-- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed one required GameTest against real LC `1.21-2.3.0.5`.
+- `LightmansCurrencyPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
+- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed four required GameTests against real LC `1.21-2.3.0.5`.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
+- The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
+- The interest test funded a National Treasury with 500 LC minor units, invoked LC's interest hook with a multiplier that would otherwise double it, and verified the balance remained exactly 500.
+- The treasury settlement test used a real temporary SQLite database and real LC accounts. Funding player `1000 → 300`, National Treasury `0 → 700 → 400`, and recipient `25 → 325`; ambiguous recovery finished `CIVIC_COMMITTED` and cleared the Reservation without a second economic effect.
 - Repeated GameTest runs honor markers persisted by earlier runs; each isolated test therefore uses a fresh transaction UUID while replaying it twice within that run.
 - LC logs `GameProfileCache` errors when its synthetic offline player accounts are generated under the headless GameTest server, whose profile cache is null. The required test still passes and normal dedicated-server startup does not show this condition.
 
@@ -99,6 +108,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `gradlew.bat runServer -PincludeCreate=true` loaded the same required stack plus Create `6.0.6`, embedded Flywheel `1.0.4`, and embedded Ponder `1.0.56` in an isolated run directory.
 - Civic logged `compatibility check passed; Create production scoring is enabled`.
 - Minecraft logged `Done (4.165s)!` before the monitored task-owned process tree was stopped.
+- After the Civic fiscal-account slice, `gradlew.bat runServer --no-daemon --console=plain` again reached `Done (3.389s)!` with Create absent and production scoring disabled.
+- After the same slice, `gradlew.bat runServer --no-daemon --console=plain -PincludeCreate=true` loaded Create `6.0.6`, enabled production scoring, and reached `Done (3.061s)!`.
 
 ### Environment note
 
@@ -108,11 +119,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 ## Known defects and risks
 
 - Probe class presence does not yet prove method-level API compatibility or event semantics.
-- The real LC adapter currently supports `player:<uuid>` accounts only. National Treasury and Organization Fiscal Account references are not implemented, so the full public-fiscal payment path is not yet complete.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
+- The treasury GameTest proves real LC/SQLite recovery inside one running server after the ambiguous adapter window. It does not yet prove process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files; durable per-account transfer phase evidence or compensation is still required before release.
 - Runtime-generated `run/` data is local evidence and must never be committed.
 - Lightman's Currency defaults include issuance and interest mechanisms that must be explicitly disabled or blocked before a playable release can satisfy currency conservation.
 
 ## Next step
 
-Implement Civic-owned LC-backed National Treasury and Organization Fiscal Account storage behind a small account-directory interface, then exercise treasury-to-player settlement through the existing recovery coordinator and real LC GameTest.
+Implement exact method-level FTB Teams and FTB Chunks adapters with real artifact/source evidence and GameTests, then begin stable `NationId` registration and strict one-to-one FTB Team binding.

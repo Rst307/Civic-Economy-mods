@@ -19,7 +19,7 @@ import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.ExternalPayment;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.integration.lightmanscurrency.CivicBankDataTransactions;
-import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPlayerPayments;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -40,8 +40,8 @@ public final class LightmansCurrencyPlayerPaymentsGameTests {
                 new AccountId("player:" + recipientPlayer),
                 MoneyAmount.ofMinorUnits(300));
 
-        LightmansCurrencyPlayerPayments.live().apply(payment);
-        LightmansCurrencyPlayerPayments.live().apply(payment);
+        LightmansCurrencyPayments.live(helper.getLevel()).apply(payment);
+        LightmansCurrencyPayments.live(helper.getLevel()).apply(payment);
 
         helper.assertValueEqual(700L, mainChainBalance(source), "source LC player-bank balance");
         helper.assertValueEqual(325L, mainChainBalance(recipient), "recipient LC player-bank balance");

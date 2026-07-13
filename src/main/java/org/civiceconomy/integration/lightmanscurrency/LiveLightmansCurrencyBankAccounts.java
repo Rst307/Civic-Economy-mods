@@ -9,9 +9,18 @@ import io.github.lightman314.lightmanscurrency.api.money.value.builtin.CoinValue
 import io.github.lightman314.lightmanscurrency.common.data.CustomSaveData;
 import io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache;
 import java.util.UUID;
+import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.MoneyAmount;
 
-final class LightmansCurrencyPlayerBankAccounts implements PlayerBankAccounts {
+final class LiveLightmansCurrencyBankAccounts implements LightmansCurrencyBankAccounts {
+    private static final String PLAYER_ACCOUNT_PREFIX = "player:";
+
+    private final LightmansCurrencyFiscalAccounts fiscalAccounts;
+
+    LiveLightmansCurrencyBankAccounts(LightmansCurrencyFiscalAccounts fiscalAccounts) {
+        this.fiscalAccounts = fiscalAccounts;
+    }
+
     @Override
     public Object transactionLock() {
         return bankData();
@@ -23,9 +32,9 @@ final class LightmansCurrencyPlayerBankAccounts implements PlayerBankAccounts {
     }
 
     @Override
-    public MoneyAmount withdraw(UUID playerId, MoneyAmount requested) {
-        Pair<Boolean, MoneyValue> result = BankAPI.getApi().BankWithdrawFromServer(
-                account(playerId), value(requested));
+    public MoneyAmount withdraw(AccountId accountId, MoneyAmount requested) {
+        Pair<Boolean, MoneyValue> result =
+                BankAPI.getApi().BankWithdrawFromServer(account(accountId), value(requested));
         if (!result.getFirst()) {
             return MoneyAmount.ZERO;
         }
@@ -37,9 +46,9 @@ final class LightmansCurrencyPlayerBankAccounts implements PlayerBankAccounts {
     }
 
     @Override
-    public void deposit(UUID playerId, MoneyAmount amount) {
-        if (!BankAPI.getApi().BankDepositFromServer(account(playerId), value(amount))) {
-            throw new IllegalStateException("LC rejected a server bank deposit for player " + playerId);
+    public void deposit(AccountId accountId, MoneyAmount amount) {
+        if (!BankAPI.getApi().BankDepositFromServer(account(accountId), value(amount))) {
+            throw new IllegalStateException("LC rejected a server bank deposit for " + accountId.value());
         }
     }
 
@@ -48,15 +57,28 @@ final class LightmansCurrencyPlayerBankAccounts implements PlayerBankAccounts {
         transactions().civicEconomy$recordApplied(transactionId);
     }
 
-    private static IBankAccount account(UUID playerId) {
-        return bankData().getAccount(playerId);
+    private IBankAccount account(AccountId accountId) {
+        String value = accountId.value();
+        if (value.startsWith(PLAYER_ACCOUNT_PREFIX)) {
+            return bankData().getAccount(playerId(accountId));
+        }
+        return fiscalAccounts.requireAccount(accountId);
+    }
+
+    private static UUID playerId(AccountId accountId) {
+        String value = accountId.value();
+        try {
+            return UUID.fromString(value.substring(PLAYER_ACCOUNT_PREFIX.length()));
+        } catch (IllegalArgumentException failure) {
+            throw new IllegalArgumentException("Invalid LC player account: " + value, failure);
+        }
     }
 
     private static MoneyValue value(MoneyAmount amount) {
         MoneyValue value = CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, amount.minorUnits());
         if (value.isEmpty() && !amount.equals(MoneyAmount.ZERO)) {
-            throw new IllegalStateException("LC main coin chain is unavailable for " + amount.minorUnits()
-                    + " minor units");
+            throw new IllegalStateException(
+                    "LC main coin chain is unavailable for " + amount.minorUnits() + " minor units");
         }
         return value;
     }

@@ -8,7 +8,13 @@ import java.util.Set;
 public final class CompatibilityMatrix {
     public static final Set<String> LC_PROBE_CLASSES = Set.of(
             "io.github.lightman314.lightmanscurrency.api.money.bank.BankAPI",
-            "io.github.lightman314.lightmanscurrency.api.money.bank.IBankAccount");
+            "io.github.lightman314.lightmanscurrency.api.money.bank.IBankAccount",
+            "io.github.lightman314.lightmanscurrency.api.money.bank.reference.BankReference",
+            "io.github.lightman314.lightmanscurrency.api.money.bank.reference.BankReferenceType",
+            "io.github.lightman314.lightmanscurrency.api.money.bank.source.BankAccountSource",
+            "io.github.lightman314.lightmanscurrency.common.bank.BankAccount",
+            "io.github.lightman314.lightmanscurrency.common.data.CustomSaveData",
+            "io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache");
     public static final Set<String> FTB_TEAMS_PROBE_CLASSES = Set.of(
             "dev.ftb.mods.ftbteams.api.FTBTeamsAPI");
     public static final Set<String> FTB_CHUNKS_PROBE_CLASSES = Set.of(

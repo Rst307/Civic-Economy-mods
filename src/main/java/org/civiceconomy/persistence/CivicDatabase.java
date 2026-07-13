@@ -21,6 +21,7 @@ public final class CivicDatabase implements AutoCloseable {
     }
 
     public static CivicDatabase open(Path databaseFile, DatabaseIdentity identity) {
+        loadSqliteDriver();
         try {
             Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
             CivicDatabase database = new CivicDatabase(connection);
@@ -39,6 +40,14 @@ public final class CivicDatabase implements AutoCloseable {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to open Civic database " + databaseFile, failure);
+        }
+    }
+
+    private static void loadSqliteDriver() {
+        try {
+            Class.forName("org.sqlite.JDBC", true, CivicDatabase.class.getClassLoader());
+        } catch (ClassNotFoundException failure) {
+            throw new IllegalStateException("The pinned SQLite JDBC driver is unavailable", failure);
         }
     }
 

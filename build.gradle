@@ -74,6 +74,7 @@ dependencies {
             prefer sqlite_jdbc_version
         }
     }
+    additionalRuntimeClasspath "org.xerial:sqlite-jdbc:${sqlite_jdbc_version}"
 
     compileOnly "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
     localRuntime "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
