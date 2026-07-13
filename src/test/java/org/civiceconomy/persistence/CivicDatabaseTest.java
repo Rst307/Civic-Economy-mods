@@ -26,13 +26,13 @@ class CivicDatabaseTest {
 
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", database.journalMode());
-            assertEquals(3, database.schemaVersion());
+            assertEquals(4, database.schemaVersion());
             assertEquals(identity, database.identity());
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", reopened.journalMode());
-            assertEquals(3, reopened.schemaVersion());
+            assertEquals(4, reopened.schemaVersion());
             assertEquals(identity, reopened.identity());
         }
     }
@@ -59,6 +59,29 @@ class CivicDatabaseTest {
         assertThrows(
                 UnsupportedDatabaseVersionException.class,
                 () -> CivicDatabase.open(databaseFile, identity("4b617458-7f03-4fd2-a94e-4dc37ecbd682")));
+    }
+
+    @Test
+    void schemaThreeDatabaseMigratesToNationRegistryWithoutChangingWorldIdentity() throws Exception {
+        Path databaseFile = temporaryDirectory.resolve("schema-three.sqlite3");
+        DatabaseIdentity identity = identity("178a3c85-36da-4f97-9a4d-34de15e7612d");
+        try (CivicDatabase ignored = CivicDatabase.open(databaseFile, identity)) {}
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE nation_registry");
+            statement.execute("PRAGMA user_version = 3");
+        }
+
+        try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
+            UUID nationId = UUID.fromString("39ca55f7-740d-4521-a1de-f9e5f8302a4c");
+            UUID teamId = UUID.fromString("3fa1dc7d-76d0-4e61-b10f-bf7d1ad99776");
+
+            assertEquals(4, migrated.schemaVersion());
+            assertEquals(identity, migrated.identity());
+            assertEquals(
+                    nationId,
+                    migrated.registerNation(nationId, "migration-test", "register", teamId, 1000L).nationId());
+        }
     }
 
     private static DatabaseIdentity identity(String worldId) {

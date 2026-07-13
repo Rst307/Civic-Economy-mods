@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 3;
+    private static final int SCHEMA_VERSION = 4;
 
     private final Connection connection;
 
@@ -73,6 +73,72 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("ftb_chunks_version"));
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Civic database identity", failure);
+        }
+    }
+
+    public synchronized StoredNation registerNation(
+            UUID nationId,
+            String serviceIdentity,
+            String requestId,
+            UUID ftbTeamId,
+            long registeredAtEpochMillis) {
+        StoredNation replay = nationRegistration(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        StoredNation bound = nationByFtbTeam(ftbTeamId);
+        if (bound != null) {
+            throw new IllegalStateException(
+                    "FTB Team " + ftbTeamId + " is already bound to Nation " + bound.nationId());
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO nation_registry (
+                    nation_id, service_identity, request_id, ftb_team_id, registered_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, nationId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, ftbTeamId.toString());
+            insert.setLong(5, registeredAtEpochMillis);
+            insert.executeUpdate();
+            return nation(nationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to register Nation " + nationId, failure);
+        }
+    }
+
+    public synchronized StoredNation nationRegistration(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_registry WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation registration request", failure);
+        }
+    }
+
+    public synchronized StoredNation nation(UUID nationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_registry WHERE nation_id = ?
+                """)) {
+            query.setString(1, nationId.toString());
+            return readNation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation " + nationId, failure);
+        }
+    }
+
+    public synchronized StoredNation nationByFtbTeam(UUID ftbTeamId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_registry WHERE ftb_team_id = ?
+                """)) {
+            query.setString(1, ftbTeamId.toString());
+            return readNation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read FTB Team binding " + ftbTeamId, failure);
         }
     }
 
@@ -314,6 +380,19 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 3");
             }
+            if (version < 4) {
+                statement.execute("""
+                        CREATE TABLE nation_registry (
+                            nation_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            ftb_team_id TEXT NOT NULL UNIQUE,
+                            registered_at_epoch_millis INTEGER NOT NULL CHECK (registered_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 4");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -387,6 +466,20 @@ public final class CivicDatabase implements AutoCloseable {
     private StoredPaymentTransaction readPayment(PreparedStatement query) throws SQLException {
         try (ResultSet result = query.executeQuery()) {
             return result.next() ? readPayment(result) : null;
+        }
+    }
+
+    private StoredNation readNation(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNation(
+                    UUID.fromString(result.getString("nation_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    result.getLong("registered_at_epoch_millis"));
         }
     }
 

@@ -7,6 +7,10 @@ import dev.ftb.mods.ftbchunks.api.FTBChunksAPI;
 import dev.ftb.mods.ftblibrary.math.ChunkDimPos;
 import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
 import dev.ftb.mods.ftbteams.api.Team;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
@@ -17,8 +21,18 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.integration.ftb.FtbClaimFacts;
 import org.civiceconomy.integration.ftb.FtbChunksAdapter;
+import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
 import org.civiceconomy.integration.ftb.FtbTeamFacts;
 import org.civiceconomy.integration.ftb.FtbTeamsAdapter;
+import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.nation.FtbTeamsNationProvider;
+import org.civiceconomy.nation.NationFacts;
+import org.civiceconomy.nation.NationProvider;
+import org.civiceconomy.nation.NationRegistry;
+import org.civiceconomy.nation.RegisterNation;
+import org.civiceconomy.nation.RegisteredNation;
+import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.persistence.DatabaseIdentity;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -86,6 +100,41 @@ public final class FtbIntegrationGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void ftbNationProviderResolvesOnlyARegisteredTeam(GameTestHelper helper) {
+        Team team = FTBTeamsAPI.api()
+                .getManager()
+                .getTeamByID(TEST_SERVER_TEAM_ID)
+                .orElseGet(() -> createServerTeam(helper));
+        FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+        Path temporaryDirectory = createTemporaryDirectory();
+
+        try (CivicDatabase database = CivicDatabase.open(
+                temporaryDirectory.resolve("civic.sqlite3"),
+                new DatabaseIdentity(
+                        UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
+            NationRegistry registry = new NationRegistry(database, teams);
+            NationProvider provider = new FtbTeamsNationProvider(registry, teams);
+            helper.assertTrue(
+                    provider.findForCitizen(team.getOwner()).isEmpty(),
+                    "an ordinary unregistered FTB Team is not a Nation");
+
+            RegisteredNation registered = registry.register(new RegisterNation(
+                    new ServiceIdentity("civiceconomy-gametest"),
+                    "register-real-ftb-team-" + UUID.randomUUID(),
+                    team.getId()));
+            NationFacts facts = provider.find(registered.nationId()).orElseThrow();
+
+            helper.assertFalse(
+                    facts.nationId().value().equals(team.getId()), "NationId is not the FTB Team UUID");
+            helper.assertValueEqual(team.getOwner(), facts.headId(), "temporary Nation head");
+            helper.assertValueEqual(team.getMembers(), facts.citizens(), "temporary Nation citizens");
+        } finally {
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        helper.succeed();
+    }
+
     private static Team createServerTeam(GameTestHelper helper) {
         try {
             return FTBTeamsAPI.api()
@@ -98,6 +147,28 @@ public final class FtbIntegrationGameTests {
                             TEST_SERVER_TEAM_ID);
         } catch (CommandSyntaxException failure) {
             throw new IllegalStateException("Unable to create the FTB Teams GameTest fixture", failure);
+        }
+    }
+
+    private static Path createTemporaryDirectory() {
+        try {
+            return Files.createTempDirectory("civiceconomy-ftb-nation-gametest-");
+        } catch (IOException failure) {
+            throw new IllegalStateException("Unable to create Civic FTB Nation GameTest directory", failure);
+        }
+    }
+
+    private static void deleteTemporaryDirectory(Path directory) {
+        try (var files = Files.walk(directory)) {
+            files.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException failure) {
+                    throw new IllegalStateException("Unable to delete Civic FTB Nation GameTest file " + path, failure);
+                }
+            });
+        } catch (IOException failure) {
+            throw new IllegalStateException("Unable to clean Civic FTB Nation GameTest directory", failure);
         }
     }
 }
