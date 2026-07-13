@@ -3,11 +3,13 @@ build/
 out/
 run/
 logs/
-
+run-*/
 .idea/
 *.iml
+*.ipr
+*.iws
 .vscode/
-
+libs/
 *.log
 hs_err_pid*
 replay_pid*
