@@ -26,13 +26,13 @@ class CivicDatabaseTest {
 
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", database.journalMode());
-            assertEquals(5, database.schemaVersion());
+            assertEquals(6, database.schemaVersion());
             assertEquals(identity, database.identity());
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", reopened.journalMode());
-            assertEquals(5, reopened.schemaVersion());
+            assertEquals(6, reopened.schemaVersion());
             assertEquals(identity, reopened.identity());
         }
     }
@@ -70,6 +70,7 @@ class CivicDatabaseTest {
                 Statement statement = connection.createStatement()) {
             statement.execute("DROP TABLE citizenship_period");
             statement.execute("DROP TABLE nation_registry");
+            statement.execute("DROP TABLE online_time_interval");
             statement.execute("PRAGMA user_version = 3");
         }
 
@@ -77,7 +78,7 @@ class CivicDatabaseTest {
             UUID nationId = UUID.fromString("39ca55f7-740d-4521-a1de-f9e5f8302a4c");
             UUID teamId = UUID.fromString("3fa1dc7d-76d0-4e61-b10f-bf7d1ad99776");
 
-            assertEquals(5, migrated.schemaVersion());
+            assertEquals(6, migrated.schemaVersion());
             assertEquals(identity, migrated.identity());
             assertEquals(
                     nationId,

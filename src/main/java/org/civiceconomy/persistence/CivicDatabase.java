@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 5;
+    private static final int SCHEMA_VERSION = 6;
 
     private final Connection connection;
 
@@ -253,6 +253,87 @@ public final class CivicDatabase implements AutoCloseable {
             return List.copyOf(history);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Citizenship history for player " + playerId, failure);
+        }
+    }
+
+    public synchronized StoredOnlineInterval recordOnlineTime(
+            UUID intervalId,
+            String serviceIdentity,
+            String requestId,
+            UUID playerId,
+            long startedAtEpochMillis,
+            long endedAtEpochMillis) {
+        StoredOnlineInterval replay = onlineTimeRegistration(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO online_time_interval (
+                    interval_id, service_identity, request_id, player_id,
+                    started_at_epoch_millis, ended_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, intervalId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, playerId.toString());
+            insert.setLong(5, startedAtEpochMillis);
+            insert.setLong(6, endedAtEpochMillis);
+            insert.executeUpdate();
+            return onlineTimeInterval(intervalId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to record online time for player " + playerId, failure);
+        }
+    }
+
+    public synchronized StoredOnlineInterval onlineTimeRegistration(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM online_time_interval
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readOnlineInterval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read online-time request", failure);
+        }
+    }
+
+    public synchronized List<StoredOnlineInterval> onlineTimeHistory(UUID playerId) {
+        List<StoredOnlineInterval> history = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM online_time_interval
+                WHERE player_id = ?
+                ORDER BY started_at_epoch_millis, ended_at_epoch_millis, interval_id
+                """)) {
+            query.setString(1, playerId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    history.add(readOnlineInterval(result));
+                }
+            }
+            return List.copyOf(history);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read online-time history for player " + playerId, failure);
+        }
+    }
+
+    public synchronized StoredOnlineInterval overlappingOnlineTime(
+            UUID playerId, long startedAtEpochMillis, long endedAtEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM online_time_interval
+                WHERE player_id = ?
+                  AND started_at_epoch_millis < ?
+                  AND ended_at_epoch_millis > ?
+                ORDER BY started_at_epoch_millis
+                LIMIT 1
+                """)) {
+            query.setString(1, playerId.toString());
+            query.setLong(2, endedAtEpochMillis);
+            query.setLong(3, startedAtEpochMillis);
+            return readOnlineInterval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to check online-time overlap for player " + playerId, failure);
         }
     }
 
@@ -532,6 +613,26 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 5");
             }
+            if (version < 6) {
+                statement.execute("""
+                        CREATE TABLE online_time_interval (
+                            interval_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            player_id TEXT NOT NULL,
+                            started_at_epoch_millis INTEGER NOT NULL CHECK (started_at_epoch_millis >= 0),
+                            ended_at_epoch_millis INTEGER NOT NULL CHECK (
+                                ended_at_epoch_millis > started_at_epoch_millis
+                            ),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX online_time_interval_player_time
+                        ON online_time_interval (player_id, started_at_epoch_millis, ended_at_epoch_millis)
+                        """);
+                statement.execute("PRAGMA user_version = 6");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -652,6 +753,33 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getString("join_request_id"),
                 result.getString("leave_service_identity"),
                 result.getString("leave_request_id"));
+    }
+
+    private StoredOnlineInterval onlineTimeInterval(UUID intervalId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM online_time_interval WHERE interval_id = ?
+                """)) {
+            query.setString(1, intervalId.toString());
+            return readOnlineInterval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read online-time interval " + intervalId, failure);
+        }
+    }
+
+    private StoredOnlineInterval readOnlineInterval(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? readOnlineInterval(result) : null;
+        }
+    }
+
+    private static StoredOnlineInterval readOnlineInterval(ResultSet result) throws SQLException {
+        return new StoredOnlineInterval(
+                UUID.fromString(result.getString("interval_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("player_id")),
+                result.getLong("started_at_epoch_millis"),
+                result.getLong("ended_at_epoch_millis"));
     }
 
     private static StoredPaymentTransaction readPayment(ResultSet result) throws SQLException {
