@@ -7,6 +7,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.event.RegisterGameTestsEvent;
 import org.civiceconomy.compat.CompatibilityReport;
 import org.civiceconomy.compat.CompatibilityScanner;
+import org.civiceconomy.gametest.FtbIntegrationGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyFiscalAccountsGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyPlayerPaymentsGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
@@ -53,6 +54,7 @@ public final class CivicEconomy {
 
     private static void registerGameTests(RegisterGameTestsEvent event) {
         LOGGER.info("Registering Civic Economy GameTests");
+        event.register(FtbIntegrationGameTests.class);
         event.register(LightmansCurrencyFiscalAccountsGameTests.class);
         event.register(LightmansCurrencyPlayerPaymentsGameTests.class);
     }

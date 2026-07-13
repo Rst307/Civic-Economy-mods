@@ -29,10 +29,14 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Generalized the LC payment adapter to transfer among player accounts and Civic fiscal accounts while retaining the LC transaction marker.
 - Added a real LC + real SQLite GameTest that funds a National Treasury, creates a Reservation, injects the ambiguous external-payment crash window, recovers through `PaymentCoordinator`, and pays a player exactly once.
 - Explicitly loads the pinned SQLite JDBC driver and places it on NeoForge development-run additional runtime classpaths as well as in the built jar-in-jar artifact.
+- Added server-only FTB Teams and FTB Chunks adapters compiled against the exact pinned artifacts.
+- `FtbTeamsAdapter` returns immutable facts for valid FTB Teams, including stable team UUID, effective team UUID, owner, members, and team type; it never treats an FTB Team as a Nation.
+- `FtbChunksAdapter` returns exact current claim ownership, dimension, chunk position, claim time, requested force-load state, and actual force-load state.
+- Expanded runtime class probes for every FTB API class used by the adapters and added real GameTests for one server-team query and one claim/query/unclaim cycle.
 
 ## In progress
 
-- Add method-level FTB Teams and FTB Chunks adapters and GameTests.
+- Add stable `NationId`, nation registration, and strict one-to-one FTB Team binding.
 
 ## Not yet completed
 
@@ -71,7 +75,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,390,196 bytes, SHA-256 `B37919893D5C7273E097FDDCA2180EE26BD665371A8BC5C5C58F41592FAA9FF0`. This is not yet a release artifact.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,400,440 bytes, SHA-256 `8718071BA04E62767F9D338BDACC072AB70A70DC4997435CFF8CACC9CA2AE9CA`. This is not yet a release artifact.
 
 ### SQLite integration
 
@@ -91,7 +95,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 ### Real Lightman's Currency integration
 
 - `LightmansCurrencyPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
-- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed four required GameTests against real LC `1.21-2.3.0.5`.
+- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed six required GameTests against the real pinned LC/FTB runtime.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
@@ -99,6 +103,14 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - The treasury settlement test used a real temporary SQLite database and real LC accounts. Funding player `1000 → 300`, National Treasury `0 → 700 → 400`, and recipient `25 → 325`; ambiguous recovery finished `CIVIC_COMMITTED` and cleared the Reservation without a second economic effect.
 - Repeated GameTest runs honor markers persisted by earlier runs; each isolated test therefore uses a fresh transaction UUID while replaying it twice within that run.
 - LC logs `GameProfileCache` errors when its synthetic offline player accounts are generated under the headless GameTest server, whose profile cache is null. The required test still passes and normal dedicated-server startup does not show this condition.
+
+### Real FTB Teams and FTB Chunks integration
+
+- Exact artifact bytecode inspection with `javap` confirmed the adapter signatures in FTB Teams `2101.1.10` and FTB Chunks `2101.1.20`.
+- Official source inspection confirmed `TeamManager.getTeamForPlayerID` returns the effective party team, while `getPlayerTeamForPlayerID` always returns the personal team.
+- Official FTB Chunks source inspection confirmed `ChunkTeamData.claim(..., checkOnly)` uses `true` for simulation and that `ClaimedChunkEvent` before-events may be simulated and must not mutate Civic state.
+- The FTB Teams GameTest created or reused a real fixed server team and verified exact UUID, effective UUID, owner, members, and team type through `FtbTeamsAdapter`.
+- During the RED/GREEN run, `checkOnly=true` returned a successful simulation without a claim. The final GameTest uses `checkOnly=false`, reads the real claim through `FtbChunksAdapter`, verifies ownership/position/time/force-load facts, and unclaims it in cleanup.
 
 ### Dedicated-server runtime
 
@@ -110,6 +122,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Minecraft logged `Done (4.165s)!` before the monitored task-owned process tree was stopped.
 - After the Civic fiscal-account slice, `gradlew.bat runServer --no-daemon --console=plain` again reached `Done (3.389s)!` with Create absent and production scoring disabled.
 - After the same slice, `gradlew.bat runServer --no-daemon --console=plain -PincludeCreate=true` loaded Create `6.0.6`, enabled production scoring, and reached `Done (3.061s)!`.
+- After the FTB adapter slice, the no-Create dedicated server reached `Done (3.491s)!` and the Create `6.0.6` server reached `Done (3.285s)!`.
 
 ### Environment note
 
@@ -118,7 +131,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Known defects and risks
 
-- Probe class presence does not yet prove method-level API compatibility or event semantics.
+- The startup compatibility probe still checks class presence rather than reflective method descriptors; method/event semantics are currently evidenced by exact compilation, source inspection, and real GameTests.
+- FTB claim/team event subscriptions are not yet wired; current adapters are conservative server-side queries only. In particular, future `BEFORE_CLAIM` handling must remain side-effect-free because FTB fires it for simulations.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
 - The treasury GameTest proves real LC/SQLite recovery inside one running server after the ambiguous adapter window. It does not yet prove process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files; durable per-account transfer phase evidence or compensation is still required before release.
 - Runtime-generated `run/` data is local evidence and must never be committed.
@@ -126,4 +140,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Implement exact method-level FTB Teams and FTB Chunks adapters with real artifact/source evidence and GameTests, then begin stable `NationId` registration and strict one-to-one FTB Team binding.
+Implement the persistent stable `NationId` registry and strict one-to-one FTB Team binding, then expose it behind the first temporary FTB-backed `NationProvider` behavior.

@@ -16,10 +16,15 @@ public final class CompatibilityMatrix {
             "io.github.lightman314.lightmanscurrency.common.data.CustomSaveData",
             "io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache");
     public static final Set<String> FTB_TEAMS_PROBE_CLASSES = Set.of(
-            "dev.ftb.mods.ftbteams.api.FTBTeamsAPI");
+            "dev.ftb.mods.ftbteams.api.FTBTeamsAPI",
+            "dev.ftb.mods.ftbteams.api.Team",
+            "dev.ftb.mods.ftbteams.api.TeamManager");
     public static final Set<String> FTB_CHUNKS_PROBE_CLASSES = Set.of(
             "dev.ftb.mods.ftbchunks.api.FTBChunksAPI",
-            "dev.ftb.mods.ftbchunks.api.ClaimedChunkManager");
+            "dev.ftb.mods.ftbchunks.api.ChunkTeamData",
+            "dev.ftb.mods.ftbchunks.api.ClaimedChunk",
+            "dev.ftb.mods.ftbchunks.api.ClaimedChunkManager",
+            "dev.ftb.mods.ftbchunks.api.event.ClaimedChunkEvent");
     public static final Set<String> CREATE_PROBE_CLASSES = Set.of(
             "com.simibubi.create.content.processing.recipe.ProcessingRecipe");
 

@@ -19,6 +19,8 @@ class DependencyJarProbeTest {
             "io/github/lightman314/lightmanscurrency/common/data/CustomSaveData.class",
             "io/github/lightman314/lightmanscurrency/common/data/types/BankDataCache.class",
             "dev/ftb/mods/ftbteams/api/FTBTeamsAPI.class",
+            "dev/ftb/mods/ftbteams/api/Team.class",
+            "dev/ftb/mods/ftbteams/api/TeamManager.class",
             "dev/ftb/mods/ftbchunks/api/FTBChunksAPI.class",
             "dev/ftb/mods/ftbchunks/api/ClaimedChunkManager.class",
             "dev/ftb/mods/ftbchunks/api/ClaimedChunk.class",
