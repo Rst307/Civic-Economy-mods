@@ -20,6 +20,7 @@ The repository is at the specification baseline. The first implementation slice 
 - a Minecraft 1.21.1 NeoForge/Java 21 project skeleton;
 - exact dependency probes for Lightman’s Currency, FTB Teams, FTB Chunks, and optional Create;
 - runtime compatibility whitelist and fail-closed behavior;
+- an integrated-server debug-world harness that is disabled by default and visibly isolated from production data;
 - minimal automated tests or GameTests for the probes;
 - written evidence of commands, versions, and observed integration boundaries.
 
@@ -35,6 +36,7 @@ Do not implement treasury, escrow, minting, territory charging, national-strengt
 - Cross-mod writes use durable state machines, idempotency, and compensation; do not describe them as a shared atomic transaction.
 - Unknown LC or FTB compatibility fails closed. Unknown Create compatibility disables production scoring without disabling the fiscal core.
 - Create accounting is conservative: missing valid production is safer than crediting unverifiable production.
+- The release JAR may expose single-player debug tools only through a server-authoritative, world-scoped debug marker. Debug writes must be unavailable in normal worlds and dedicated servers by default.
 - MVP excludes automatic tax rates, loans, interest, bonds, and exchange rates.
 
 ## Domain documentation
@@ -53,6 +55,7 @@ Do not implement treasury, escrow, minting, territory charging, national-strengt
 - Keep server-only authority and client/server separation explicit.
 - Avoid blocking the Minecraft server thread with SQLite, network, or full-world scans.
 - Treat dependency version changes as compatibility work requiring probe reruns.
+- Test debug commands in an integrated single-player server and verify that the same write commands are rejected in a normal world and an unapproved dedicated server.
 
 ## Git scope
 
