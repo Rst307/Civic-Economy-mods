@@ -16,6 +16,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added a real SQLite persistence module with WAL, foreign keys, busy timeout, schema versioning, and persisted world/dependency identity.
 - SQLite open fails closed for a foreign world UUID or an unknown schema version.
 - Bundled exact `sqlite-jdbc` `3.50.3.0` in the NeoForge JAR using jar-in-jar metadata.
+- Added checked, nonnegative LC-minor-unit `MoneyAmount` values.
+- Added SQLite schema v2 durable Reservations with service-scoped `requestId` idempotency, payload-conflict rejection, available-balance calculation, and per-account concurrency control.
 
 ## In progress
 
@@ -26,7 +28,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 - SQLite migrations beyond schema v1, online backups, restore validation, transaction journal, and compensation recovery.
 - Stable `NationId`, `NationProvider`, FTB Teams binding, citizenship, roles, capital, lifecycle, and nation registration.
-- National Treasury and Organization Fiscal Account LC adapters; budgets, Reservations, Escrow, transfers, refunds, withdrawals, approvals, ledger, audit, and service identities.
+- National Treasury and Organization Fiscal Account LC adapters; budgets, Reservation settlement/release, Escrow, transfers, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
@@ -65,6 +67,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Verified WAL mode, schema v1, persisted identity across close/reopen, foreign-world rejection, and unknown-schema rejection.
 - These are real database integration tests, not mocks; backup/restore and crash recovery remain unverified.
 
+### Fiscal domain and database integration
+
+- `MoneyAmountTest` verifies negative rejection, checked overflow, nonnegative subtraction, and exact LC minor-unit arithmetic.
+- `FiscalLedgerTest` uses real temporary SQLite databases to verify durable Reservation replay, changed-balance replay stability, insufficient-funds rejection without a row, conflicting-payload rejection, and active/available balances.
+- The concurrent oversubscription test passed ten repeated runs: two simultaneous 700-unit holds against 1,000 units produce exactly one success and one active 700-unit Reservation.
+- LC balances are currently supplied through a test adapter; no claim of real LC debit, credit, or idempotent payment is made yet.
+
 ### Dedicated-server runtime
 
 - `gradlew.bat runServer` started a real NeoForge dedicated server with LC `1.21-2.3.0.5`, FTB Teams `2101.1.10`, FTB Chunks `2101.1.20`, FTB Library `2101.1.32`, Architectury `13.0.8`, and no Create.
@@ -87,4 +96,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Deepen the dependency probes to method-level LC account operations, FTB Teams identity queries, FTB Chunks claim/event seams, and Create fixed-machine recipe completion seams.
+Add durable Reservation release/settlement and the PREPARED → EXTERNAL_APPLIED → CIVIC_COMMITTED / COMPENSATING transaction states before implementing the version-locked LC write adapter.

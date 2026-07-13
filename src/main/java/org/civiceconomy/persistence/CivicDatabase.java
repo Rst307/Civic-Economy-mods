@@ -10,7 +10,7 @@ import java.sql.Statement;
 import java.util.UUID;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
 
     private final Connection connection;
 
@@ -65,6 +65,55 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredReservation reserve(
+            String serviceIdentity,
+            String requestId,
+            String sourceAccount,
+            long amountMinorUnits,
+            String purpose) {
+        StoredReservation existing = reservation(serviceIdentity, requestId);
+        if (existing != null) {
+            return existing;
+        }
+        UUID reservationId = UUID.randomUUID();
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO fiscal_reservation (
+                    reservation_id, service_identity, request_id, source_account, amount_minor_units, purpose, state
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                """)) {
+            insert.setString(1, reservationId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, sourceAccount);
+            insert.setLong(5, amountMinorUnits);
+            insert.setString(6, purpose);
+            insert.executeUpdate();
+            return new StoredReservation(
+                    reservationId, serviceIdentity, requestId, sourceAccount, amountMinorUnits, purpose);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to create Reservation", failure);
+        }
+    }
+
+    public synchronized StoredReservation reservation(String serviceIdentity, String requestId) {
+        return findReservation(serviceIdentity, requestId);
+    }
+
+    public synchronized long activeReservedMinorUnits(String sourceAccount) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT COALESCE(SUM(amount_minor_units), 0)
+                FROM fiscal_reservation
+                WHERE source_account = ? AND state = 'ACTIVE'
+                """)) {
+            query.setString(1, sourceAccount);
+            try (ResultSet result = query.executeQuery()) {
+                return result.getLong(1);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to total active Reservations", failure);
+        }
+    }
+
     @Override
     public void close() {
         try {
@@ -84,7 +133,7 @@ public final class CivicDatabase implements AutoCloseable {
 
     private void requireSupportedVersion() {
         int actualVersion = schemaVersion();
-        if (actualVersion != 0 && actualVersion != SCHEMA_VERSION) {
+        if (actualVersion < 0 || actualVersion > SCHEMA_VERSION) {
             throw new UnsupportedDatabaseVersionException(actualVersion, SCHEMA_VERSION);
         }
     }
@@ -92,28 +141,51 @@ public final class CivicDatabase implements AutoCloseable {
     private void initialize(DatabaseIdentity identity) throws SQLException {
         connection.setAutoCommit(false);
         try (Statement statement = connection.createStatement()) {
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS civic_identity (
-                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                        world_id TEXT NOT NULL,
-                        civic_version TEXT NOT NULL,
-                        lc_version TEXT NOT NULL,
-                        ftb_teams_version TEXT NOT NULL,
-                        ftb_chunks_version TEXT NOT NULL
-                    )
-                    """);
-            statement.execute("PRAGMA user_version = " + SCHEMA_VERSION);
-            try (PreparedStatement insert = connection.prepareStatement("""
-                    INSERT OR IGNORE INTO civic_identity (
-                        singleton, world_id, civic_version, lc_version, ftb_teams_version, ftb_chunks_version
-                    ) VALUES (1, ?, ?, ?, ?, ?)
-                    """)) {
-                insert.setString(1, identity.worldId().toString());
-                insert.setString(2, identity.civicVersion());
-                insert.setString(3, identity.lightmansCurrencyVersion());
-                insert.setString(4, identity.ftbTeamsVersion());
-                insert.setString(5, identity.ftbChunksVersion());
-                insert.executeUpdate();
+            int version = queryInteger("PRAGMA user_version");
+            if (version < 1) {
+                statement.execute("""
+                        CREATE TABLE civic_identity (
+                            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                            world_id TEXT NOT NULL,
+                            civic_version TEXT NOT NULL,
+                            lc_version TEXT NOT NULL,
+                            ftb_teams_version TEXT NOT NULL,
+                            ftb_chunks_version TEXT NOT NULL
+                        )
+                        """);
+                try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO civic_identity (
+                            singleton, world_id, civic_version, lc_version, ftb_teams_version, ftb_chunks_version
+                        ) VALUES (1, ?, ?, ?, ?, ?)
+                        """)) {
+                    insert.setString(1, identity.worldId().toString());
+                    insert.setString(2, identity.civicVersion());
+                    insert.setString(3, identity.lightmansCurrencyVersion());
+                    insert.setString(4, identity.ftbTeamsVersion());
+                    insert.setString(5, identity.ftbChunksVersion());
+                    insert.executeUpdate();
+                }
+                statement.execute("PRAGMA user_version = 1");
+            }
+            if (version < 2) {
+                statement.execute("""
+                        CREATE TABLE fiscal_reservation (
+                            reservation_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            source_account TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL CHECK (amount_minor_units > 0),
+                            purpose TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN ('ACTIVE', 'RELEASED', 'SETTLED')),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_reservation_active_account
+                        ON fiscal_reservation (source_account)
+                        WHERE state = 'ACTIVE'
+                        """);
+                statement.execute("PRAGMA user_version = 2");
             }
             connection.commit();
         } catch (SQLException failure) {
@@ -121,6 +193,31 @@ public final class CivicDatabase implements AutoCloseable {
             throw failure;
         } finally {
             connection.setAutoCommit(true);
+        }
+    }
+
+    private StoredReservation findReservation(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT reservation_id, service_identity, request_id, source_account, amount_minor_units, purpose
+                FROM fiscal_reservation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredReservation(
+                        UUID.fromString(result.getString("reservation_id")),
+                        result.getString("service_identity"),
+                        result.getString("request_id"),
+                        result.getString("source_account"),
+                        result.getLong("amount_minor_units"),
+                        result.getString("purpose"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Reservation", failure);
         }
     }
 

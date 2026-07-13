@@ -26,13 +26,13 @@ class CivicDatabaseTest {
 
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", database.journalMode());
-            assertEquals(1, database.schemaVersion());
+            assertEquals(2, database.schemaVersion());
             assertEquals(identity, database.identity());
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", reopened.journalMode());
-            assertEquals(1, reopened.schemaVersion());
+            assertEquals(2, reopened.schemaVersion());
             assertEquals(identity, reopened.identity());
         }
     }
