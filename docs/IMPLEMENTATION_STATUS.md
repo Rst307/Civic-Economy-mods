@@ -38,16 +38,19 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added the stable `NationProvider` interface and a temporary FTB Teams-backed implementation that exposes current head/citizen facts without exposing the FTB Team UUID as the Nation identity.
 - Ordinary unregistered FTB Teams remain non-Nations. If a registered Nation's bound FTB Team becomes unavailable, provider lookup fails closed without deleting the stable Nation or its history.
 - Added an exact FTB-to-domain team-directory adapter plus a real FTB Teams + SQLite GameTest proving registered-team resolution and `NationId != FTB Team UUID`.
-- Added a real schema-v3-to-v4 SQLite migration test that preserves the world/dependency identity and produces a usable Nation registry.
+- Added a real schema-v3-through-current SQLite migration test that preserves the world/dependency identity and produces usable Nation and Citizenship registries.
+- Raised the SQLite schema to v5 with appendable Citizenship periods, a partial unique index enforcing one active Nation per player, and durable join/leave request identities.
+- Added a persistent Citizenship registry with server-clock timestamps, service-scoped join and leave replay, changed-payload rejection, unknown-Nation rejection, active-Citizenship conflicts, nation-specific stale-leave protection, ordered history, and a configurable transfer cooldown.
+- Leaving Citizenship immediately closes the active period, so subsequent permission and population modules can fail closed without waiting for historical cleanup. A player can join another Nation only after the configured cooldown has fully elapsed.
 
 ## In progress
 
-- Add the gameplay Nation-registration policy: team-head authorization, configurable minimum valid citizens, stable Citizenship history, unique nationality, and transfer cooldown.
+- Add the gameplay Nation-registration policy: team-head authorization, configurable minimum eligible citizens, atomic founding Citizenship assignment, and FTB membership reconciliation.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v4, online backups, restore validation, compensation execution, and recovery audit records.
-- Citizenship history, Effective Citizen online-time accounting, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
+- SQLite migrations beyond schema v5, online backups, restore validation, compensation execution, and recovery audit records.
+- Effective Citizen online-time accounting, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
 - Player-bank balance adapter; budgets, Reservation release/partial settlement, Escrow, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
@@ -81,12 +84,12 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,418,235 bytes, SHA-256 `0C824F4AC15F97DE13A5BD459BF53D47FF364089250B100D08126E97D6F9C7D8`. This is not yet a release artifact.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,432,329 bytes, SHA-256 `11237A2DEAB4C62908EFA17B3A13376A18D9DBE6B88052FD32809D525053B5CF`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v4, persisted identity across close/reopen, v3-to-v4 migration, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v5, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through the current Nation and Citizenship tables, foreign-world rejection, and unknown-schema rejection.
 - These are real database integration tests, not mocks; backup/restore and crash recovery remain unverified.
 
 ### Fiscal domain and database integration
@@ -120,6 +123,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Nation registry tests use real temporary on-disk SQLite databases. They verify stable replay across reopen, distinct Nation IDs for distinct teams, request-payload conflicts, unknown-team rejection without a row, and strict one-to-one binding.
 - Nation provider tests use an in-memory adapter only at the true external FTB seam. They verify that unregistered teams are not Nations, current head/member facts are refreshed, registered citizens resolve to the stable Nation ID, and a missing bound team fails closed without erasing the Nation.
 - The seventh GameTest uses the real pinned FTB Teams runtime plus a real temporary SQLite database. It verifies that the temporary provider does not recognize the FTB fixture before registration, then resolves it after registration while keeping the Civic `NationId` distinct from the FTB Team UUID.
+- Citizenship tests use real temporary on-disk SQLite databases. They verify join and leave replay across reopen, request-payload conflicts, unknown-Nation rejection, one active Citizenship per player, stale-leave rejection, ordered historical periods, cooldown rejection before expiry, and transfer success exactly at expiry.
 
 ### Dedicated-server runtime
 
@@ -134,6 +138,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the FTB adapter slice, the no-Create dedicated server reached `Done (3.491s)!` and the Create `6.0.6` server reached `Done (3.285s)!`.
 - After the Nation registry/provider slice, the no-Create dedicated server reached `Done (3.441s)!`; Civic reported Create absent and fiscal-core startup enabled.
 - The same Nation build with Create `6.0.6` reached `Done (3.402s)!`; Civic reported Create production scoring enabled.
+- After the Citizenship slice, the no-Create dedicated server reached `Done (3.443s)!` and the Create `6.0.6` server reached `Done (3.293s)!`, with the same compatibility behavior.
 
 ### Environment note
 
@@ -144,7 +149,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 - The startup compatibility probe still checks class presence rather than reflective method descriptors; method/event semantics are currently evidenced by exact compilation, source inspection, and real GameTests.
 - FTB claim/team event subscriptions are not yet wired; current adapters are conservative server-side queries only. In particular, future `BEFORE_CLAIM` handling must remain side-effect-free because FTB fires it for simulations.
-- Temporary provider citizens are current FTB Team members, not persisted Citizenship or Effective Citizen records. They must not be used for unique-nationality enforcement, transfer cooldown, or National Strength until those domain slices are implemented.
+- Temporary provider citizens are still current FTB Team members, while formal Citizenship now lives in the persistent registry. The provider and FTB membership events are not yet reconciled to that registry, and neither raw membership nor Citizenship alone is an Effective Citizen without rolling online-time evidence.
 - `NationRegistry.register` is currently the durable registration primitive. No gameplay command yet proves the caller is the FTB Team head or enforces the configurable minimum valid-citizen threshold.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
@@ -154,4 +159,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Implement Nation-registration eligibility and persistent Citizenship history, then derive Effective Citizen contribution from server-observed online time without treating raw FTB membership as population.
+Implement team-head-authorized Nation registration with configurable founding eligibility and atomic initial Citizenship assignment, then reconcile later FTB membership changes without treating raw membership as Effective Citizen population.

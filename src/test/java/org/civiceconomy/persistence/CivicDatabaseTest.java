@@ -26,13 +26,13 @@ class CivicDatabaseTest {
 
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", database.journalMode());
-            assertEquals(4, database.schemaVersion());
+            assertEquals(5, database.schemaVersion());
             assertEquals(identity, database.identity());
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", reopened.journalMode());
-            assertEquals(4, reopened.schemaVersion());
+            assertEquals(5, reopened.schemaVersion());
             assertEquals(identity, reopened.identity());
         }
     }
@@ -62,12 +62,13 @@ class CivicDatabaseTest {
     }
 
     @Test
-    void schemaThreeDatabaseMigratesToNationRegistryWithoutChangingWorldIdentity() throws Exception {
+    void schemaThreeDatabaseMigratesThroughCurrentSchemaWithoutChangingWorldIdentity() throws Exception {
         Path databaseFile = temporaryDirectory.resolve("schema-three.sqlite3");
         DatabaseIdentity identity = identity("178a3c85-36da-4f97-9a4d-34de15e7612d");
         try (CivicDatabase ignored = CivicDatabase.open(databaseFile, identity)) {}
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE citizenship_period");
             statement.execute("DROP TABLE nation_registry");
             statement.execute("PRAGMA user_version = 3");
         }
@@ -76,11 +77,22 @@ class CivicDatabaseTest {
             UUID nationId = UUID.fromString("39ca55f7-740d-4521-a1de-f9e5f8302a4c");
             UUID teamId = UUID.fromString("3fa1dc7d-76d0-4e61-b10f-bf7d1ad99776");
 
-            assertEquals(4, migrated.schemaVersion());
+            assertEquals(5, migrated.schemaVersion());
             assertEquals(identity, migrated.identity());
             assertEquals(
                     nationId,
                     migrated.registerNation(nationId, "migration-test", "register", teamId, 1000L).nationId());
+            UUID playerId = UUID.fromString("b48640d2-1752-49de-9a9b-0f3219dfca4c");
+            assertEquals(
+                    playerId,
+                    migrated.joinCitizenship(
+                                    UUID.fromString("9f88a122-c57e-48c6-b76a-ddc9f4696fc1"),
+                                    "migration-test",
+                                    "join",
+                                    playerId,
+                                    nationId,
+                                    2000L)
+                            .playerId());
         }
     }
 

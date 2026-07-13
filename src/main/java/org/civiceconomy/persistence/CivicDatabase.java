@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 4;
+    private static final int SCHEMA_VERSION = 5;
 
     private final Connection connection;
 
@@ -139,6 +139,120 @@ public final class CivicDatabase implements AutoCloseable {
             return readNation(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read FTB Team binding " + ftbTeamId, failure);
+        }
+    }
+
+    public synchronized StoredCitizenship joinCitizenship(
+            UUID citizenshipId,
+            String serviceIdentity,
+            String requestId,
+            UUID playerId,
+            UUID nationId,
+            long joinedAtEpochMillis) {
+        StoredCitizenship replay = citizenshipJoin(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO citizenship_period (
+                    citizenship_id, player_id, nation_id, joined_at_epoch_millis,
+                    join_service_identity, join_request_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, citizenshipId.toString());
+            insert.setString(2, playerId.toString());
+            insert.setString(3, nationId.toString());
+            insert.setLong(4, joinedAtEpochMillis);
+            insert.setString(5, serviceIdentity);
+            insert.setString(6, requestId);
+            insert.executeUpdate();
+            return citizenship(citizenshipId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to join Citizenship for player " + playerId, failure);
+        }
+    }
+
+    public synchronized StoredCitizenship citizenshipJoin(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_period
+                WHERE join_service_identity = ? AND join_request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readCitizenship(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Citizenship join request", failure);
+        }
+    }
+
+    public synchronized StoredCitizenship currentCitizenship(UUID playerId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_period
+                WHERE player_id = ? AND ended_at_epoch_millis IS NULL
+                """)) {
+            query.setString(1, playerId.toString());
+            return readCitizenship(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read current Citizenship for player " + playerId, failure);
+        }
+    }
+
+    public synchronized StoredCitizenship leaveCitizenship(
+            UUID citizenshipId,
+            String serviceIdentity,
+            String requestId,
+            long endedAtEpochMillis) {
+        StoredCitizenship replay = citizenshipLeave(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE citizenship_period
+                SET ended_at_epoch_millis = ?, leave_service_identity = ?, leave_request_id = ?
+                WHERE citizenship_id = ? AND ended_at_epoch_millis IS NULL
+                """)) {
+            update.setLong(1, endedAtEpochMillis);
+            update.setString(2, serviceIdentity);
+            update.setString(3, requestId);
+            update.setString(4, citizenshipId.toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException("Citizenship is not active: " + citizenshipId);
+            }
+            return citizenship(citizenshipId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to leave Citizenship " + citizenshipId, failure);
+        }
+    }
+
+    public synchronized StoredCitizenship citizenshipLeave(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_period
+                WHERE leave_service_identity = ? AND leave_request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readCitizenship(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Citizenship leave request", failure);
+        }
+    }
+
+    public synchronized List<StoredCitizenship> citizenshipHistory(UUID playerId) {
+        List<StoredCitizenship> history = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_period
+                WHERE player_id = ?
+                ORDER BY joined_at_epoch_millis, citizenship_id
+                """)) {
+            query.setString(1, playerId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    history.add(readCitizenship(result));
+                }
+            }
+            return List.copyOf(history);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Citizenship history for player " + playerId, failure);
         }
     }
 
@@ -393,6 +507,31 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 4");
             }
+            if (version < 5) {
+                statement.execute("""
+                        CREATE TABLE citizenship_period (
+                            citizenship_id TEXT PRIMARY KEY,
+                            player_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            joined_at_epoch_millis INTEGER NOT NULL CHECK (joined_at_epoch_millis >= 0),
+                            ended_at_epoch_millis INTEGER CHECK (
+                                ended_at_epoch_millis IS NULL OR ended_at_epoch_millis >= joined_at_epoch_millis
+                            ),
+                            join_service_identity TEXT NOT NULL,
+                            join_request_id TEXT NOT NULL,
+                            leave_service_identity TEXT,
+                            leave_request_id TEXT,
+                            UNIQUE (join_service_identity, join_request_id),
+                            UNIQUE (leave_service_identity, leave_request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX citizenship_one_active_nation_per_player
+                        ON citizenship_period (player_id)
+                        WHERE ended_at_epoch_millis IS NULL
+                        """);
+                statement.execute("PRAGMA user_version = 5");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -481,6 +620,38 @@ public final class CivicDatabase implements AutoCloseable {
                     UUID.fromString(result.getString("ftb_team_id")),
                     result.getLong("registered_at_epoch_millis"));
         }
+    }
+
+    private StoredCitizenship citizenship(UUID citizenshipId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_period WHERE citizenship_id = ?
+                """)) {
+            query.setString(1, citizenshipId.toString());
+            return readCitizenship(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Citizenship " + citizenshipId, failure);
+        }
+    }
+
+    private StoredCitizenship readCitizenship(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? readCitizenship(result) : null;
+        }
+    }
+
+    private static StoredCitizenship readCitizenship(ResultSet result) throws SQLException {
+        long endedAt = result.getLong("ended_at_epoch_millis");
+        Long optionalEndedAt = result.wasNull() ? null : endedAt;
+        return new StoredCitizenship(
+                UUID.fromString(result.getString("citizenship_id")),
+                UUID.fromString(result.getString("player_id")),
+                UUID.fromString(result.getString("nation_id")),
+                result.getLong("joined_at_epoch_millis"),
+                optionalEndedAt,
+                result.getString("join_service_identity"),
+                result.getString("join_request_id"),
+                result.getString("leave_service_identity"),
+                result.getString("leave_request_id"));
     }
 
     private static StoredPaymentTransaction readPayment(ResultSet result) throws SQLException {
