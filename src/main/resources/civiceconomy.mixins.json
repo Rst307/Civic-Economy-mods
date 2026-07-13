@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "org.civiceconomy.mixin.lightmanscurrency",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "BankDataCacheMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

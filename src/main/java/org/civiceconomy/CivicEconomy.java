@@ -2,9 +2,12 @@ package org.civiceconomy;
 
 import com.mojang.logging.LogUtils;
 import java.util.stream.Collectors;
+import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.event.RegisterGameTestsEvent;
 import org.civiceconomy.compat.CompatibilityReport;
 import org.civiceconomy.compat.CompatibilityScanner;
+import org.civiceconomy.gametest.LightmansCurrencyPlayerPaymentsGameTests;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
 import org.slf4j.Logger;
 
@@ -15,7 +18,8 @@ public final class CivicEconomy {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static volatile CompatibilityReport compatibilityReport;
 
-    public CivicEconomy() {
+    public CivicEconomy(IEventBus modEventBus) {
+        modEventBus.addListener(RegisterGameTestsEvent.class, CivicEconomy::registerGameTests);
         CompatibilityReport report = CompatibilityScanner.firstSlice().scan(new NeoForgeModCatalog());
         if (!report.startupAllowed()) {
             String details = report.problems().stream()
@@ -42,5 +46,10 @@ public final class CivicEconomy {
             throw new IllegalStateException("Civic Economy has not completed startup");
         }
         return report;
+    }
+
+    private static void registerGameTests(RegisterGameTestsEvent event) {
+        LOGGER.info("Registering Civic Economy GameTests");
+        event.register(LightmansCurrencyPlayerPaymentsGameTests.class);
     }
 }

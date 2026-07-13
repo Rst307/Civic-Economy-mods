@@ -75,6 +75,7 @@ dependencies {
         }
     }
 
+    compileOnly "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
     localRuntime "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
     localRuntime "dev.ftb.mods:ftb-library-neoforge:${ftb_library_version}"
     localRuntime "dev.ftb.mods:ftb-teams-neoforge:${ftb_teams_version}"
@@ -127,8 +128,21 @@ var generateModMetadata = tasks.register('generateModMetadata', ProcessResources
     into 'build/generated/sources/modMetadata'
 }
 
+var generateGameTestStructures = tasks.register('generateGameTestStructures') {
+    inputs.file layout.projectDirectory.file('src/main/gametest/empty.nbt.b64')
+    outputs.file layout.buildDirectory.file('generated/gametestResources/data/civiceconomy/structure/empty.nbt')
+    doLast {
+        def outputFile = outputs.files.singleFile
+        outputFile.parentFile.mkdirs()
+        outputFile.bytes = Base64.decoder.decode(inputs.files.singleFile.text.trim())
+    }
+}
+
 sourceSets.main.resources.srcDir generateModMetadata
+sourceSets.main.resources.srcDir layout.buildDirectory.dir('generated/gametestResources')
+tasks.named('processResources').configure { dependsOn generateGameTestStructures }
 neoForge.ideSyncTask generateModMetadata
+neoForge.ideSyncTask generateGameTestStructures
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
