@@ -83,11 +83,14 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 /civic economy nation status
 /civic economy nation cancel <reason>
 /civic economy nation activate
+/civic economy nation population
 ```
 
 激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。
 
 `nation status` 会领取并显示当前申请可归属的 Candidate Online Evidence，报告有效候选人数、当前门槛、FORMAL/DEBUG WORLD 模式和到期时间。到期申请由后台 SQLite 处理器自动转换为 `EXPIRED`；常规服务器 tick 不执行数据库查询。
+
+`nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。
 
 FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenship；后续 Team 新成员不会自动入籍。正式 Citizen 离开绑定 Team 后立即停止 Provider 权限和 Effective Citizen 人口贡献，进入当前固定两天的 Citizenship Correction Grace；宽限内回归恢复同一 Citizenship，截止仍未回归才结束 Citizenship 并开始转籍冷却。协调扫描只在服务器线程读取 FTB 快照，所有持久化工作均在 SQLite 线程执行。
 

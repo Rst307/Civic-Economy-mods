@@ -1536,6 +1536,27 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<UUID> citizenshipPlayersByNation(UUID nationId) {
+        List<UUID> players = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT DISTINCT player_id
+                FROM citizenship_period
+                WHERE nation_id = ?
+                ORDER BY player_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    players.add(UUID.fromString(result.getString("player_id")));
+                }
+            }
+            return List.copyOf(players);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Citizenship players for Nation " + nationId, failure);
+        }
+    }
+
     public synchronized StoredOnlineInterval recordOnlineTime(
             UUID intervalId,
             String serviceIdentity,

@@ -8,10 +8,12 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -25,12 +27,17 @@ import org.civiceconomy.nation.ActivateNationApplication;
 import org.civiceconomy.nation.ActivatedNation;
 import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CancelNationApplication;
+import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
+import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.CreateNationApplication;
 import org.civiceconomy.nation.NationApplication;
 import org.civiceconomy.nation.NationApplicationRegistry;
 import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationFoundingPolicy;
+import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
+import org.civiceconomy.nation.NationPopulationCalculator;
 import org.civiceconomy.nation.NationalTreasuryProvisioner;
+import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
 import org.slf4j.Logger;
@@ -39,6 +46,7 @@ final class NationApplicationCommands {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Duration APPLICATION_LIFETIME = Duration.ofDays(7);
     private static final Duration EVIDENCE_WINDOW = Duration.ofDays(60);
+    private static final Duration FULL_EFFECTIVE_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final ServiceIdentity FOUNDING_SERVICE =
             new ServiceIdentity("civiceconomy-founding");
@@ -56,6 +64,8 @@ final class NationApplicationCommands {
                                 .executes(context -> cancel(
                                         context.getSource(),
                                         StringArgumentType.getString(context, "reason")))))
+                .then(Commands.literal("population")
+                        .executes(context -> population(context.getSource())))
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
     }
@@ -108,6 +118,52 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Nation Application queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int population(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        UUID playerId = source.getPlayerOrException().getUUID();
+        Instant asOf = Instant.now();
+        Clock queryClock = Clock.fixed(asOf, ZoneOffset.UTC);
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, CITIZENSHIP_TRANSFER_COOLDOWN, queryClock);
+                    var citizenship = citizenships.current(playerId)
+                            .orElseThrow(() -> new IllegalStateException(
+                                    "You do not have an active formal Citizenship"));
+                    return new NationPopulationCalculator(
+                                    citizenships,
+                                    new CitizenshipCorrectionGraceRegistry(database, queryClock),
+                                    new OnlineTimeLedger(database),
+                                    EVIDENCE_WINDOW,
+                                    FULL_EFFECTIVE_CITIZEN_TIME)
+                            .calculate(citizenship.nationId(), asOf);
+                })
+                .whenComplete((population, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation population", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatPopulation(population)), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation population query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatPopulation(NationEffectiveCitizenPopulation population) {
+        String details = population.citizens().stream()
+                .map(citizen -> citizen.playerId()
+                        + ":" + citizen.attributedOnlineMillis() + "ms="
+                        + String.format(Locale.ROOT, "%.3f", citizen.contribution()))
+                .collect(Collectors.joining(", "));
+        return "Nation " + population.nationId().value()
+                + " effectiveCitizens=" + population.effectiveCitizenCount()
+                + " populationEquivalent="
+                + String.format(Locale.ROOT, "%.3f", population.populationEquivalent())
+                + " asOf=" + population.asOf()
+                + " details=[" + details + "]";
     }
 
     private static int status(CommandSourceStack source)

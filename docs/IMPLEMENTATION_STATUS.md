@@ -129,15 +129,17 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `FtbTeamsNationProvider` now requires formal current Citizenship, live membership in the Nation's exact bound FTB Team, and no active Correction Grace. New FTB Team members are never auto-enrolled as Citizens; the current FTB owner remains the temporary political head fact.
 - Effective Citizen calculation subtracts every Correction Grace suspension interval. Time before departure and after a restoration can contribute; time during an active or completed grace cannot.
 - Runtime reconciliation first lists registered Nations on `Civic-Economy-SQLite`, snapshots exact FTB Team facts on the Minecraft server thread, and returns immutable facts to the SQLite executor. Missing Team facts skip reconciliation and fail closed instead of converting every Citizen to stateless.
+- Added Nation-level Effective Citizen aggregation with explainable per-Citizen detail. The calculator enumerates formal Citizenship history for one stable `NationId`, applies the existing Citizenship/Correction Grace/online-time rules, includes only time actually attributed to that Nation, and reports exact effective-Citizen count plus fractional population equivalent.
+- Added `/civic economy nation population`. The command derives the caller's current formal Nation server-side, queues all SQLite work on `Civic-Economy-SQLite`, and reports each Citizen's attributed online milliseconds and contribution without consulting raw FTB Team membership counts.
 
 ## In progress
 
-- Aggregate Nation-level Effective Citizen population and expose reconciliation status to trusted governance/admin views.
+- Use the explainable Nation population result as the first input to fiscal roles and territory free-allocation policy.
 
 ## Not yet completed
 
 - SQLite migrations beyond schema v22, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
-- Nation-level Effective Citizen aggregation, fiscal roles, capital rebinding, liquidation, and Nation lifecycle restrictions.
+- Fiscal roles, capital rebinding, liquidation, and Nation lifecycle restrictions.
 - Withdrawals, configurable multi-person approval policy, and broader audit.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
@@ -182,7 +184,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the command-driven Nation activation/cancellation and DEBUG WORLD authority slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 116 tests with zero failures.
 - After automatic Nation Application expiry and cancellation evidence hardening, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 117 tests with zero failures.
 - After Citizenship Reconciliation/schema-v22, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 122 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,702,655 bytes, SHA-256 `EFCDFFC0DB1FC16B89FA330B391AF4C2E5C4B0C27561BC6F57054972804E7AA9`. It remains a development artifact until all v1 completion gates pass.
+- After the Nation Effective Citizen population slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 123 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,708,127 bytes, SHA-256 `0E80EA9A0EB16FFD273652E626E105829D7D3C12157B3133D8385396108AB7BF`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -227,6 +230,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - A second 17/17 GameTest run with `-Dciviceconomy.allowDedicatedDebugWorld=true` proved the startup-level permission registers the dedicated `debug status` and `debug enable` command tree. The default run proved the same write command tree is absent without that startup permission.
 - After lifecycle expiry wiring, the default GameTest run passed all 18 required tests. The added test creates a short-lived PENDING application through the authoritative background database executor, waits for the real server tick scheduler to enqueue expiry, and verifies deterministic service/request audit, `EXPIRED` state, and closed Candidate affiliation in the world-bound SQLite database. The log records the processor on `Civic-Economy-SQLite`, not the server thread.
 - After Citizenship Reconciliation/schema-v22, the default GameTest run passed all 19 required tests. The added test creates a real head-owned FTB Party Team with a second formal Citizen, persists the Nation/Citizenship off-thread, removes that member through the exact FTB team object on the server thread, and verifies the runtime scheduler creates a durable two-day active Correction Grace while leaving formal Citizenship open.
+- After adding the Nation population command, the default GameTest run again passed all 19 required tests. Its command-tree assertion proves the real NeoForge dispatcher exposes `population` alongside `apply`, `status`, `cancel`, and `activate`.
 - `CitizenshipReconciliationTest` uses real temporary SQLite databases to verify immediate Provider suspension, restoration of the same Citizenship, deadline-effective Citizenship leave, no automatic Citizenship for new FTB members, and restart recovery after the Citizenship leave committed but before the Correction Grace resolved.
 - `EffectiveCitizenCalculatorTest` verifies online time during Correction Grace is excluded immediately while eligible time before the grace remains attributed.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
@@ -292,6 +296,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the command-driven activation/cancellation and DEBUG WORLD authority slice, the no-Create server reached `Done (3.873s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.540s)!` with production scoring enabled. Both opened the world-bound schema-v20 SQLite runtime; task-owned process trees were stopped after startup confirmation.
 - After automatic application expiry wiring, the no-Create server reached `Done (3.814s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.415s)!` with production scoring enabled. Both opened the world-bound SQLite runtime without an expiry failure; task-owned process trees were stopped after startup confirmation.
 - After Citizenship Reconciliation/schema-v22, the no-Create server reached `Done (3.618s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.651s)!` with production scoring enabled. Both migrated/opened the world-bound database and started background expiry/reconciliation without failure; task-owned process trees were stopped after startup confirmation.
+- After the Nation population slice, the no-Create server loaded the real LC/FTB stack, disabled Create production scoring, and reached `Done (12.761s)!`. The isolated Create `6.0.6` server enabled production scoring and reached `Done (4.899s)!`; both task-owned process trees were stopped after startup confirmation.
 
 ### Environment note
 
@@ -333,4 +338,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Add Nation-level Effective Citizen aggregation with explainable per-Citizen detail, then use that population result as the first input to fiscal roles and territory free-allocation policy without treating FTB membership counts as population.
+Add persistent Nation fiscal roles and server-authoritative role assignment, then consume the explainable population result in territory free-allocation policy without treating FTB membership counts as population.

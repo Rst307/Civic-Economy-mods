@@ -103,6 +103,13 @@ public final class CitizenshipRegistry {
         return database.citizenshipHistory(playerId).stream().map(CitizenshipRegistry::toCitizenship).toList();
     }
 
+    public List<UUID> playersWithHistory(NationId nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException("Nation identity cannot be null");
+        }
+        return database.citizenshipPlayersByNation(nationId.value());
+    }
+
     private static Citizenship toCitizenship(StoredCitizenship stored) {
         OptionalLong endedAt = stored.endedAtEpochMillis() == null
                 ? OptionalLong.empty()
