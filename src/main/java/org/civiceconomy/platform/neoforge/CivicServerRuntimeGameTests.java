@@ -94,7 +94,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted fiscal administration command actions");
         helper.assertValueEqual(
-                Set.of("apply", "status", "cancel", "activate", "population", "role"),
+                Set.of("apply", "status", "cancel", "activate", "population", "role", "territory"),
                 economy.getChild("nation").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),

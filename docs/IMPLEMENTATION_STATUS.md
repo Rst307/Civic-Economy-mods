@@ -137,10 +137,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added a pure Territory Free Allocation policy module. It consumes the explainable Nation Effective Citizen population, applies configurable base and per-Effective-Citizen chunk parameters with checked arithmetic, and never reads raw FTB Team membership.
 - Raised the SQLite schema to v24 with append-only Territory Free Allocation policy versions. Each version records the trusted actor, service/request identity, base chunks, per-Effective-Citizen chunks, reason, record time, and a unique future effective time; policy reads select the latest version effective at the requested instant.
 - Added OP/console-only `/civic economy admin territory policy show|schedule`. Writes run on `Civic-Economy-SQLite`, reject immediate/past effect, and use a conservative `0 + 0 × Effective Citizen` fallback until the first persisted policy becomes effective.
+- Added `/civic economy nation territory allowance`. It derives the caller's formal Nation server-side, evaluates Citizenship/Correction Grace/online-time population and the policy version at one fixed instant on `Civic-Economy-SQLite`, and reports an explainable formula without reading FTB Team member counts.
 
 ## In progress
 
-- Expose each Nation's explainable current Territory Free Allocation, then wire it into FTB Chunks claim prepayment.
+- Wire the explainable Territory Free Allocation into FTB Chunks claim prepayment.
 
 ## Not yet completed
 
@@ -194,7 +195,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the Nation Fiscal Permission/schema-v23 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 127 tests with zero failures.
 - After the pure Territory Free Allocation policy slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 128 tests with zero failures. This is domain/build evidence only; claim-event integration is not yet implemented.
 - After persistent Territory Free Allocation policy/schema-v24 and its OP command, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 129 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,743,041 bytes, SHA-256 `4AC3CE8F85CD89F7B28157DFD6B8476D757D7693086ACA8F329BF17722E5FDB9`. It remains a development artifact until all v1 completion gates pass.
+- After the Nation-facing Territory Free Allocation command, `gradlew.bat clean build --no-daemon --console=plain` again passed all 129 tests from fresh outputs.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,745,467 bytes, SHA-256 `C940CDEA1EE1674EC8C04A0E176EAA18FE36F6CD4D9B708512B7D7CA9E930732`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -242,6 +244,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After adding the Nation population command, the default GameTest run again passed all 19 required tests. Its command-tree assertion proves the real NeoForge dispatcher exposes `population` alongside `apply`, `status`, `cancel`, and `activate`.
 - After the Nation Fiscal Permission command slice, the default GameTest run passed all 20 required tests. The added test creates a real FTB Team owner, persists the Nation and formal Citizenship off-thread, executes the real `nation role grant` command using the server-derived actor and stable target UUID, and verifies one exact `APPROVE_BUDGET` grant plus audit reason in the world-bound SQLite database.
 - After the Territory Free Allocation policy command slice, the default GameTest run passed all 21 required tests. The added test executes the real OP/console schedule command and verifies the server-derived administrator identity, request ID, parameters, future effective time, and reason in the world-bound schema-v24 SQLite database.
+- After adding the Nation-facing allowance command, the same 21/21 GameTest suite passed; its exact dispatcher assertion now includes `nation territory allowance` while the policy schedule test continues to exercise real SQLite persistence.
 - `CitizenshipReconciliationTest` uses real temporary SQLite databases to verify immediate Provider suspension, restoration of the same Citizenship, deadline-effective Citizenship leave, no automatic Citizenship for new FTB members, and restart recovery after the Citizenship leave committed but before the Correction Grace resolved.
 - `EffectiveCitizenCalculatorTest` verifies online time during Correction Grace is excluded immediately while eligible time before the grace remains attributed.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
@@ -353,4 +356,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Expose the current policy-plus-population Territory Free Allocation to Nation players, then use the same result in FTB Chunks `BEFORE_CLAIM` prepayment without treating FTB membership counts as population.
+Use the same policy-plus-population Territory Free Allocation in FTB Chunks `BEFORE_CLAIM` prepayment without treating FTB membership counts as population.

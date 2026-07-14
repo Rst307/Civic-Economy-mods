@@ -45,6 +45,9 @@ import org.civiceconomy.nation.NationPopulationCalculator;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.RevokeNationFiscalPermission;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.territory.TerritoryFreeAllocation;
+import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
+import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
 import org.civiceconomy.nation.NationalTreasuryProvisioner;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.NationTeam;
@@ -78,8 +81,57 @@ final class NationApplicationCommands {
                 .then(Commands.literal("population")
                         .executes(context -> population(context.getSource())))
                 .then(roleCommand())
+                .then(territoryCommand())
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> territoryCommand() {
+        return Commands.literal("territory")
+                .then(Commands.literal("allowance")
+                        .executes(context -> territoryAllowance(context.getSource())));
+    }
+
+    private static int territoryAllowance(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        UUID playerId = source.getPlayerOrException().getUUID();
+        Instant asOf = Instant.now();
+        Clock queryClock = Clock.fixed(asOf, ZoneOffset.UTC);
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationEffectiveCitizenPopulation population =
+                            calculatePopulation(database, playerId, asOf, queryClock);
+                    TerritoryFreeAllocationPolicyVersion policy =
+                            new TerritoryFreeAllocationPolicyRegistry(
+                                            database,
+                                            queryClock,
+                                            TerritoryFreeAllocationPolicyVersion.defaultPolicy(0, 0))
+                                    .current(asOf);
+                    TerritoryFreeAllocation allocation = policy.policy().calculate(population);
+                    return new TerritoryAllowanceView(population, policy, allocation);
+                })
+                .whenComplete((allowance, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Territory Free Allocation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatTerritoryAllowance(allowance)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory allowance query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatTerritoryAllowance(TerritoryAllowanceView view) {
+        return "Nation " + view.population().nationId().value()
+                + " Territory Free Allocation=" + view.allocation().totalFreeChunks()
+                + " chunks (base=" + view.allocation().baseChunks()
+                + ", effectiveCitizens=" + view.allocation().effectiveCitizenCount()
+                + ", perCitizen=" + view.allocation().chunksPerEffectiveCitizen()
+                + ") policy=" + view.policy().policyId()
+                + " effectiveAt=" + view.policy().effectiveAt()
+                + (view.policy().defaultPolicy() ? " [CONSERVATIVE DEFAULT]" : "");
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> roleCommand() {
@@ -290,18 +342,7 @@ final class NationApplicationCommands {
         Clock queryClock = Clock.fixed(asOf, ZoneOffset.UTC);
         CivicServerRuntime.current()
                 .submitDatabase(database -> {
-                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                            database, CITIZENSHIP_TRANSFER_COOLDOWN, queryClock);
-                    var citizenship = citizenships.current(playerId)
-                            .orElseThrow(() -> new IllegalStateException(
-                                    "You do not have an active formal Citizenship"));
-                    return new NationPopulationCalculator(
-                                    citizenships,
-                                    new CitizenshipCorrectionGraceRegistry(database, queryClock),
-                                    new OnlineTimeLedger(database),
-                                    EVIDENCE_WINDOW,
-                                    FULL_EFFECTIVE_CITIZEN_TIME)
-                            .calculate(citizenship.nationId(), asOf);
+                    return calculatePopulation(database, playerId, asOf, queryClock);
                 })
                 .whenComplete((population, failure) -> source.getServer().execute(() -> {
                     if (failure != null) {
@@ -313,6 +354,22 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Nation population query queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static NationEffectiveCitizenPopulation calculatePopulation(
+            CivicDatabase database, UUID playerId, Instant asOf, Clock queryClock) {
+        CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                database, CITIZENSHIP_TRANSFER_COOLDOWN, queryClock);
+        var citizenship = citizenships.current(playerId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "You do not have an active formal Citizenship"));
+        return new NationPopulationCalculator(
+                        citizenships,
+                        new CitizenshipCorrectionGraceRegistry(database, queryClock),
+                        new OnlineTimeLedger(database),
+                        EVIDENCE_WINDOW,
+                        FULL_EFFECTIVE_CITIZEN_TIME)
+                .calculate(citizenship.nationId(), asOf);
     }
 
     private static String formatPopulation(NationEffectiveCitizenPopulation population) {
@@ -550,4 +607,9 @@ final class NationApplicationCommands {
             org.civiceconomy.nation.NationId nationId,
             FtbTeamsNationProvider provider,
             NationFiscalAuthorityRegistry authorities) {}
+
+    private record TerritoryAllowanceView(
+            NationEffectiveCitizenPopulation population,
+            TerritoryFreeAllocationPolicyVersion policy,
+            TerritoryFreeAllocation allocation) {}
 }
