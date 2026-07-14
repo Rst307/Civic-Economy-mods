@@ -57,6 +57,9 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised the SQLite schema to v9 and added `PAYMENT` / `REFUND` transaction kinds with durable parent linkage, cumulative refunded amount, and an incomplete-refund uniqueness guard.
 - Added idempotent full and partial refunds for committed payments. Refunds reverse source/recipient accounts through the same external transaction UUID marker and reject amounts above the remaining refundable value.
 - Refund recovery covers both ambiguous external application and recorded `EXTERNAL_APPLIED` restart windows; replay does not repeat the economic effect.
+- Added online SQLite backups through Xerial's native backup API, so an open WAL database can produce a consistent point-in-time snapshot without copying live database files directly.
+- Added validated restore to a new database path. Restore fails closed before publication unless the backup has schema v9 and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
+- Restore refuses to overwrite an existing destination and publishes through a temporary sibling file, using an atomic move when the filesystem supports it.
 
 ## In progress
 
@@ -64,7 +67,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v9, online backups, restore validation, compensation execution, and recovery audit records.
+- SQLite migrations beyond schema v9, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow, compensation execution, and recovery audit records.
 - Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
 - Player-bank balance adapter; budgets, Escrow, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
@@ -99,13 +102,17 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,479,592 bytes, SHA-256 `F2EFAA77EAFDC9C6A2A6A471DB5DDC7F978F0108BDED9D3AA3F59563FAE18463`. This is not yet a release artifact.
+- After the online-backup/validated-restore slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,481,421 bytes, SHA-256 `AF0D50B37176C1C3499DE7722B49939F475826F5C4BF9558BC026926546DB033`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
 - Verified WAL mode, schema v9, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, and refund storage, foreign-world rejection, and unknown-schema rejection.
-- These are real database integration tests, not mocks; backup/restore and crash recovery remain unverified.
+- `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
+- The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
+- `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
+- These are real database integration tests, not mocks. Automatic scheduling/rotation, live replacement of the authoritative database, and a process-death restore drill remain unverified.
 
 ### Fiscal domain and database integration
 
@@ -185,6 +192,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Founding eligibility is intentionally not wired to raw FTB members. The spec needs either a pending Nation/application state that can accumulate Citizenship time before activation, or an explicit rule for pre-Nation activity evidence; implementation is paused only at that semantic fork.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
 - The treasury GameTest proves real LC/SQLite recovery inside one running server after the ambiguous adapter window. It does not yet prove process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files; durable per-account transfer phase evidence or compensation is still required before release.
+- Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
 - Lightman's Currency defaults include issuance and interest mechanisms that must be explicitly disabled or blocked before a playable release can satisfy currency conservation.
 

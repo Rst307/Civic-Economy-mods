@@ -1,15 +1,20 @@
 package org.civiceconomy.persistence;
 
+import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.UUID;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
     private static final int SCHEMA_VERSION = 9;
@@ -73,6 +78,61 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("ftb_chunks_version"));
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Civic database identity", failure);
+        }
+    }
+
+    public synchronized void backup(Path backupFile) {
+        Path destination = backupFile.toAbsolutePath();
+        if (Files.exists(destination)) {
+            throw new IllegalArgumentException("Backup destination already exists: " + destination);
+        }
+        try {
+            Path parent = destination.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            SQLiteConnection sqlite = connection.unwrap(SQLiteConnection.class);
+            int result = sqlite.getDatabase().backup("main", destination.toString(), null);
+            if (result != 0) {
+                throw new IllegalStateException("SQLite backup failed with result code " + result);
+            }
+        } catch (SQLException | IOException failure) {
+            throw new IllegalStateException("Unable to create Civic database backup " + destination, failure);
+        }
+    }
+
+    public static void restoreBackup(
+            Path backupFile, Path destinationFile, DatabaseIdentity expectedIdentity) {
+        Path source = backupFile.toAbsolutePath();
+        Path destination = destinationFile.toAbsolutePath();
+        if (!Files.isRegularFile(source)) {
+            throw new IllegalArgumentException("Backup file does not exist: " + source);
+        }
+        if (Files.exists(destination)) {
+            throw new IllegalArgumentException("Restore destination already exists: " + destination);
+        }
+        validateBackup(source, expectedIdentity);
+
+        Path parent = destination.getParent();
+        Path temporary = destination.resolveSibling(
+                destination.getFileName() + ".restore-" + UUID.randomUUID() + ".tmp");
+        try {
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Files.copy(source, temporary);
+            try {
+                Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, destination);
+            }
+        } catch (IOException failure) {
+            try {
+                Files.deleteIfExists(temporary);
+            } catch (IOException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw new IllegalStateException("Unable to restore Civic database to " + destination, failure);
         }
     }
 
@@ -1129,6 +1189,37 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getLong("refunded_minor_units"),
                 result.getString("reason"),
                 result.getString("state"));
+    }
+
+    private static void validateBackup(Path backupFile, DatabaseIdentity expectedIdentity) {
+        String readOnlyUrl = "jdbc:sqlite:" + backupFile.toUri() + "?mode=ro";
+        try (Connection validation = DriverManager.getConnection(readOnlyUrl);
+                Statement statement = validation.createStatement()) {
+            int version;
+            try (ResultSet result = statement.executeQuery("PRAGMA user_version")) {
+                version = result.getInt(1);
+            }
+            if (version != SCHEMA_VERSION) {
+                throw new UnsupportedDatabaseVersionException(version, SCHEMA_VERSION);
+            }
+            try (ResultSet result = statement.executeQuery(
+                    "SELECT * FROM civic_identity WHERE singleton = 1")) {
+                if (!result.next()) {
+                    throw new IllegalStateException("Civic backup identity is missing");
+                }
+                DatabaseIdentity actual = new DatabaseIdentity(
+                        UUID.fromString(result.getString("world_id")),
+                        result.getString("civic_version"),
+                        result.getString("lc_version"),
+                        result.getString("ftb_teams_version"),
+                        result.getString("ftb_chunks_version"));
+                if (!actual.equals(expectedIdentity)) {
+                    throw new DatabaseIdentityMismatchException(expectedIdentity, actual);
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to validate Civic backup " + backupFile, failure);
+        }
     }
 
     private void updateTransactionState(UUID transactionId, String expected, String next) {
