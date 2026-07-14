@@ -45,15 +45,19 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised the SQLite schema to v6 with idempotent completed online-time intervals indexed by player and time.
 - Added a conservative online-time ledger: completed observed intervals replay exactly once, changed payloads conflict, overlapping intervals are rejected to prevent double counting, adjacent intervals are valid, and rolling queries clip at the requested window boundaries.
 - Added Effective Citizen contribution calculation that intersects online-time intervals with actual Citizenship periods, applies the configured observation window, prorates transfers by exact affiliation time, and caps each citizen at `1` after the configured full-contribution duration.
+- Added a world-scoped UUID in Minecraft `SavedData`; a newly generated identity is synchronously persisted before the runtime SQLite database opens, and subsequent starts require the database identity to match it.
+- Added the authoritative server runtime composition at `<world>/civiceconomy/civic.sqlite3`, using the loaded Civic/LC/FTB versions in the database identity.
+- Added a server-only online-session accumulator and NeoForge lifecycle adapter. Login starts an in-memory session, one-minute checkpoints and logout produce completed intervals, duplicate logins do not reset time, and clock regressions conservatively produce no interval.
+- Completed intervals are queued to one background SQLite writer. Regular Minecraft ticks never execute SQLite; graceful shutdown drains the queue with a bounded timeout and fails closed on a writer error.
 
 ## In progress
 
-- Add a buffered server-side online-session observer, then the gameplay Nation-registration policy with team-head authorization, configurable founding eligibility, atomic initial Citizenship assignment, and FTB membership reconciliation.
+- Add the gameplay Nation-registration policy with team-head authorization, configurable founding eligibility, atomic initial Citizenship assignment, and FTB membership reconciliation.
 
 ## Not yet completed
 
 - SQLite migrations beyond schema v6, online backups, restore validation, compensation execution, and recovery audit records.
-- NeoForge login/logout observation and buffered interval flushing, nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
+- Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
 - Player-bank balance adapter; budgets, Reservation release/partial settlement, Escrow, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
@@ -87,7 +91,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,443,524 bytes, SHA-256 `7A7AA5A812953E83A8237CEE90561772ED515A0D2CA3754A30F2818719745A66`. This is not yet a release artifact.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,459,818 bytes, SHA-256 `B9967B42A53FD6F3F47BD0548E544553158E23448D179C37D5CEBD4453043E83`. This is not yet a release artifact.
 
 ### SQLite integration
 
@@ -107,7 +111,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 ### Real Lightman's Currency integration
 
 - `LightmansCurrencyPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
-- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed seven required GameTests against the real pinned LC/FTB runtime after the Nation slice.
+- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed eight required GameTests against the real pinned LC/FTB runtime after the server-runtime slice.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
@@ -129,6 +133,9 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Citizenship tests use real temporary on-disk SQLite databases. They verify join and leave replay across reopen, request-payload conflicts, unknown-Nation rejection, one active Citizenship per player, stale-leave rejection, ordered historical periods, cooldown rejection before expiry, and transfer success exactly at expiry.
 - Online-time tests use real temporary SQLite databases. They verify exact-once replay across restart, payload-conflict rejection, overlap rejection, endpoint adjacency, history ordering, and clipped rolling-window totals.
 - Effective Citizen tests use the public Citizenship and online-time interfaces over real SQLite. They verify that an interval crossing a Nation transfer is split by actual affiliation time, old observations fall outside the 60-day window, and ten attributed hours still cap contribution at `1` under the default eight-hour threshold.
+- Session-accumulator tests verify checkpoint/logout adjacency and duplicate-login stability without Minecraft or threads.
+- The eighth GameTest verifies that the real server lifecycle has created and persisted the world identity and runtime SQLite database, then routes an unconnected `ServerPlayer` through Civic's login/logout delegate and waits for the background writer to persist exactly one positive interval.
+- A full NeoForge player-login event was intentionally not posted in that GameTest: LC and FTB attempt real client payload synchronization and reject the embedded headless connection. Actual global-event delivery remains part of later `runClient`/multiplayer verification; the Civic delegate and asynchronous persistence path are real.
 
 ### Dedicated-server runtime
 
@@ -145,6 +152,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - The same Nation build with Create `6.0.6` reached `Done (3.402s)!`; Civic reported Create production scoring enabled.
 - After the Citizenship slice, the no-Create dedicated server reached `Done (3.443s)!` and the Create `6.0.6` server reached `Done (3.293s)!`, with the same compatibility behavior.
 - After the online-time and Effective Citizen slice, the no-Create dedicated server reached `Done (3.440s)!` and the Create `6.0.6` server reached `Done (3.330s)!`.
+- After the server-runtime slice, the no-Create dedicated server reached `Done (3.361s)!` and then logged world-bound SQLite/online observation active. The Create `6.0.6` server reached `Done (3.374s)!` and logged the same runtime activation immediately afterward.
 
 ### Environment note
 
@@ -156,7 +164,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - The startup compatibility probe still checks class presence rather than reflective method descriptors; method/event semantics are currently evidenced by exact compilation, source inspection, and real GameTests.
 - FTB claim/team event subscriptions are not yet wired; current adapters are conservative server-side queries only. In particular, future `BEFORE_CLAIM` handling must remain side-effect-free because FTB fires it for simulations.
 - Temporary provider citizens are still current FTB Team members, while formal Citizenship now lives in the persistent registry. The provider and FTB membership events are not yet reconciled to that registry, and neither raw membership nor Citizenship alone is an Effective Citizen without rolling online-time evidence.
-- No NeoForge player-session hook feeds the online-time ledger yet. Tests inject trusted completed intervals directly; release wiring must buffer observations and flush off the Minecraft server thread, accepting small crash-time undercount rather than overcounting offline time.
+- Online sessions checkpoint every minute, so an ungraceful process death can conservatively lose at most the unflushed tail of each active session. It cannot credit offline time. The interval is currently an implementation constant and still needs configuration/documentation.
+- Graceful `ServerStoppedEvent` waits up to ten seconds for queued SQLite writes and close. This is bounded shutdown lifecycle work, not regular tick work, but timeout behavior still needs a controlled fault GameTest.
 - `NationRegistry.register` is currently the durable registration primitive. No gameplay command yet proves the caller is the FTB Team head or enforces the configurable minimum valid-citizen threshold.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
@@ -166,4 +175,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Implement the buffered server-side online-session observer and lifecycle flush path, then use its evidence for team-head-authorized Nation registration with atomic initial Citizenship assignment.
+Use the persisted activity evidence for team-head-authorized Nation registration with configurable founding eligibility and atomic initial Citizenship assignment.

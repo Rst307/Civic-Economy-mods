@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import java.util.stream.Collectors;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterGameTestsEvent;
 import org.civiceconomy.compat.CompatibilityReport;
 import org.civiceconomy.compat.CompatibilityScanner;
@@ -12,6 +13,8 @@ import org.civiceconomy.gametest.LightmansCurrencyFiscalAccountsGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyPlayerPaymentsGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
+import org.civiceconomy.platform.neoforge.CivicServerRuntime;
+import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
 import org.slf4j.Logger;
 
 @Mod(CivicEconomy.MOD_ID)
@@ -20,8 +23,11 @@ public final class CivicEconomy {
 
     private static final Logger LOGGER = LogUtils.getLogger();
     private static volatile CompatibilityReport compatibilityReport;
+    private final CivicServerRuntime serverRuntime;
 
     public CivicEconomy(IEventBus modEventBus) {
+        CivicServerRuntime runtime = new CivicServerRuntime();
+        serverRuntime = runtime;
         modEventBus.addListener(RegisterGameTestsEvent.class, CivicEconomy::registerGameTests);
         CompatibilityReport report = CompatibilityScanner.firstSlice().scan(new NeoForgeModCatalog());
         if (!report.startupAllowed()) {
@@ -33,6 +39,12 @@ public final class CivicEconomy {
 
         compatibilityReport = report;
         LightmansCurrencyFiscalAccounts.registerWithLightmansCurrency();
+        NeoForge.EVENT_BUS.addListener(runtime::onServerStarted);
+        NeoForge.EVENT_BUS.addListener(runtime::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(runtime::onPlayerLoggedOut);
+        NeoForge.EVENT_BUS.addListener(runtime::onServerTick);
+        NeoForge.EVENT_BUS.addListener(runtime::onServerStopping);
+        NeoForge.EVENT_BUS.addListener(runtime::onServerStopped);
         if (report.productionScoringEnabled()) {
             LOGGER.info("Civic Economy compatibility check passed; Create production scoring is enabled");
         } else if (report.problems().isEmpty()) {
@@ -55,6 +67,7 @@ public final class CivicEconomy {
     private static void registerGameTests(RegisterGameTestsEvent event) {
         LOGGER.info("Registering Civic Economy GameTests");
         event.register(FtbIntegrationGameTests.class);
+        event.register(CivicServerRuntimeGameTests.class);
         event.register(LightmansCurrencyFiscalAccountsGameTests.class);
         event.register(LightmansCurrencyPlayerPaymentsGameTests.class);
     }
