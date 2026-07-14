@@ -28,12 +28,17 @@ import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
+import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
+import org.civiceconomy.territory.TerritoryExpansionPricingPolicyRegistry;
+import org.civiceconomy.territory.TerritoryExpansionPricingPolicyVersion;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
 
 public final class FiscalAdministrationCommands {
     private static final ServiceIdentity TERRITORY_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-territory-policy");
+    private static final ServiceIdentity TERRITORY_PRICING_SERVICE =
+            new ServiceIdentity("civiceconomy-territory-pricing");
 
     private FiscalAdministrationCommands() {}
 
@@ -104,7 +109,109 @@ public final class FiscalAdministrationCommands {
                                                                                                 "requestId"),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
+                                                                                                "reason"))))))))))
+                .then(Commands.literal("pricing")
+                        .then(Commands.literal("show")
+                                .executes(context -> showTerritoryPricing(context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "firstOverageChunkCost",
+                                                LongArgumentType.longArg(0L))
+                                        .then(Commands.argument(
+                                                        "additionalMarginalCost",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType
+                                                                                        .greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleTerritoryPricing(
+                                                                                        context.getSource(),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "firstOverageChunkCost"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "additionalMarginalCost"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "requestId"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
                                                                                                 "reason"))))))))));
+    }
+
+    private static int showTerritoryPricing(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new TerritoryExpansionPricingPolicyRegistry(
+                                database,
+                                clock,
+                                TerritoryExpansionPricingPolicyVersion.defaultPolicy(0L, 0L))
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(formatTerritoryPricing(policy)), false);
+                    } else {
+                        reportDatabaseFailure(source, "Territory pricing query", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory pricing query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleTerritoryPricing(
+            CommandSourceStack source,
+            long firstOverageChunkCost,
+            long additionalMarginalCost,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new TerritoryExpansionPricingPolicyRegistry(
+                                database,
+                                clock,
+                                TerritoryExpansionPricingPolicyVersion.defaultPolicy(0L, 0L))
+                        .schedule(new ScheduleTerritoryExpansionPricingPolicy(
+                                TERRITORY_PRICING_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                firstOverageChunkCost,
+                                additionalMarginalCost,
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatTerritoryPricing(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(source, "Territory pricing schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory pricing schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatTerritoryPricing(TerritoryExpansionPricingPolicyVersion policy) {
+        return "Territory Expansion pricing " + policy.policyId()
+                + " firstOverageChunkCost=" + policy.firstOverageChunkCost()
+                + " additionalMarginalCost=" + policy.additionalMarginalCost()
+                + " effectiveAt=" + policy.effectiveAt()
+                + " actor=" + policy.actorIdentity()
+                + (policy.defaultPolicy() ? " [DEFAULT]" : "");
     }
 
     private static int showTerritoryPolicy(CommandSourceStack source) {

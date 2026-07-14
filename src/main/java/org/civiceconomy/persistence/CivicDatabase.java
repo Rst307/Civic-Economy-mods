@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 24;
+    private static final int SCHEMA_VERSION = 25;
 
     private final Connection connection;
 
@@ -1582,6 +1582,70 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryFreeAllocationPolicy(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Free Allocation policy", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryExpansionPricingPolicy territoryExpansionPricingPolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_expansion_pricing_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryExpansionPricingPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Territory Expansion pricing policy", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryExpansionPricingPolicy currentTerritoryExpansionPricingPolicy(
+            long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_expansion_pricing_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readTerritoryExpansionPricingPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read current Territory Expansion pricing", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryExpansionPricingPolicy scheduleTerritoryExpansionPricingPolicy(
+            UUID policyId,
+            String serviceIdentity,
+            String requestId,
+            String actorIdentity,
+            long firstOverageChunkCost,
+            long additionalMarginalCost,
+            long effectiveAtEpochMillis,
+            String reason,
+            long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_expansion_pricing_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    first_overage_chunk_cost, additional_marginal_cost,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setLong(5, firstOverageChunkCost);
+            insert.setLong(6, additionalMarginalCost);
+            insert.setLong(7, effectiveAtEpochMillis);
+            insert.setString(8, reason);
+            insert.setLong(9, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return territoryExpansionPricingPolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to schedule Territory Expansion pricing", failure);
         }
     }
 
@@ -3836,6 +3900,33 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 24");
             }
+            if (version < 25) {
+                statement.execute("""
+                        CREATE TABLE territory_expansion_pricing_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            first_overage_chunk_cost INTEGER NOT NULL
+                                CHECK (first_overage_chunk_cost >= 0),
+                            additional_marginal_cost INTEGER NOT NULL
+                                CHECK (additional_marginal_cost >= 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (effective_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX territory_expansion_pricing_policy_current
+                        ON territory_expansion_pricing_policy (effective_at_epoch_millis)
+                        """);
+                statement.execute("PRAGMA user_version = 25");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -3895,6 +3986,25 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("actor_identity"),
                     result.getInt("base_chunks"),
                     result.getInt("chunks_per_effective_citizen"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredTerritoryExpansionPricingPolicy readTerritoryExpansionPricingPolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredTerritoryExpansionPricingPolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getLong("first_overage_chunk_cost"),
+                    result.getLong("additional_marginal_cost"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));

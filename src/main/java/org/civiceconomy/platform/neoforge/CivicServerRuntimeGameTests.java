@@ -139,18 +139,26 @@ public final class CivicServerRuntimeGameTests {
     @GameTest(template = "empty", timeoutTicks = 200)
     public static void consoleSchedulesTerritoryPolicyOffThread(GameTestHelper helper) {
         String requestId = "territory-policy-command-" + UUID.randomUUID();
+        String pricingRequestId = "territory-pricing-command-" + UUID.randomUUID();
         long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
         var server = helper.getLevel().getServer();
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
                 "civic economy admin territory policy schedule 9 4 " + effectiveAt
                         + " " + requestId + " GameTest territory policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin territory pricing schedule 100 50 " + effectiveAt
+                        + " " + pricingRequestId + " GameTest territory pricing");
         Path databaseFile = server.getWorldPath(LevelResource.ROOT)
                 .resolve("civiceconomy")
                 .resolve("civic.sqlite3");
 
-        helper.succeedWhen(() -> assertTerritoryPolicyScheduled(
-                helper, databaseFile, requestId, effectiveAt));
+        helper.succeedWhen(() -> {
+            assertTerritoryPolicyScheduled(helper, databaseFile, requestId, effectiveAt);
+            assertTerritoryPricingScheduled(
+                    helper, databaseFile, pricingRequestId, effectiveAt);
+        });
     }
 
     @GameTest(template = "empty", timeoutTicks = 200)
@@ -603,6 +611,39 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect territory policy command result", failure);
+        }
+    }
+
+    private static void assertTerritoryPricingScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, first_overage_chunk_cost,
+                               additional_marginal_cost,
+                               effective_at_epoch_millis, reason
+                        FROM territory_expansion_pricing_policy
+                        WHERE service_identity = 'civiceconomy-territory-pricing'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Territory Expansion pricing policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived territory pricing administrator");
+                helper.assertValueEqual(100L, result.getLong(2), "first overage chunk cost");
+                helper.assertValueEqual(50L, result.getLong(3), "additional marginal cost");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis, result.getLong(4), "territory pricing effective time");
+                helper.assertValueEqual(
+                        "GameTest territory pricing", result.getString(5), "territory pricing reason");
+                helper.assertFalse(result.next(), "duplicate Territory Expansion pricing policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect territory pricing command result", failure);
         }
     }
 
