@@ -14,7 +14,7 @@ public final class MonetarySupplyLedger {
     private final MoneyAmount hardCap;
     private final Clock clock;
 
-    public MonetarySupplyLedger(CivicDatabase database, MoneyAmount hardCap, Clock clock) {
+    MonetarySupplyLedger(CivicDatabase database, MoneyAmount hardCap, Clock clock) {
         if (database == null || hardCap == null || clock == null) {
             throw new IllegalArgumentException(
                     "Monetary Supply Ledger dependencies cannot be null");
@@ -24,7 +24,7 @@ public final class MonetarySupplyLedger {
         this.clock = clock;
     }
 
-    public MonetarySupplyEvent confirm(ConfirmMonetarySupplyChange request) {
+    MonetarySupplyEvent confirm(ConfirmMonetarySupplyChange request) {
         StoredMonetarySupplyEvent replay = database.monetarySupplyEvent(
                 request.serviceIdentity().value(), request.requestId());
         if (replay != null) {

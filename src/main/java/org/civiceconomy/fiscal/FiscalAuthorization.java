@@ -212,6 +212,16 @@ public final class FiscalAuthorization {
         }
     }
 
+    public void require(
+            FiscalServiceSession session,
+            ServiceIdentity serviceIdentity,
+            FiscalCapability capability,
+            AccountId accountId) {
+        java.util.Objects.requireNonNull(session, "Fiscal service session cannot be null")
+                .requireIdentity(serviceIdentity);
+        require(serviceIdentity, capability, accountId);
+    }
+
     private static RegisteredFiscalService toRegisteredService(StoredFiscalService stored) {
         return new RegisteredFiscalService(
                 new ServiceIdentity(stored.serviceIdentity()),

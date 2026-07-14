@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 29;
+    private static final int SCHEMA_VERSION = 30;
 
     private final Connection connection;
 
@@ -1824,6 +1824,10 @@ public final class CivicDatabase implements AutoCloseable {
             if (next < 0L) {
                 throw new org.civiceconomy.monetary.DestructionExceedsNetIssuanceException();
             }
+            if (changeKind.equals("PERMANENT_DESTRUCTION")
+                    && next < pendingPermanentDestructionMinorUnits()) {
+                throw new org.civiceconomy.monetary.DestructionExceedsNetIssuanceException();
+            }
             try (PreparedStatement insert = connection.prepareStatement("""
                     INSERT INTO monetary_supply_event (
                         event_id, service_identity, request_id, change_kind,
@@ -1872,6 +1876,221 @@ public final class CivicDatabase implements AutoCloseable {
                     throw new IllegalStateException(
                             "Unable to restore Monetary Supply transaction mode", failure);
                 }
+            }
+        }
+    }
+
+    public synchronized StoredPermanentDestructionOperation preparePermanentDestruction(
+            UUID operationId,
+            String serviceIdentity,
+            String requestId,
+            String sourceAccount,
+            long amountMinorUnits,
+            String reason,
+            long preparedAtEpochMillis) {
+        StoredPermanentDestructionOperation replay =
+                permanentDestructionOperation(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            long pending = pendingPermanentDestructionMinorUnits();
+            long reservedAfter = Math.addExact(pending, amountMinorUnits);
+            if (reservedAfter > cumulativeNetIssuanceMinorUnits()) {
+                throw new org.civiceconomy.monetary.DestructionExceedsNetIssuanceException();
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO permanent_destruction_operation (
+                        operation_id, service_identity, request_id, source_account,
+                        amount_minor_units, reason, state, prepared_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', ?)
+                    """)) {
+                insert.setString(1, operationId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, sourceAccount);
+                insert.setLong(5, amountMinorUnits);
+                insert.setString(6, reason);
+                insert.setLong(7, preparedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return permanentDestructionOperation(serviceIdentity, requestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException("Unable to prepare Permanent Destruction", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Permanent Destruction preparation", primaryFailure);
+        }
+    }
+
+    public synchronized StoredPermanentDestructionOperation permanentDestructionOperation(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM permanent_destruction_operation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readPermanentDestructionOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Permanent Destruction operation", failure);
+        }
+    }
+
+    public synchronized List<StoredPermanentDestructionOperation> permanentDestructionOperations() {
+        List<StoredPermanentDestructionOperation> operations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM permanent_destruction_operation
+                ORDER BY prepared_at_epoch_millis, operation_id
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    operations.add(storedPermanentDestructionOperation(result));
+                }
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list Permanent Destruction operations", failure);
+        }
+    }
+
+    public synchronized StoredMonetarySupplyEvent commitPermanentDestruction(
+            UUID operationId, long committedAtEpochMillis) {
+        String externalReference = "permanent-destruction:" + operationId;
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            StoredPermanentDestructionOperation operation =
+                    permanentDestructionOperation(operationId);
+            if (operation == null) {
+                throw new IllegalArgumentException("Unknown Permanent Destruction " + operationId);
+            }
+            StoredMonetarySupplyEvent replay = monetarySupplyEventByExternalReference(
+                    "PERMANENT_DESTRUCTION", externalReference);
+            if (operation.state().equals("COMMITTED")) {
+                if (replay == null) {
+                    throw new IllegalStateException(
+                            "Committed Permanent Destruction has no Monetary Supply event "
+                                    + operationId);
+                }
+                connection.commit();
+                return replay;
+            }
+            long next = Math.subtractExact(
+                    cumulativeNetIssuanceMinorUnits(), operation.amountMinorUnits());
+            if (next < 0L) {
+                throw new org.civiceconomy.monetary.DestructionExceedsNetIssuanceException();
+            }
+            UUID eventId = UUID.randomUUID();
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO monetary_supply_event (
+                        event_id, service_identity, request_id, change_kind,
+                        amount_minor_units, external_reference, reason,
+                        confirmed_at_epoch_millis
+                    ) VALUES (?, ?, ?, 'PERMANENT_DESTRUCTION', ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, eventId.toString());
+                insert.setString(2, operation.serviceIdentity());
+                insert.setString(3, operation.requestId());
+                insert.setLong(4, operation.amountMinorUnits());
+                insert.setString(5, externalReference);
+                insert.setString(6, operation.reason());
+                insert.setLong(7, committedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            try (PreparedStatement updateSummary = connection.prepareStatement("""
+                    UPDATE monetary_supply_summary
+                    SET cumulative_net_issuance_minor_units = ? WHERE singleton = 1
+                    """);
+                    PreparedStatement updateOperation = connection.prepareStatement("""
+                    UPDATE permanent_destruction_operation
+                    SET state = 'COMMITTED', committed_at_epoch_millis = ?
+                    WHERE operation_id = ? AND state = 'PREPARED'
+                    """)) {
+                updateSummary.setLong(1, next);
+                updateSummary.executeUpdate();
+                updateOperation.setLong(1, committedAtEpochMillis);
+                updateOperation.setString(2, operationId.toString());
+                if (updateOperation.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Permanent Destruction did not advance " + operationId);
+                }
+            }
+            connection.commit();
+            return monetarySupplyEventByExternalReference(
+                    "PERMANENT_DESTRUCTION", externalReference);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException("Unable to commit Permanent Destruction", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Permanent Destruction commit", primaryFailure);
+        }
+    }
+
+    private StoredPermanentDestructionOperation permanentDestructionOperation(UUID operationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM permanent_destruction_operation WHERE operation_id = ?
+                """)) {
+            query.setString(1, operationId.toString());
+            return readPermanentDestructionOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Permanent Destruction operation", failure);
+        }
+    }
+
+    private long pendingPermanentDestructionMinorUnits() throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("""
+                        SELECT COALESCE(SUM(amount_minor_units), 0)
+                        FROM permanent_destruction_operation
+                        WHERE state = 'PREPARED'
+                        """)) {
+            return result.next() ? result.getLong(1) : 0L;
+        }
+    }
+
+    private StoredMonetarySupplyEvent monetarySupplyEventByExternalReference(
+            String changeKind, String externalReference) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM monetary_supply_event
+                WHERE change_kind = ? AND external_reference = ?
+                """)) {
+            query.setString(1, changeKind);
+            query.setString(2, externalReference);
+            return readMonetarySupplyEvent(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Monetary Supply external reference", failure);
+        }
+    }
+
+    private void restoreAutoCommit(String operation, RuntimeException primaryFailure) {
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException failure) {
+            if (primaryFailure != null) {
+                primaryFailure.addSuppressed(failure);
+            } else {
+                throw new IllegalStateException(
+                        "Unable to restore " + operation + " transaction mode", failure);
             }
         }
     }
@@ -4892,6 +5111,77 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 29");
             }
+            if (version < 30) {
+                statement.execute("DROP INDEX fiscal_service_grant_active_scope");
+                statement.execute("ALTER TABLE fiscal_service_grant_revocation RENAME TO fiscal_service_grant_revocation_v29");
+                statement.execute("ALTER TABLE fiscal_service_grant RENAME TO fiscal_service_grant_v29");
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            capability TEXT NOT NULL CHECK (capability IN (
+                                'READ_ACCOUNT', 'RESERVE_FUNDS', 'MANAGE_ESCROW',
+                                'MANAGE_BUDGET', 'ISSUE_BILL', 'FUND_BILL',
+                                'SETTLE_PAYMENT', 'REFUND_PAYMENT', 'COMPENSATE_PAYMENT',
+                                'PERMANENT_DESTRUCTION'
+                            )),
+                            account_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant
+                        SELECT * FROM fiscal_service_grant_v29
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_service_grant_active_scope
+                        ON fiscal_service_grant (service_identity, capability, account_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_service_grant(grant_id),
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant_revocation
+                        SELECT * FROM fiscal_service_grant_revocation_v29
+                        """);
+                statement.execute("DROP TABLE fiscal_service_grant_revocation_v29");
+                statement.execute("DROP TABLE fiscal_service_grant_v29");
+                statement.execute("""
+                        CREATE TABLE permanent_destruction_operation (
+                            operation_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            source_account TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            state TEXT NOT NULL CHECK (state IN ('PREPARED', 'COMMITTED')),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            committed_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((state = 'PREPARED' AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'COMMITTED' AND committed_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 30");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -5020,6 +5310,28 @@ public final class CivicDatabase implements AutoCloseable {
         try (ResultSet result = query.executeQuery()) {
             return result.next() ? storedMonetarySupplyEvent(result) : null;
         }
+    }
+
+    private StoredPermanentDestructionOperation readPermanentDestructionOperation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedPermanentDestructionOperation(result) : null;
+        }
+    }
+
+    private static StoredPermanentDestructionOperation storedPermanentDestructionOperation(
+            ResultSet result) throws SQLException {
+        long committedAt = result.getLong("committed_at_epoch_millis");
+        return new StoredPermanentDestructionOperation(
+                UUID.fromString(result.getString("operation_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                result.getString("source_account"),
+                result.getLong("amount_minor_units"),
+                result.getString("reason"),
+                result.getString("state"),
+                result.getLong("prepared_at_epoch_millis"),
+                result.wasNull() ? null : committedAt);
     }
 
     private static StoredMonetarySupplyEvent storedMonetarySupplyEvent(ResultSet result)

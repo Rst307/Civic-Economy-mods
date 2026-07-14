@@ -3,9 +3,8 @@ package org.civiceconomy.integration.lightmanscurrency;
 import net.minecraft.server.level.ServerLevel;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.monetary.ExternalPermanentDestruction;
-import org.civiceconomy.monetary.ExternalPermanentDestructions;
 
-public final class LightmansCurrencyPermanentDestructions
+final class LightmansCurrencyPermanentDestructions
         implements ExternalPermanentDestructions {
     private final LightmansCurrencyPermanentDestructionAccounts accounts;
 
@@ -14,7 +13,7 @@ public final class LightmansCurrencyPermanentDestructions
         this.accounts = accounts;
     }
 
-    public static LightmansCurrencyPermanentDestructions live(ServerLevel level) {
+    static LightmansCurrencyPermanentDestructions live(ServerLevel level) {
         return new LightmansCurrencyPermanentDestructions(
                 new LiveLightmansCurrencyPermanentDestructionAccounts(
                         LightmansCurrencyFiscalAccounts.forLevel(level)));
