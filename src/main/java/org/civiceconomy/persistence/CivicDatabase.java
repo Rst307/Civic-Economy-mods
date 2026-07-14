@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 16;
+    private static final int SCHEMA_VERSION = 18;
 
     private final Connection connection;
 
@@ -190,8 +190,12 @@ public final class CivicDatabase implements AutoCloseable {
     public synchronized StoredFiscalCapabilityGrant fiscalCapabilityGrant(
             String serviceIdentity, String capability, String accountId) {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT * FROM fiscal_service_grant
-                WHERE service_identity = ? AND capability = ? AND account_id = ?
+                SELECT g.* FROM fiscal_service_grant g
+                LEFT JOIN fiscal_service_grant_revocation r ON r.grant_id = g.grant_id
+                WHERE g.service_identity = ? AND g.capability = ? AND g.account_id = ?
+                  AND r.grant_id IS NULL
+                ORDER BY g.granted_at_epoch_millis DESC, g.rowid DESC
+                LIMIT 1
                 """)) {
             query.setString(1, serviceIdentity);
             query.setString(2, capability);
@@ -199,6 +203,141 @@ public final class CivicDatabase implements AutoCloseable {
             return readFiscalCapabilityGrant(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read fiscal capability scope", failure);
+        }
+    }
+
+    public synchronized StoredFiscalCapabilityGrant fiscalCapabilityGrant(UUID grantId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_service_grant WHERE grant_id = ?
+                """)) {
+            query.setString(1, grantId.toString());
+            return readFiscalCapabilityGrant(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal capability grant " + grantId, failure);
+        }
+    }
+
+    public synchronized StoredFiscalCapabilityRevocation revokeFiscalCapability(
+            UUID revocationId,
+            UUID grantId,
+            String administratorIdentity,
+            String requestId,
+            String reason,
+            long revokedAtEpochMillis) {
+        StoredFiscalCapabilityRevocation replay =
+                fiscalCapabilityRevocation(administratorIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        StoredFiscalCapabilityRevocation existing = fiscalCapabilityRevocation(grantId);
+        if (existing != null) {
+            return existing;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO fiscal_service_grant_revocation (
+                    revocation_id, grant_id, administrator_identity, request_id,
+                    reason, revoked_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, revocationId.toString());
+            insert.setString(2, grantId.toString());
+            insert.setString(3, administratorIdentity);
+            insert.setString(4, requestId);
+            insert.setString(5, reason);
+            insert.setLong(6, revokedAtEpochMillis);
+            insert.executeUpdate();
+            return fiscalCapabilityRevocation(administratorIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to revoke fiscal capability grant " + grantId, failure);
+        }
+    }
+
+    public synchronized StoredFiscalCapabilityRevocation fiscalCapabilityRevocation(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_service_grant_revocation
+                WHERE administrator_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            return readFiscalCapabilityRevocation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal revocation request", failure);
+        }
+    }
+
+    public synchronized StoredFiscalCapabilityRevocation fiscalCapabilityRevocation(UUID grantId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_service_grant_revocation WHERE grant_id = ?
+                """)) {
+            query.setString(1, grantId.toString());
+            return readFiscalCapabilityRevocation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal grant revocation " + grantId, failure);
+        }
+    }
+
+    public synchronized StoredFiscalServiceStateChange changeFiscalServiceState(
+            UUID changeId,
+            String administratorIdentity,
+            String requestId,
+            String serviceIdentity,
+            String state,
+            String reason,
+            long changedAtEpochMillis) {
+        StoredFiscalServiceStateChange replay =
+                fiscalServiceStateChange(administratorIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO fiscal_service_state_change (
+                    change_id, administrator_identity, request_id, service_identity,
+                    state, reason, changed_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, changeId.toString());
+            insert.setString(2, administratorIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, serviceIdentity);
+            insert.setString(5, state);
+            insert.setString(6, reason);
+            insert.setLong(7, changedAtEpochMillis);
+            insert.executeUpdate();
+            return fiscalServiceStateChange(administratorIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to change fiscal service state for " + serviceIdentity, failure);
+        }
+    }
+
+    public synchronized StoredFiscalServiceStateChange fiscalServiceStateChange(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_service_state_change
+                WHERE administrator_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            return readFiscalServiceStateChange(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal service state request", failure);
+        }
+    }
+
+    public synchronized boolean isFiscalServiceEnabled(String serviceIdentity) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT state FROM fiscal_service_state_change
+                WHERE service_identity = ?
+                ORDER BY changed_at_epoch_millis DESC, rowid DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, serviceIdentity);
+            try (ResultSet result = query.executeQuery()) {
+                return !result.next() || "ENABLED".equals(result.getString("state"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal service state " + serviceIdentity, failure);
         }
     }
 
@@ -2109,6 +2248,77 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 16");
             }
+            if (version < 17) {
+                statement.execute("ALTER TABLE fiscal_service_grant RENAME TO fiscal_service_grant_v16");
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            capability TEXT NOT NULL CHECK (capability IN (
+                                'READ_ACCOUNT', 'RESERVE_FUNDS', 'MANAGE_ESCROW',
+                                'MANAGE_BUDGET', 'ISSUE_BILL', 'FUND_BILL',
+                                'SETTLE_PAYMENT', 'REFUND_PAYMENT', 'COMPENSATE_PAYMENT'
+                            )),
+                            account_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant (
+                            grant_id, administrator_identity, request_id, service_identity,
+                            capability, account_id, reason, granted_at_epoch_millis
+                        )
+                        SELECT grant_id, administrator_identity, request_id, service_identity,
+                               capability, account_id, reason, granted_at_epoch_millis
+                        FROM fiscal_service_grant_v16
+                        """);
+                statement.execute("DROP TABLE fiscal_service_grant_v16");
+                statement.execute("""
+                        CREATE INDEX fiscal_service_grant_active_scope
+                        ON fiscal_service_grant (service_identity, capability, account_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_service_grant(grant_id),
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 17");
+            }
+            if (version < 18) {
+                statement.execute("""
+                        CREATE TABLE fiscal_service_state_change (
+                            change_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            state TEXT NOT NULL CHECK (state IN ('ENABLED', 'DISABLED')),
+                            reason TEXT NOT NULL,
+                            changed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (changed_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_service_state_current
+                        ON fiscal_service_state_change (service_identity, changed_at_epoch_millis)
+                        """);
+                statement.execute("PRAGMA user_version = 18");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -2133,6 +2343,39 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("account_id"),
                     result.getString("reason"),
                     result.getLong("granted_at_epoch_millis"));
+        }
+    }
+
+    private StoredFiscalCapabilityRevocation readFiscalCapabilityRevocation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredFiscalCapabilityRevocation(
+                    UUID.fromString(result.getString("revocation_id")),
+                    UUID.fromString(result.getString("grant_id")),
+                    result.getString("administrator_identity"),
+                    result.getString("request_id"),
+                    result.getString("reason"),
+                    result.getLong("revoked_at_epoch_millis"));
+        }
+    }
+
+    private StoredFiscalServiceStateChange readFiscalServiceStateChange(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredFiscalServiceStateChange(
+                    UUID.fromString(result.getString("change_id")),
+                    result.getString("administrator_identity"),
+                    result.getString("request_id"),
+                    result.getString("service_identity"),
+                    result.getString("state"),
+                    result.getString("reason"),
+                    result.getLong("changed_at_epoch_millis"));
         }
     }
 

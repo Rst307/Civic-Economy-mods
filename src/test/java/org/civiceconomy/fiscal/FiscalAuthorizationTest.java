@@ -1,6 +1,7 @@
 package org.civiceconomy.fiscal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
@@ -354,6 +355,321 @@ class FiscalAuthorizationTest {
                     "Permit Escrow inspection"));
 
             assertEquals(escrow, ledger.escrow(publicWorks, escrow.escrowId()));
+        }
+    }
+
+    @Test
+    void revocationSurvivesReopenAndBlocksNewWritesWithoutDeletingExistingState() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+        Path databaseFile = temporaryDirectory.resolve("revoked-authorization.sqlite3");
+        FiscalCapabilityRevocation revocation;
+
+        try (CivicDatabase database = CivicDatabase.open(databaseFile, identity())) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            FiscalCapabilityGrant reserveGrant = authorization.grant(new GrantFiscalCapability(
+                    administrator,
+                    "grant-revocable-reserve",
+                    publicWorks,
+                    FiscalCapability.RESERVE_FUNDS,
+                    treasury,
+                    "Permit bridge-project Reservations"));
+            authorization.grant(new GrantFiscalCapability(
+                    administrator,
+                    "grant-revocation-read",
+                    publicWorks,
+                    FiscalCapability.READ_ACCOUNT,
+                    treasury,
+                    "Permit post-revocation inspection"));
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+            ledger.reserve(new ReserveFunds(
+                    publicWorks,
+                    "existing-before-revocation",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(100),
+                    "Existing commitment"));
+            RevokeFiscalCapability request = new RevokeFiscalCapability(
+                    administrator,
+                    "revoke-reserve-grant",
+                    reserveGrant.grantId(),
+                    "Integration contract ended");
+
+            revocation = authorization.revoke(request);
+            assertEquals(revocation, authorization.revoke(request));
+        }
+
+        try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity())) {
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    reopened, ignored -> MoneyAmount.ofMinorUnits(1_000));
+
+            assertThrows(
+                    FiscalAccessDeniedException.class,
+                    () -> ledger.reserve(new ReserveFunds(
+                            publicWorks,
+                            "blocked-after-revocation",
+                            treasury,
+                            MoneyAmount.ofMinorUnits(100),
+                            "Must be denied")));
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(100),
+                    ledger.reservedBalance(publicWorks, treasury));
+            assertEquals(revocation.grantId(), revocation.grant().grantId());
+        }
+    }
+
+    @Test
+    void revokedScopeCanBeGrantedAgainWithNewHistoryAndRevocationConflictsFailClosed() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId anotherTreasury = new AccountId("nation:borealis:treasury");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            FiscalCapabilityGrant original = authorization.grant(new GrantFiscalCapability(
+                    administrator,
+                    "grant-original-reserve",
+                    publicWorks,
+                    FiscalCapability.RESERVE_FUNDS,
+                    treasury,
+                    "Original authority"));
+            RevokeFiscalCapability revocation = new RevokeFiscalCapability(
+                    administrator,
+                    "revoke-original-reserve",
+                    original.grantId(),
+                    "Original contract ended");
+            FiscalCapabilityRevocation revoked = authorization.revoke(revocation);
+
+            assertEquals(revoked, authorization.revoke(revocation));
+            assertThrows(
+                    FiscalRevocationConflictException.class,
+                    () -> authorization.revoke(new RevokeFiscalCapability(
+                            administrator,
+                            "revoke-original-reserve",
+                            original.grantId(),
+                            "Changed reason")));
+            assertThrows(
+                    UnknownFiscalGrantException.class,
+                    () -> authorization.revoke(new RevokeFiscalCapability(
+                            administrator,
+                            "revoke-missing-grant",
+                            UUID.randomUUID(),
+                            "Missing grant")));
+
+            FiscalCapabilityGrant replacement = authorization.grant(new GrantFiscalCapability(
+                    administrator,
+                    "grant-replacement-reserve",
+                    publicWorks,
+                    FiscalCapability.RESERVE_FUNDS,
+                    treasury,
+                    "Replacement authority"));
+
+            assertNotEquals(original.grantId(), replacement.grantId());
+            assertEquals(original.grantId(), revoked.grantId());
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+            ledger.reserve(new ReserveFunds(
+                    publicWorks,
+                    "replacement-authorized-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(100),
+                    "Replacement authority works"));
+            assertThrows(
+                    FiscalAccessDeniedException.class,
+                    () -> ledger.reserve(new ReserveFunds(
+                            publicWorks,
+                            "replacement-wrong-account",
+                            anotherTreasury,
+                            MoneyAmount.ofMinorUnits(100),
+                            "Scope remains exact")));
+        }
+    }
+
+    @Test
+    void disablingAServiceOverridesAllGrantsAndSurvivesReopen() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+        Path databaseFile = temporaryDirectory.resolve("disabled-service.sqlite3");
+        FiscalServiceStateChange disabled;
+
+        try (CivicDatabase database = CivicDatabase.open(databaseFile, identity())) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            for (FiscalCapability capability :
+                    new FiscalCapability[] {
+                        FiscalCapability.READ_ACCOUNT, FiscalCapability.RESERVE_FUNDS
+                    }) {
+                authorization.grant(new GrantFiscalCapability(
+                        administrator,
+                        "grant-before-disable-" + capability,
+                        publicWorks,
+                        capability,
+                        treasury,
+                        "Authority before disable"));
+            }
+            ChangeFiscalServiceState request = new ChangeFiscalServiceState(
+                    administrator,
+                    "disable-public-works",
+                    publicWorks,
+                    FiscalServiceState.DISABLED,
+                    "Integration removed from server");
+
+            disabled = authorization.changeState(request);
+            assertEquals(disabled, authorization.changeState(request));
+        }
+
+        try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity())) {
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    reopened, ignored -> MoneyAmount.ofMinorUnits(1_000));
+
+            assertThrows(
+                    FiscalAccessDeniedException.class,
+                    () -> ledger.availableBalance(publicWorks, treasury));
+            assertThrows(
+                    FiscalAccessDeniedException.class,
+                    () -> ledger.reserve(new ReserveFunds(
+                            publicWorks,
+                            "blocked-disabled-reservation",
+                            treasury,
+                            MoneyAmount.ofMinorUnits(100),
+                            "Disabled service cannot write")));
+            assertEquals(FiscalServiceState.DISABLED, disabled.state());
+            assertEquals(publicWorks, disabled.serviceIdentity());
+        }
+    }
+
+    @Test
+    void serviceCanBeReenabledAndStateRequestConflictsFailClosed() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            authorization.grant(new GrantFiscalCapability(
+                    administrator,
+                    "grant-reenable-reserve",
+                    publicWorks,
+                    FiscalCapability.RESERVE_FUNDS,
+                    treasury,
+                    "Persistent grant"));
+            ChangeFiscalServiceState disable = new ChangeFiscalServiceState(
+                    administrator,
+                    "disable-for-maintenance",
+                    publicWorks,
+                    FiscalServiceState.DISABLED,
+                    "Maintenance window");
+
+            assertEquals(authorization.changeState(disable), authorization.changeState(disable));
+            assertThrows(
+                    FiscalServiceStateConflictException.class,
+                    () -> authorization.changeState(new ChangeFiscalServiceState(
+                            administrator,
+                            "disable-for-maintenance",
+                            publicWorks,
+                            FiscalServiceState.ENABLED,
+                            "Changed payload")));
+            assertThrows(
+                    UnknownFiscalServiceException.class,
+                    () -> authorization.changeState(new ChangeFiscalServiceState(
+                            administrator,
+                            "disable-missing-service",
+                            new ServiceIdentity("missing-service"),
+                            FiscalServiceState.DISABLED,
+                            "Unknown service")));
+
+            authorization.changeState(new ChangeFiscalServiceState(
+                    administrator,
+                    "reenable-after-maintenance",
+                    publicWorks,
+                    FiscalServiceState.ENABLED,
+                    "Maintenance complete"));
+
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+            ledger.reserve(new ReserveFunds(
+                    publicWorks,
+                    "authorized-after-reenable",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(100),
+                    "Grant is active again"));
+            assertEquals(MoneyAmount.ofMinorUnits(100), ledger.reservedBalance(treasury));
+        }
+    }
+
+    @Test
+    void disablingServiceDoesNotStrandAlreadyAppliedPaymentRecovery() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("organization:bridge-builder:fiscal");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+        AtomicInteger externalCalls = new AtomicInteger();
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            for (FiscalCapability capability :
+                    new FiscalCapability[] {
+                        FiscalCapability.RESERVE_FUNDS,
+                        FiscalCapability.SETTLE_PAYMENT,
+                        FiscalCapability.READ_ACCOUNT
+                    }) {
+                authorization.grant(new GrantFiscalCapability(
+                        administrator,
+                        "grant-recovery-" + capability,
+                        publicWorks,
+                        capability,
+                        treasury,
+                        "Permit recoverable payment"));
+            }
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+            Reservation reservation = ledger.reserve(new ReserveFunds(
+                    publicWorks,
+                    "recoverable-payment-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Recoverable payment"));
+            PaymentCoordinator coordinator = PaymentCoordinator.authorized(
+                    database, ignored -> externalCalls.incrementAndGet());
+            String requestId = "recoverable-payment";
+
+            assertThrows(
+                    SimulatedCrash.class,
+                    () -> coordinator.settle(
+                            new SettleReservation(
+                                    publicWorks,
+                                    requestId,
+                                    reservation.reservationId(),
+                                    recipient,
+                                    MoneyAmount.ofMinorUnits(300)),
+                            FailurePoint.AFTER_EXTERNAL_APPLIED));
+            authorization.changeState(new ChangeFiscalServiceState(
+                    administrator,
+                    "disable-before-recovery",
+                    publicWorks,
+                    FiscalServiceState.DISABLED,
+                    "Caller disabled after external application"));
+
+            assertThrows(
+                    FiscalAccessDeniedException.class,
+                    () -> coordinator.transaction(publicWorks, requestId));
+            coordinator.recoverIncomplete();
+
+            assertEquals(1, externalCalls.get());
+            assertEquals("CIVIC_COMMITTED", database.paymentTransaction(requestId).state());
+            assertEquals(MoneyAmount.ZERO, ledger.reservedBalance(treasury));
         }
     }
 

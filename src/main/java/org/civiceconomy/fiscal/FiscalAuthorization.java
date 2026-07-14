@@ -70,9 +70,71 @@ public final class FiscalAuthorization {
         return toCapabilityGrant(stored);
     }
 
+    public FiscalCapabilityRevocation revoke(RevokeFiscalCapability request) {
+        var replay = database.fiscalCapabilityRevocation(
+                request.administrator().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.grantId().equals(request.grantId())
+                    || !replay.reason().equals(request.reason())) {
+                throw new FiscalRevocationConflictException(
+                        request.administrator(), request.requestId());
+            }
+            return toCapabilityRevocation(replay);
+        }
+        var grant = database.fiscalCapabilityGrant(request.grantId());
+        if (grant == null) {
+            throw new UnknownFiscalGrantException(request.grantId());
+        }
+        var existing = database.fiscalCapabilityRevocation(request.grantId());
+        if (existing != null) {
+            return toCapabilityRevocation(existing);
+        }
+        var stored = database.revokeFiscalCapability(
+                java.util.UUID.randomUUID(),
+                request.grantId(),
+                request.administrator().value(),
+                request.requestId(),
+                request.reason(),
+                System.currentTimeMillis());
+        if (stored.administratorIdentity().equals(request.administrator().value())
+                && stored.requestId().equals(request.requestId())
+                && (!stored.grantId().equals(request.grantId())
+                        || !stored.reason().equals(request.reason()))) {
+            throw new FiscalRevocationConflictException(
+                    request.administrator(), request.requestId());
+        }
+        return toCapabilityRevocation(stored);
+    }
+
+    public FiscalServiceStateChange changeState(ChangeFiscalServiceState request) {
+        if (database.fiscalService(request.serviceIdentity().value()) == null) {
+            throw new UnknownFiscalServiceException(request.serviceIdentity());
+        }
+        var replay = database.fiscalServiceStateChange(
+                request.administrator().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.serviceIdentity().equals(request.serviceIdentity().value())
+                    || !replay.state().equals(request.state().name())
+                    || !replay.reason().equals(request.reason())) {
+                throw new FiscalServiceStateConflictException(
+                        request.administrator(), request.requestId());
+            }
+            return toServiceStateChange(replay);
+        }
+        return toServiceStateChange(database.changeFiscalServiceState(
+                java.util.UUID.randomUUID(),
+                request.administrator().value(),
+                request.requestId(),
+                request.serviceIdentity().value(),
+                request.state().name(),
+                request.reason(),
+                System.currentTimeMillis()));
+    }
+
     void require(
             ServiceIdentity serviceIdentity, FiscalCapability capability, AccountId accountId) {
         if (database.fiscalService(serviceIdentity.value()) == null
+                || !database.isFiscalServiceEnabled(serviceIdentity.value())
                 || !database.hasFiscalCapability(
                         serviceIdentity.value(), capability.name(), accountId.value())) {
             throw new FiscalAccessDeniedException(serviceIdentity, capability, accountId);
@@ -98,5 +160,34 @@ public final class FiscalAuthorization {
                 new AccountId(stored.accountId()),
                 stored.reason(),
                 Instant.ofEpochMilli(stored.grantedAtEpochMillis()));
+    }
+
+    private FiscalCapabilityRevocation toCapabilityRevocation(
+            org.civiceconomy.persistence.StoredFiscalCapabilityRevocation stored) {
+        var grant = database.fiscalCapabilityGrant(stored.grantId());
+        if (grant == null) {
+            throw new IllegalStateException(
+                    "Fiscal revocation references a missing grant " + stored.grantId());
+        }
+        return new FiscalCapabilityRevocation(
+                stored.revocationId(),
+                stored.grantId(),
+                toCapabilityGrant(grant),
+                new ServiceIdentity(stored.administratorIdentity()),
+                stored.requestId(),
+                stored.reason(),
+                Instant.ofEpochMilli(stored.revokedAtEpochMillis()));
+    }
+
+    private static FiscalServiceStateChange toServiceStateChange(
+            org.civiceconomy.persistence.StoredFiscalServiceStateChange stored) {
+        return new FiscalServiceStateChange(
+                stored.changeId(),
+                new ServiceIdentity(stored.administratorIdentity()),
+                stored.requestId(),
+                new ServiceIdentity(stored.serviceIdentity()),
+                FiscalServiceState.valueOf(stored.state()),
+                stored.reason(),
+                Instant.ofEpochMilli(stored.changedAtEpochMillis()));
     }
 }
