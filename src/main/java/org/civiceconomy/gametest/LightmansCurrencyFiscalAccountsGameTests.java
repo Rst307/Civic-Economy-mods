@@ -26,6 +26,9 @@ import org.civiceconomy.fiscal.FailurePoint;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.PaymentCoordinator;
+import org.civiceconomy.fiscal.PaymentKind;
+import org.civiceconomy.fiscal.PaymentTransaction;
+import org.civiceconomy.fiscal.RefundPayment;
 import org.civiceconomy.fiscal.Reservation;
 import org.civiceconomy.fiscal.ReserveFunds;
 import org.civiceconomy.fiscal.ServiceIdentity;
@@ -158,6 +161,79 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     "recovered Civic payment state");
             helper.assertValueEqual(
                     MoneyAmount.ZERO, ledger.reservedBalance(treasury), "remaining National Treasury Reservation");
+        } finally {
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), treasury, fundingAccount, accounts.balance(treasury)));
+        bankData.deleteAccount(fundingPlayerId);
+        bankData.deleteAccount(recipientPlayerId);
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void committedTreasuryPaymentRefundsThroughRealLcExactlyOnce(GameTestHelper helper) {
+        UUID fundingPlayerId = UUID.randomUUID();
+        UUID recipientPlayerId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        AccountId treasury =
+                new AccountId("nation:8a5affd3-8095-4ad5-ae6d-0740c0f3cc46:treasury");
+        AccountId fundingAccount = new AccountId("player:" + fundingPlayerId);
+        AccountId recipientAccount = new AccountId("player:" + recipientPlayerId);
+        LightmansCurrencyFiscalAccounts accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, "Refund GameTest Treasury");
+        LightmansCurrencyPayments payments = LightmansCurrencyPayments.live(helper.getLevel());
+        clearFiscalAccount(bankData, accounts, payments, treasury);
+        IBankAccount fundingPlayer = reset(bankData, fundingPlayerId, 1_000);
+        IBankAccount recipientPlayer = reset(bankData, recipientPlayerId, 25);
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), fundingAccount, treasury, MoneyAmount.ofMinorUnits(700)));
+
+        Path temporaryDirectory = createTemporaryDirectory();
+        try (CivicDatabase database = CivicDatabase.open(
+                temporaryDirectory.resolve("civic.sqlite3"),
+                new DatabaseIdentity(
+                        UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
+            FiscalLedger ledger = new FiscalLedger(database, accounts);
+            Reservation reservation = ledger.reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy-gametest"),
+                    "refund-hold-" + UUID.randomUUID(),
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Real LC treasury refund GameTest"));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+            PaymentTransaction original = coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "refund-payment-" + UUID.randomUUID(),
+                            reservation.reservationId(),
+                            recipientAccount,
+                            MoneyAmount.ofMinorUnits(300)),
+                    FailurePoint.NONE);
+            RefundPayment request = new RefundPayment(
+                    new ServiceIdentity("civiceconomy-gametest"),
+                    "refund-reversal-" + UUID.randomUUID(),
+                    original.transactionId(),
+                    MoneyAmount.ofMinorUnits(300),
+                    "Real LC exact-once refund GameTest");
+
+            PaymentTransaction refund = coordinator.refund(request, FailurePoint.NONE);
+            PaymentTransaction replay = coordinator.refund(request, FailurePoint.NONE);
+
+            helper.assertValueEqual(300L, mainChainBalance(fundingPlayer), "funding LC player-bank balance");
+            helper.assertValueEqual(700L, accounts.balance(treasury).minorUnits(), "refunded National Treasury balance");
+            helper.assertValueEqual(25L, mainChainBalance(recipientPlayer), "refunded recipient player-bank balance");
+            helper.assertValueEqual(refund, replay, "idempotent LC refund replay");
+            helper.assertValueEqual(PaymentKind.REFUND, refund.kind(), "refund transaction kind");
+            helper.assertValueEqual(TransactionState.CIVIC_COMMITTED, refund.state(), "refund transaction state");
+            helper.assertValueEqual(
+                    original.transactionId(),
+                    refund.parentTransactionId().orElseThrow(),
+                    "refund parent transaction");
+            helper.assertValueEqual(
+                    MoneyAmount.ofMinorUnits(300),
+                    coordinator.transaction(original.requestId()).refundedAmount(),
+                    "original transaction refunded amount");
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
         }

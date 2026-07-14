@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 8;
+    private static final int SCHEMA_VERSION = 9;
 
     private final Connection connection;
 
@@ -509,6 +509,60 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredPaymentTransaction prepareRefund(
+            String serviceIdentity,
+            String requestId,
+            UUID originalTransactionId,
+            long amountMinorUnits,
+            String reason) {
+        StoredPaymentTransaction existing = paymentTransaction(serviceIdentity, requestId);
+        if (existing != null) {
+            return existing;
+        }
+        StoredPaymentTransaction original = paymentTransaction(originalTransactionId);
+        if (original == null || !"PAYMENT".equals(original.kind())
+                || !"CIVIC_COMMITTED".equals(original.state())) {
+            throw new IllegalArgumentException(
+                    "Refund parent must be a committed payment " + originalTransactionId);
+        }
+        long refundableMinorUnits = Math.subtractExact(
+                original.amountMinorUnits(), original.refundedMinorUnits());
+        if (amountMinorUnits > refundableMinorUnits) {
+            throw new ReservationRemainderExceededException(
+                    originalTransactionId, amountMinorUnits, refundableMinorUnits);
+        }
+        try {
+            if (hasIncompleteRefund(originalTransactionId)) {
+                throw new IllegalStateException(
+                        "Payment already has an incomplete refund " + originalTransactionId);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect pending refunds", failure);
+        }
+        UUID transactionId = UUID.randomUUID();
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO payment_transaction (
+                    transaction_id, service_identity, request_id, reservation_id,
+                    source_account, recipient_account, amount_minor_units, kind,
+                    parent_transaction_id, reason, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'REFUND', ?, ?, 'PREPARED')
+                """)) {
+            insert.setString(1, transactionId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, original.reservationId().toString());
+            insert.setString(5, original.recipientAccount());
+            insert.setString(6, original.sourceAccount());
+            insert.setLong(7, amountMinorUnits);
+            insert.setString(8, originalTransactionId.toString());
+            insert.setString(9, reason);
+            insert.executeUpdate();
+            return paymentTransaction(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to prepare refund", failure);
+        }
+    }
+
     public synchronized void markExternalApplied(UUID transactionId) {
         updateTransactionState(transactionId, "PREPARED", "EXTERNAL_APPLIED");
     }
@@ -564,6 +618,56 @@ public final class CivicDatabase implements AutoCloseable {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to commit payment", failure);
+        }
+    }
+
+    public synchronized void commitRefund(UUID transactionId, UUID originalTransactionId) {
+        StoredPaymentTransaction refund = paymentTransaction(transactionId);
+        if (refund == null) {
+            throw new IllegalArgumentException("Unknown refund transaction " + transactionId);
+        }
+        if ("CIVIC_COMMITTED".equals(refund.state())) {
+            return;
+        }
+        if (!"REFUND".equals(refund.kind()) || !"EXTERNAL_APPLIED".equals(refund.state())
+                || !originalTransactionId.equals(refund.parentTransactionId())) {
+            throw new IllegalStateException("Refund transaction is not ready for Civic commit " + transactionId);
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement updateOriginal = connection.prepareStatement("""
+                        UPDATE payment_transaction
+                        SET refunded_minor_units = refunded_minor_units + ?
+                        WHERE transaction_id = ?
+                          AND kind = 'PAYMENT'
+                          AND state = 'CIVIC_COMMITTED'
+                          AND amount_minor_units - refunded_minor_units >= ?
+                        """);
+                    PreparedStatement commitRefund = connection.prepareStatement("""
+                        UPDATE payment_transaction SET state = 'CIVIC_COMMITTED'
+                        WHERE transaction_id = ? AND kind = 'REFUND' AND state = 'EXTERNAL_APPLIED'
+                        """)) {
+                updateOriginal.setLong(1, refund.amountMinorUnits());
+                updateOriginal.setString(2, originalTransactionId.toString());
+                updateOriginal.setLong(3, refund.amountMinorUnits());
+                if (updateOriginal.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Refund exceeds remaining refundable payment " + originalTransactionId);
+                }
+                commitRefund.setString(1, transactionId.toString());
+                if (commitRefund.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Refund transaction state changed before Civic commit " + transactionId);
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to commit refund " + transactionId, failure);
         }
     }
 
@@ -767,6 +871,29 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 8");
             }
+            if (version < 9) {
+                statement.execute("""
+                        ALTER TABLE payment_transaction
+                        ADD COLUMN kind TEXT NOT NULL DEFAULT 'PAYMENT'
+                        CHECK (kind IN ('PAYMENT', 'REFUND'))
+                        """);
+                statement.execute("""
+                        ALTER TABLE payment_transaction
+                        ADD COLUMN parent_transaction_id TEXT REFERENCES payment_transaction(transaction_id)
+                        """);
+                statement.execute("""
+                        ALTER TABLE payment_transaction
+                        ADD COLUMN refunded_minor_units INTEGER NOT NULL DEFAULT 0
+                        CHECK (refunded_minor_units >= 0 AND refunded_minor_units <= amount_minor_units)
+                        """);
+                statement.execute("ALTER TABLE payment_transaction ADD COLUMN reason TEXT");
+                statement.execute("""
+                        CREATE UNIQUE INDEX payment_one_incomplete_refund
+                        ON payment_transaction (parent_transaction_id)
+                        WHERE kind = 'REFUND' AND state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                        """);
+                statement.execute("PRAGMA user_version = 9");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -853,6 +980,21 @@ public final class CivicDatabase implements AutoCloseable {
                 LIMIT 1
                 """)) {
             query.setString(1, reservationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+    private boolean hasIncompleteRefund(UUID originalTransactionId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM payment_transaction
+                WHERE parent_transaction_id = ?
+                  AND kind = 'REFUND'
+                  AND state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                LIMIT 1
+                """)) {
+            query.setString(1, originalTransactionId.toString());
             try (ResultSet result = query.executeQuery()) {
                 return result.next();
             }
@@ -973,6 +1115,7 @@ public final class CivicDatabase implements AutoCloseable {
     }
 
     private static StoredPaymentTransaction readPayment(ResultSet result) throws SQLException {
+        String parent = result.getString("parent_transaction_id");
         return new StoredPaymentTransaction(
                 UUID.fromString(result.getString("transaction_id")),
                 result.getString("service_identity"),
@@ -981,6 +1124,10 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getString("source_account"),
                 result.getString("recipient_account"),
                 result.getLong("amount_minor_units"),
+                result.getString("kind"),
+                parent == null ? null : UUID.fromString(parent),
+                result.getLong("refunded_minor_units"),
+                result.getString("reason"),
                 result.getString("state"));
     }
 

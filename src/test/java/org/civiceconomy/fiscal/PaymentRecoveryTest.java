@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -325,6 +326,218 @@ class PaymentRecoveryTest {
                     TransactionState.CIVIC_COMMITTED,
                     recovery.transaction("partial-recovery-payment").state());
             assertEquals(MoneyAmount.ofMinorUnits(300), ledger(reopened).reservedBalance(treasury));
+        }
+    }
+
+    @Test
+    void committedPaymentCanBeRefundedExactlyOnce() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        AtomicInteger externalCalls = new AtomicInteger();
+
+        try (CivicDatabase database = database()) {
+            Reservation reservation = ledger(database).reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "refund-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Refundable grant"));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, ignored -> externalCalls.incrementAndGet());
+            PaymentTransaction original = coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "refund-original-payment",
+                            reservation.reservationId(),
+                            recipient,
+                            MoneyAmount.ofMinorUnits(300)),
+                    FailurePoint.NONE);
+            RefundPayment request = new RefundPayment(
+                    new ServiceIdentity("civiceconomy"),
+                    "refund-request",
+                    original.transactionId(),
+                    MoneyAmount.ofMinorUnits(300),
+                    "Grant cancelled and returned");
+
+            PaymentTransaction refund = coordinator.refund(request, FailurePoint.NONE);
+
+            assertEquals(TransactionState.CIVIC_COMMITTED, refund.state());
+            assertEquals(PaymentKind.REFUND, refund.kind());
+            assertEquals(Optional.of(original.transactionId()), refund.parentTransactionId());
+            assertEquals(recipient, refund.sourceAccount());
+            assertEquals(treasury, refund.recipientAccount());
+            assertEquals(MoneyAmount.ofMinorUnits(300), refund.amount());
+            assertEquals(refund, coordinator.refund(request, FailurePoint.NONE));
+            assertEquals(2, externalCalls.get());
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(300),
+                    coordinator.transaction("refund-original-payment").refundedAmount());
+        }
+    }
+
+    @Test
+    void partialRefundsCannotExceedTheOriginalPayment() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        AtomicInteger externalCalls = new AtomicInteger();
+
+        try (CivicDatabase database = database()) {
+            Reservation reservation = ledger(database).reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "partial-refund-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(500),
+                    "Refundable staged grant"));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, ignored -> externalCalls.incrementAndGet());
+            PaymentTransaction original = coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "partial-refund-original",
+                            reservation.reservationId(),
+                            recipient,
+                            MoneyAmount.ofMinorUnits(500)),
+                    FailurePoint.NONE);
+            coordinator.refund(
+                    new RefundPayment(
+                            new ServiceIdentity("civiceconomy"),
+                            "partial-refund-first",
+                            original.transactionId(),
+                            MoneyAmount.ofMinorUnits(200),
+                            "First returned portion"),
+                    FailurePoint.NONE);
+            coordinator.refund(
+                    new RefundPayment(
+                            new ServiceIdentity("civiceconomy"),
+                            "partial-refund-second",
+                            original.transactionId(),
+                            MoneyAmount.ofMinorUnits(300),
+                            "Final returned portion"),
+                    FailurePoint.NONE);
+
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(500),
+                    coordinator.transaction("partial-refund-original").refundedAmount());
+            assertThrows(
+                    InsufficientRefundableAmountException.class,
+                    () -> coordinator.refund(
+                            new RefundPayment(
+                                    new ServiceIdentity("civiceconomy"),
+                                    "partial-refund-too-large",
+                                    original.transactionId(),
+                                    MoneyAmount.ofMinorUnits(1),
+                                    "No refundable remainder"),
+                            FailurePoint.NONE));
+            assertEquals(3, externalCalls.get());
+        }
+    }
+
+    @Test
+    void ambiguousRefundRecoveryRetriesTheSameTransactionId() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        AtomicInteger externalAttempts = new AtomicInteger();
+        AtomicInteger economicEffects = new AtomicInteger();
+        Set<UUID> appliedTransactions = new HashSet<>();
+        ExternalPayments idempotentExternal = payment -> {
+            externalAttempts.incrementAndGet();
+            if (appliedTransactions.add(payment.transactionId())) {
+                economicEffects.incrementAndGet();
+            }
+        };
+        UUID originalTransactionId;
+
+        try (CivicDatabase database = database()) {
+            Reservation reservation = ledger(database).reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "ambiguous-refund-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Refund crash fixture"));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, idempotentExternal);
+            PaymentTransaction original = coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "ambiguous-refund-original",
+                            reservation.reservationId(),
+                            recipient,
+                            MoneyAmount.ofMinorUnits(300)),
+                    FailurePoint.NONE);
+            originalTransactionId = original.transactionId();
+
+            assertThrows(SimulatedCrash.class, () -> coordinator.refund(
+                    new RefundPayment(
+                            new ServiceIdentity("civiceconomy"),
+                            "ambiguous-refund-request",
+                            original.transactionId(),
+                            MoneyAmount.ofMinorUnits(300),
+                            "Crash after external refund"),
+                    FailurePoint.AFTER_EXTERNAL_BEFORE_RECORD));
+        }
+
+        try (CivicDatabase reopened = database()) {
+            PaymentCoordinator recovery = new PaymentCoordinator(reopened, idempotentExternal);
+
+            recovery.recoverIncomplete();
+
+            assertEquals(3, externalAttempts.get());
+            assertEquals(2, economicEffects.get());
+            assertEquals(
+                    TransactionState.CIVIC_COMMITTED,
+                    recovery.transaction("ambiguous-refund-request").state());
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(300),
+                    recovery.transaction("ambiguous-refund-original").refundedAmount());
+            assertEquals(
+                    Optional.of(originalTransactionId),
+                    recovery.transaction("ambiguous-refund-request").parentTransactionId());
+        }
+    }
+
+    @Test
+    void recordedExternalRefundRecoveryDoesNotPayAgain() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        AtomicInteger externalCalls = new AtomicInteger();
+
+        try (CivicDatabase database = database()) {
+            Reservation reservation = ledger(database).reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "recorded-refund-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Recorded refund fixture"));
+            PaymentCoordinator coordinator =
+                    new PaymentCoordinator(database, ignored -> externalCalls.incrementAndGet());
+            PaymentTransaction original = coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "recorded-refund-original",
+                            reservation.reservationId(),
+                            recipient,
+                            MoneyAmount.ofMinorUnits(300)),
+                    FailurePoint.NONE);
+
+            assertThrows(SimulatedCrash.class, () -> coordinator.refund(
+                    new RefundPayment(
+                            new ServiceIdentity("civiceconomy"),
+                            "recorded-refund-request",
+                            original.transactionId(),
+                            MoneyAmount.ofMinorUnits(300),
+                            "Crash after refund marker"),
+                    FailurePoint.AFTER_EXTERNAL_APPLIED));
+        }
+
+        try (CivicDatabase reopened = database()) {
+            PaymentCoordinator recovery = new PaymentCoordinator(reopened, ignored -> externalCalls.incrementAndGet());
+
+            recovery.recoverIncomplete();
+
+            assertEquals(2, externalCalls.get());
+            assertEquals(
+                    TransactionState.CIVIC_COMMITTED,
+                    recovery.transaction("recorded-refund-request").state());
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(300),
+                    recovery.transaction("recorded-refund-original").refundedAmount());
         }
     }
 

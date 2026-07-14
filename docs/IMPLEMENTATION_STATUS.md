@@ -54,16 +54,19 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Release fails closed for settled/released/unknown Reservations and for any Reservation with a `PREPARED` or `EXTERNAL_APPLIED` payment, preventing cancellation of money that may already have moved externally.
 - Added partial settlement. Each committed payment reduces only the remaining hold, the Reservation stays active until fully consumed, over-settlement is rejected, and a later release frees only the unpaid remainder.
 - Partial crash recovery reuses the existing transaction UUID and commits only the recovered payment amount; the unpaid Reservation remainder survives restart.
+- Raised the SQLite schema to v9 and added `PAYMENT` / `REFUND` transaction kinds with durable parent linkage, cumulative refunded amount, and an incomplete-refund uniqueness guard.
+- Added idempotent full and partial refunds for committed payments. Refunds reverse source/recipient accounts through the same external transaction UUID marker and reject amounts above the remaining refundable value.
+- Refund recovery covers both ambiguous external application and recorded `EXTERNAL_APPLIED` restart windows; replay does not repeat the economic effect.
 
 ## In progress
 
-- Add idempotent refunds for committed payments with crash recovery and compensation.
+- Add compensation execution and recovery audit records for external failures that cannot complete normally.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v8, online backups, restore validation, compensation execution, and recovery audit records.
+- SQLite migrations beyond schema v9, online backups, restore validation, compensation execution, and recovery audit records.
 - Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
-- Player-bank balance adapter; budgets, Escrow, refunds, withdrawals, approvals, ledger, audit, and service authorization policy.
+- Player-bank balance adapter; budgets, Escrow, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
@@ -96,12 +99,12 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,472,825 bytes, SHA-256 `D81582A7CE2ADE3E87C1A69B1C417E20A244EDB9E48C6B70ECED66BFD6C23327`. This is not yet a release artifact.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,479,592 bytes, SHA-256 `F2EFAA77EAFDC9C6A2A6A471DB5DDC7F978F0108BDED9D3AA3F59563FAE18463`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v8, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, and partial-settlement storage, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v9, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, and refund storage, foreign-world rejection, and unknown-schema rejection.
 - These are real database integration tests, not mocks; backup/restore and crash recovery remain unverified.
 
 ### Fiscal domain and database integration
@@ -113,17 +116,19 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Recovery after `EXTERNAL_APPLIED` performs no second external call; ambiguous recovery retries the same transaction UUID, producing two adapter attempts but one idempotent economic effect.
 - Release tests verify exact replay across restart, reason-payload conflict rejection, immediate available-balance restoration, and rejection while a payment is ambiguous or already committed.
 - Partial-settlement tests verify `500 -> 300 -> 0` remaining-hold behavior, replay stability, release of only the remaining `300`, over-settlement rejection at `301`, and restart recovery of a committed `200` payment with `300` still reserved.
+- Refund integration tests verify exact-once full refund replay, cumulative `200 + 300` partial refunds, rejection above the refundable ceiling, ambiguous refund retry with one economic effect, and `EXTERNAL_APPLIED` recovery without another external call.
 - The SQLite crash-recovery tests still use a controlled external-payment adapter; real LC payment evidence is recorded separately below and is not yet wired to Civic-owned treasury accounts.
 
 ### Real Lightman's Currency integration
 
 - `LightmansCurrencyPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
-- `gradlew.bat runGameTestServer --no-daemon --console=plain -PincludeCreate=false` passed eight required GameTests against the real pinned LC/FTB runtime after the server-runtime slice.
+- `gradlew.bat runGameTestServer --console=plain` passed nine required GameTests against the real pinned LC/FTB runtime after the refund slice.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
 - The interest test funded a National Treasury with 500 LC minor units, invoked LC's interest hook with a multiplier that would otherwise double it, and verified the balance remained exactly 500.
 - The treasury settlement test used a real temporary SQLite database and real LC accounts. Funding player `1000 → 300`, National Treasury `0 → 700 → 400`, and recipient `25 → 325`; ambiguous recovery finished `CIVIC_COMMITTED` and cleared the Reservation without a second economic effect.
+- The refund GameTest paid `300` from the real National Treasury to a real LC player account and reversed it exactly once: funding player remained `300`, National Treasury returned to `700`, recipient returned to `25`, replay returned the same committed refund, and the original payment recorded `300` refunded minor units.
 - Repeated GameTest runs honor markers persisted by earlier runs; each isolated test therefore uses a fresh transaction UUID while replaying it twice within that run.
 - LC logs `GameProfileCache` errors when its synthetic offline player accounts are generated under the headless GameTest server, whose profile cache is null. The required test still passes and normal dedicated-server startup does not show this condition.
 
@@ -161,6 +166,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the online-time and Effective Citizen slice, the no-Create dedicated server reached `Done (3.440s)!` and the Create `6.0.6` server reached `Done (3.330s)!`.
 - After the server-runtime slice, the no-Create dedicated server reached `Done (3.361s)!` and then logged world-bound SQLite/online observation active. The Create `6.0.6` server reached `Done (3.374s)!` and logged the same runtime activation immediately afterward.
 - After Reservation release and partial settlement, the no-Create server reached `Done (3.399s)!` and the Create `6.0.6` server reached `Done (3.252s)!`; both then opened the migrated world-bound SQLite runtime successfully.
+- After the refund/schema-v9 slice, the no-Create server reached `Done (3.571s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.400s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully.
 
 ### Environment note
 
@@ -176,7 +182,6 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Graceful `ServerStoppedEvent` waits up to ten seconds for queued SQLite writes and close. This is bounded shutdown lifecycle work, not regular tick work, but timeout behavior still needs a controlled fault GameTest.
 - `NationRegistry.register` is currently the durable registration primitive. No gameplay command yet proves the caller is the FTB Team head or enforces the configurable minimum valid-citizen threshold.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
-- Refunds are not yet implemented. A committed partial or full payment cannot currently be reversed through a Civic state machine, so refund semantics and economic-activity exclusion remain release blockers.
 - Founding eligibility is intentionally not wired to raw FTB members. The spec needs either a pending Nation/application state that can accumulate Citizenship time before activation, or an explicit rule for pre-Nation activity evidence; implementation is paused only at that semantic fork.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
 - The treasury GameTest proves real LC/SQLite recovery inside one running server after the ambiguous adapter window. It does not yet prove process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files; durable per-account transfer phase evidence or compensation is still required before release.
@@ -185,4 +190,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Implement idempotent refunds for committed payments with crash recovery and compensation, while the founding activation semantic fork remains explicitly documented.
+Implement controlled compensation and recovery audit records for failed external writes, then continue the fiscal release path with budgets and Escrow while the founding activation semantic fork remains explicitly documented.

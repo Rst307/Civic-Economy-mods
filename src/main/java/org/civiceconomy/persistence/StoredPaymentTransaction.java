@@ -10,4 +10,8 @@ public record StoredPaymentTransaction(
         String sourceAccount,
         String recipientAccount,
         long amountMinorUnits,
+        String kind,
+        UUID parentTransactionId,
+        long refundedMinorUnits,
+        String reason,
         String state) {}
