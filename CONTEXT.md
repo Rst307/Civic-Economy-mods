@@ -1,5 +1,31 @@
 # Civic Economy
 
+## Founding applications
+
+**Nation Application**:
+A pre-Nation founding candidacy bound to one FTB Team and its Candidate Members. It has no permanent NationId, National Treasury, territorial strength, or issuance authority.
+_Avoid_: Pending Nation, temporary Nation, provisional Treasury
+
+**PENDING**:
+The active Nation Application state in which candidate eligibility evidence may accumulate but Nation activation has not occurred.
+_Avoid_: Active Nation, registered Nation
+
+**Candidate Member**:
+A player affiliated with one Nation Application for founding eligibility. Candidate membership is not Citizenship and grants no national fiscal or territorial rights.
+_Avoid_: Citizen, Effective Citizen, FTB Team member
+
+**Candidate Online Evidence**:
+Recent observed online time attributed to one Nation Application for founding eligibility; the same interval cannot support multiple applications, including after cancellation or expiry.
+_Avoid_: Citizenship time, reusable playtime, raw team membership
+
+**Effective Candidate**:
+A Candidate Member with non-zero Candidate Online Evidence inside the founding observation window.
+_Avoid_: FTB Team member, Citizen, inactive candidate
+
+**Nation Activation**:
+The one-way founding transition that creates the permanent NationId, formal Citizenship, Capital, and National Treasury after eligibility is satisfied. A DEBUG WORLD may explicitly bypass the minimum Candidate Member threshold; a formal world may not.
+_Avoid_: Application creation, automatic team promotion
+
 Civic Economy 是多国家 Minecraft 服务器的财政与货币领域。它以统一实体货币为基础，区分国家政治身份、财政控制、可审计经济活动与自由现金活动。
 
 ## 国家与治理
@@ -23,6 +49,10 @@ _Avoid_: FTB 好友关系、签证、经营许可
 **有效公民（Effective Citizen）**:
 在规定滚动窗口内以累计在线时长形成非零国家人口贡献的公民。
 _Avoid_: 成员、累计登录玩家、小号
+
+**首都（Capital）**:
+国家唯一的领土连续性与财政治理锚点；只有 Nation Activation 才能建立首个首都。
+_Avoid_: 出生点、任意已占领区块、FTB 团队基地
 
 ## 财政与账户
 

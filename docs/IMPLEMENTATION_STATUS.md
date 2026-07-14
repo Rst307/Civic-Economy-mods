@@ -60,7 +60,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added idempotent full and partial refunds for committed payments. Refunds reverse source/recipient accounts through the same external transaction UUID marker and reject amounts above the remaining refundable value.
 - Refund recovery covers both ambiguous external application and recorded `EXTERNAL_APPLIED` restart windows; replay does not repeat the economic effect.
 - Added online SQLite backups through Xerial's native backup API, so an open WAL database can produce a consistent point-in-time snapshot without copying live database files directly.
-- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (v18) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
+- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (v20) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
 - Restore refuses to overwrite an existing destination and publishes through a temporary sibling file, using an atomic move when the filesystem supports it.
 - Raised the SQLite schema to v10 with durable payment-compensation requests and immutable recovery-audit records.
 - Added controlled compensation for a `EXTERNAL_APPLIED` payment or refund that must not complete normally. The transaction enters `COMPENSATING` before the reverse transfer and reaches `COMPENSATED` only after the reverse is confirmed.
@@ -107,15 +107,22 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added OP/console-only `civic economy admin service` commands for register, grant, revoke, disable, enable, list, and show. Registration rejects unloaded owner Mods; administrator identity is derived from the real command source rather than user input.
 - Administration commands enqueue SQLite work on the dedicated `Civic-Economy-SQLite` executor and report completion back on the server thread. Command parsing and permission checks never synchronously execute SQLite on the Minecraft server thread.
 - Added immutable authorization views exposing the registered owner, registration audit, current service state, exact account grants, and revocation status without letting command code query SQLite directly.
+- Raised the SQLite schema to v20 with persistent `NationApplication` / `PENDING` founding applications, immutable terminal transitions, Candidate Member affiliations, non-reusable Candidate Online Evidence, durable activation preparation, and Capital storage.
+- Application creation requires the current FTB Team head, binds only an unregistered team, snapshots Candidate Members atomically, creates no Nation/Citizenship/Treasury, and enforces one PENDING application per team plus one active candidate affiliation per player.
+- Candidate evidence clips completed online intervals to the application lifetime, candidate affiliation, configured observation window, and observation time. The original interval UUID is the global claim key, so cancellation, expiry, replay, and later applications cannot reuse it.
+- Cancellation and expiry atomically close candidate affiliations and record immutable transition provenance without deleting claimed evidence. Expiry attributes only through the application deadline, not the later scheduler execution time.
+- Added a durable Nation activation state machine. Formal activation requires the configured Effective Candidate count; only a server-composed `DEBUG WORLD` policy can reduce that requirement to one, and the request contains no caller-controlled debug flag.
+- Activation persists `PREPARED`, idempotently provisions the real LC National Treasury, records `TREASURY_PROVISIONED`, then atomically commits the permanent NationId, all Candidate Member Citizenship periods, Capital, application `ACTIVATED` state, transition audit, and activation completion.
+- A crash after external Treasury creation but before Civic records it replays the same deterministic account identity. Until Civic commit, the application remains PENDING and no Nation or Citizenship is visible.
 
 ## In progress
 
-- Add persistent `NationApplication` / `PENDING` founding applications so candidate members can accumulate non-reusable recent online evidence before permanent `NationId`, formal Citizenship, capital, and treasury activation.
+- Wire Nation Application creation, cancellation, expiry, and activation into server-authoritative asynchronous gameplay commands, including the persistent `DEBUG WORLD` marker and real FTB Team/Capital checks.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v19, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
-- Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
+- SQLite migrations beyond schema v20, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
+- Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, gameplay founding entry points, fiscal roles, capital validation/rebinding, liquidation, and Nation lifecycle restrictions.
 - Withdrawals, configurable multi-person approval policy, and broader audit.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
@@ -155,12 +162,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the service-authorization/schema-v16 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
 - After the authorization-lifecycle/schema-v18 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
 - After the owner-bound-session/trusted-administration/schema-v19 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 105 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,592,541 bytes, SHA-256 `3741B772773067C4FC52AA74B9A8103D3D6E2F9257602F084C8AEA4F1D7D6563`. This is not yet a release artifact.
+- After the Nation Application/activation/schema-v20 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 113 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,638,413 bytes, SHA-256 `C216F9043AA7FF92FB7601CF2969D67A1672B68ECF2B9B55DECFBED424030E2C`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v19, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, refund, compensation, recovery-audit, Escrow, Budget, Fiscal Bill, general-ledger, audited Service Identity registration, capability-grant, revocation, and service-state storage, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v20, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, Nation Application/evidence/activation, release, partial-settlement, refund, compensation, recovery-audit, Escrow, Budget, Fiscal Bill, general-ledger, audited Service Identity registration, capability-grant, revocation, and service-state storage, foreign-world rejection, and unknown-schema rejection.
 - `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
@@ -185,6 +193,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `FiscalLedgerEntriesTest` uses a real temporary SQLite database and the public account-history interface. It verifies paired payment entries, exact source/counterparty/direction/kind fields, replay non-duplication, and a separate reverse pair for refunds without mutating original entries.
 - `FiscalAuthorizationTest` uses real temporary SQLite databases and the authorized fiscal interfaces. It verifies zero default authority, audited registration/grant replay and conflicts, persistence across reopen, exact account/capability isolation, protected detailed reads, terminal-state replay, unauthorized settlement with no SQLite transaction or external effect, immutable revocation/re-grant, service disable/re-enable, recovery completion after disable, owner mismatch rejection, and cross-identity impersonation rejection before external payment.
 - `NeoForgeCallerModResolverTest` verifies unique scanned-class ownership resolution and fail-closed unknown/ambiguous callers. `AsyncOnlineTimeWriterTest` verifies administration database work runs on the dedicated SQLite thread.
+- `NationApplicationRegistryTest` uses real temporary SQLite databases through public Nation interfaces. It verifies head-only persistent application creation, candidate snapshots without Citizenship, exact-once clipped evidence, cancellation/expiry cleanup with permanent interval ownership, formal minimum-candidate denial, trusted DEBUG WORLD bypass, atomic activation outputs, replay, and recovery after Treasury creation before Civic recording.
 - The SQLite crash-recovery tests use a controlled external-payment adapter to force exact failure windows; real LC National Treasury commit, refund, and compensation evidence is recorded separately below.
 
 ### Real Lightman's Currency integration
@@ -193,6 +202,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `LightmansCurrencyAccountBalancesTest` verifies exact LC minor-unit propagation through the public balance interface and fail-closed malformed-player, unknown-player, and unknown non-player behavior using a boundary fake only at the LC lookup seam.
 - `gradlew.bat runGameTestServer --no-daemon --console=plain` passed all 11 required GameTests against the real pinned LC/FTB runtime after the service-authorization/schema-v16 slice.
 - After the owner-bound-session/trusted-administration/schema-v19 slice, the same command passed all 13 required GameTests. The added tests inspect the real server dispatcher and execute a real console registration command, then verify its owner, derived administrator identity, request ID, and reason in the world-bound SQLite database.
+- After the Nation Application/activation/schema-v20 slice, the same command passed all 14 required GameTests. The added test runs the activation coordinator against real SQLite and the real LC `SavedData` National Treasury adapter, then reads the new Treasury's exact zero balance through the production LC account interface. Its FTB Team input is an in-memory boundary fixture, not a real FTB founding flow.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
@@ -252,6 +262,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the service-authorization/schema-v16 slice, the no-Create server reached `Done (3.798s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.878s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
 - After the authorization-lifecycle/schema-v18 slice, the no-Create server reached `Done (4.176s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.777s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
 - After the owner-bound-session/trusted-administration/schema-v19 slice, the no-Create server reached `Done (4.229s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (4.160s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
+- After the Nation Application/activation/schema-v20 slice, the no-Create server reached `Done (3.751s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.751s)!` with production scoring enabled; both opened the schema-v20 world-bound SQLite runtime and enabled buffered online-time observation.
 
 ### Environment note
 
@@ -265,9 +276,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Temporary provider citizens are still current FTB Team members, while formal Citizenship now lives in the persistent registry. The provider and FTB membership events are not yet reconciled to that registry, and neither raw membership nor Citizenship alone is an Effective Citizen without rolling online-time evidence.
 - Online sessions checkpoint every minute, so an ungraceful process death can conservatively lose at most the unflushed tail of each active session. It cannot credit offline time. The interval is currently an implementation constant and still needs configuration/documentation.
 - Graceful `ServerStoppedEvent` waits up to ten seconds for queued SQLite writes and close. This is bounded shutdown lifecycle work, not regular tick work, but timeout behavior still needs a controlled fault GameTest.
-- `NationRegistry.register` is currently the durable registration primitive. No gameplay command yet proves the caller is the FTB Team head or enforces the configurable minimum valid-citizen threshold.
+- `NationRegistry.register` remains a low-level legacy registration primitive used by earlier adapter tests. New founding must route through Nation Application activation; gameplay commands and runtime composition are not wired yet.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
-- Founding eligibility is intentionally not wired to raw FTB members. The resolved design is a persistent `NationApplication` / `PENDING` phase that accumulates non-reusable candidate online evidence before activation; implementation is the next slice.
+- Nation Application unit tests use an in-memory adapter at the FTB Team seam, and the new GameTest proves real LC Treasury provisioning but not a real player/FTB founding command. Full real FTB head authorization and Capital claim validation remain to be wired.
+- The DEBUG WORLD minimum-candidate bypass is available only as a trusted coordinator policy and is absent from the request payload, but the persistent world marker, integrated-server enable command, dedicated-server startup permit, and visible warning surfaces are not implemented yet.
+- Activation recovery is verified across SQLite reopen with an idempotent Treasury adapter after the external-create/SQLite-record window. Actual process-death ordering across LC `SavedData` and SQLite still requires a controlled server restart drill.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
 - The treasury GameTests prove real LC/SQLite commit and compensation recovery inside one running server across controlled reopen windows. They do not yet prove actual process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files.
 - Compensation requires an exact `COMPENSATE_PAYMENT` account grant. Grant/revocation/service-state administration is now OP/console gated and audited; a direct player compensation command is still intentionally absent.
@@ -289,4 +302,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Implement persistent `NationApplication` / `PENDING` founding applications, candidate affiliation and non-reusable online evidence, formal-world minimum-effective-citizen activation, and explicit DEBUG WORLD bypass before permanent Nation activation.
+Add server-authoritative asynchronous Nation Application commands and lifecycle scheduling, backed by the real FTB Team adapter, Capital claim validation, and the persistent DEBUG WORLD authority marker; then exercise a real command-driven founding path in GameTest.

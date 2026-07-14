@@ -69,11 +69,12 @@ public final class CivicServerRuntimeGameTests {
     @GameTest(template = "empty", timeoutTicks = 200)
     public static void consoleCanRegisterFiscalServiceOffThread(GameTestHelper helper) {
         String serviceIdentity = "command-gametest-" + UUID.randomUUID();
+        String requestId = "register-command-gametest-" + UUID.randomUUID();
         var server = helper.getLevel().getServer();
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
                 "civic economy admin service register " + serviceIdentity
-                        + " civiceconomy register-command-gametest \"Command GameTest Service\""
+                        + " civiceconomy " + requestId + " \"Command GameTest Service\""
                         + " Verify audited asynchronous registration");
         Path databaseFile = server.getWorldPath(LevelResource.ROOT)
                 .resolve("civiceconomy")
@@ -84,7 +85,7 @@ public final class CivicServerRuntimeGameTests {
                 databaseFile,
                 serviceIdentity,
                 "civiceconomy",
-                "register-command-gametest"));
+                requestId));
     }
 
     private static void assertPersistedInterval(GameTestHelper helper, Path databaseFile, ServerPlayer player) {

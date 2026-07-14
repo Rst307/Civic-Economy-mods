@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 19;
+    private static final int SCHEMA_VERSION = 20;
 
     private final Connection connection;
 
@@ -522,6 +522,583 @@ public final class CivicDatabase implements AutoCloseable {
                 failure.addSuppressed(cleanupFailure);
             }
             throw new IllegalStateException("Unable to restore Civic database to " + destination, failure);
+        }
+    }
+
+    public synchronized StoredNationApplication createNationApplication(
+            UUID applicationId,
+            String serviceIdentity,
+            String requestId,
+            UUID ftbTeamId,
+            UUID applicantPlayerId,
+            long createdAtEpochMillis,
+            long expiresAtEpochMillis,
+            java.util.Set<UUID> candidatePlayerIds) {
+        StoredNationApplication replay = nationApplicationRegistration(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO nation_application (
+                    application_id, service_identity, request_id, ftb_team_id,
+                    applicant_player_id, created_at_epoch_millis, expires_at_epoch_millis, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
+                """);
+                    PreparedStatement candidate = connection.prepareStatement("""
+                INSERT INTO nation_application_candidate (
+                    application_id, player_id, affiliated_at_epoch_millis
+                ) VALUES (?, ?, ?)
+                """)) {
+                insert.setString(1, applicationId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, ftbTeamId.toString());
+                insert.setString(5, applicantPlayerId.toString());
+                insert.setLong(6, createdAtEpochMillis);
+                insert.setLong(7, expiresAtEpochMillis);
+                insert.executeUpdate();
+                for (UUID playerId : candidatePlayerIds) {
+                    candidate.setString(1, applicationId.toString());
+                    candidate.setString(2, playerId.toString());
+                    candidate.setLong(3, createdAtEpochMillis);
+                    candidate.addBatch();
+                }
+                candidate.executeBatch();
+            }
+            connection.commit();
+            return nationApplication(applicationId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to create Nation Application for FTB Team " + ftbTeamId, failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Civic database auto-commit", failure);
+            }
+        }
+    }
+
+    public synchronized StoredNationApplication nationApplicationRegistration(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationApplication(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Application request", failure);
+        }
+    }
+
+    public synchronized StoredNationApplication nationApplication(UUID applicationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application WHERE application_id = ?
+                """)) {
+            query.setString(1, applicationId.toString());
+            return readNationApplication(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Nation Application " + applicationId, failure);
+        }
+    }
+
+    public synchronized StoredNationApplication pendingNationApplicationByFtbTeam(UUID ftbTeamId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application
+                WHERE ftb_team_id = ? AND state = 'PENDING'
+                """)) {
+            query.setString(1, ftbTeamId.toString());
+            return readNationApplication(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read pending Nation Application for FTB Team " + ftbTeamId,
+                    failure);
+        }
+    }
+
+    public synchronized List<StoredNationApplicationCandidate> nationApplicationCandidates(
+            UUID applicationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application_candidate
+                WHERE application_id = ?
+                ORDER BY affiliated_at_epoch_millis, player_id
+                """)) {
+            query.setString(1, applicationId.toString());
+            List<StoredNationApplicationCandidate> candidates = new ArrayList<>();
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    candidates.add(new StoredNationApplicationCandidate(
+                            UUID.fromString(result.getString("application_id")),
+                            UUID.fromString(result.getString("player_id")),
+                            result.getLong("affiliated_at_epoch_millis"),
+                            result.getObject("ended_at_epoch_millis") == null
+                                    ? null
+                                    : result.getLong("ended_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(candidates);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list Nation Application candidates " + applicationId, failure);
+        }
+    }
+
+    public synchronized List<StoredNationApplicationEvidence> claimNationApplicationEvidence(
+            UUID applicationId,
+            long windowStartEpochMillis,
+            long observedUntilEpochMillis,
+            long claimedAtEpochMillis) {
+        StoredNationApplication application = nationApplication(applicationId);
+        if (application == null) {
+            throw new IllegalArgumentException("Unknown Nation Application " + applicationId);
+        }
+        if (!"PENDING".equals(application.state())) {
+            throw new IllegalStateException(
+                    "Nation Application " + applicationId + " is not PENDING");
+        }
+        long applicationEnd = Math.min(
+                observedUntilEpochMillis, application.expiresAtEpochMillis());
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement intervals = connection.prepareStatement("""
+                    SELECT oi.interval_id, oi.player_id,
+                           oi.started_at_epoch_millis, oi.ended_at_epoch_millis,
+                           candidate.affiliated_at_epoch_millis,
+                           candidate.ended_at_epoch_millis
+                    FROM nation_application_candidate candidate
+                    JOIN online_time_interval oi ON oi.player_id = candidate.player_id
+                    WHERE candidate.application_id = ?
+                    ORDER BY oi.started_at_epoch_millis, oi.interval_id
+                    """);
+                    PreparedStatement claim = connection.prepareStatement("""
+                    INSERT INTO nation_application_evidence (
+                        interval_id, application_id, player_id,
+                        attributed_start_epoch_millis, attributed_end_epoch_millis,
+                        claimed_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(interval_id) DO NOTHING
+                    """)) {
+                intervals.setString(1, applicationId.toString());
+                try (ResultSet result = intervals.executeQuery()) {
+                    while (result.next()) {
+                        long attributedStart = Math.max(
+                                Math.max(windowStartEpochMillis,
+                                        application.createdAtEpochMillis()),
+                                Math.max(result.getLong("started_at_epoch_millis"),
+                                        result.getLong("affiliated_at_epoch_millis")));
+                        long candidateEnd = result.getObject("ended_at_epoch_millis") == null
+                                ? applicationEnd
+                                : Math.min(applicationEnd,
+                                        result.getLong("ended_at_epoch_millis"));
+                        long attributedEnd = Math.min(
+                                result.getLong("ended_at_epoch_millis"), candidateEnd);
+                        if (attributedEnd <= attributedStart) {
+                            continue;
+                        }
+                        claim.setString(1, result.getString("interval_id"));
+                        claim.setString(2, applicationId.toString());
+                        claim.setString(3, result.getString("player_id"));
+                        claim.setLong(4, attributedStart);
+                        claim.setLong(5, attributedEnd);
+                        claim.setLong(6, claimedAtEpochMillis);
+                        claim.addBatch();
+                    }
+                }
+                claim.executeBatch();
+            }
+            connection.commit();
+            return nationApplicationEvidence(applicationId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to claim evidence for Nation Application " + applicationId,
+                    failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Civic database auto-commit", failure);
+            }
+        }
+    }
+
+    public synchronized List<StoredNationApplicationEvidence> nationApplicationEvidence(
+            UUID applicationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT application_id, player_id,
+                       SUM(attributed_end_epoch_millis - attributed_start_epoch_millis)
+                           AS attributed_millis
+                FROM nation_application_evidence
+                WHERE application_id = ?
+                GROUP BY application_id, player_id
+                ORDER BY player_id
+                """)) {
+            query.setString(1, applicationId.toString());
+            List<StoredNationApplicationEvidence> evidence = new ArrayList<>();
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    evidence.add(new StoredNationApplicationEvidence(
+                            UUID.fromString(result.getString("application_id")),
+                            UUID.fromString(result.getString("player_id")),
+                            result.getLong("attributed_millis")));
+                }
+            }
+            return List.copyOf(evidence);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read evidence for Nation Application " + applicationId,
+                    failure);
+        }
+    }
+
+    public synchronized StoredNationApplicationTransition nationApplicationTransitionRegistration(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application_transition
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationApplicationTransition(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Application transition", failure);
+        }
+    }
+
+    public synchronized StoredNationApplicationTransition transitionNationApplication(
+            UUID transitionId,
+            UUID applicationId,
+            String serviceIdentity,
+            String requestId,
+            UUID actorPlayerId,
+            Long observationWindowMillis,
+            String toState,
+            String reason,
+            long effectiveAtEpochMillis,
+            long transitionedAtEpochMillis) {
+        StoredNationApplicationTransition replay =
+                nationApplicationTransitionRegistration(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement transition = connection.prepareStatement("""
+                    INSERT INTO nation_application_transition (
+                        transition_id, application_id, service_identity, request_id,
+                        actor_player_id, observation_window_millis, from_state, to_state,
+                        reason, effective_at_epoch_millis, transitioned_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+                    """);
+                    PreparedStatement closeCandidates = connection.prepareStatement("""
+                    UPDATE nation_application_candidate
+                    SET ended_at_epoch_millis = ?
+                    WHERE application_id = ? AND ended_at_epoch_millis IS NULL
+                    """);
+                    PreparedStatement updateApplication = connection.prepareStatement("""
+                    UPDATE nation_application SET state = ?
+                    WHERE application_id = ? AND state = 'PENDING'
+                    """)) {
+                transition.setString(1, transitionId.toString());
+                transition.setString(2, applicationId.toString());
+                transition.setString(3, serviceIdentity);
+                transition.setString(4, requestId);
+                transition.setString(5, actorPlayerId == null ? null : actorPlayerId.toString());
+                if (observationWindowMillis == null) {
+                    transition.setNull(6, java.sql.Types.BIGINT);
+                } else {
+                    transition.setLong(6, observationWindowMillis);
+                }
+                transition.setString(7, toState);
+                transition.setString(8, reason);
+                transition.setLong(9, effectiveAtEpochMillis);
+                transition.setLong(10, transitionedAtEpochMillis);
+                transition.executeUpdate();
+
+                closeCandidates.setLong(1, effectiveAtEpochMillis);
+                closeCandidates.setString(2, applicationId.toString());
+                closeCandidates.executeUpdate();
+
+                updateApplication.setString(1, toState);
+                updateApplication.setString(2, applicationId.toString());
+                if (updateApplication.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Nation Application " + applicationId + " is not PENDING");
+                }
+            }
+            connection.commit();
+            return nationApplicationTransitionRegistration(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to transition Nation Application " + applicationId, failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Civic database auto-commit", failure);
+            }
+        }
+    }
+
+    public synchronized StoredNationActivation nationActivationRegistration(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application_activation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationActivation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation activation request", failure);
+        }
+    }
+
+    public synchronized StoredNationActivation prepareNationActivation(
+            UUID applicationId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID ftbTeamId,
+            String treasuryAccountId,
+            String capitalDimensionId,
+            int capitalChunkX,
+            int capitalChunkZ,
+            String reason,
+            int minimumEffectiveCandidates,
+            boolean minimumCandidateBypassAllowed,
+            long observationWindowMillis,
+            long preparedAtEpochMillis) {
+        StoredNationActivation replay = nationActivationRegistration(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO nation_application_activation (
+                    application_id, service_identity, request_id, nation_id, ftb_team_id,
+                    treasury_account_id, capital_dimension_id, capital_chunk_x,
+                    capital_chunk_z, reason, minimum_effective_candidates,
+                    minimum_candidate_bypass_allowed, observation_window_millis,
+                    state, prepared_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?)
+                """)) {
+            insert.setString(1, applicationId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, nationId.toString());
+            insert.setString(5, ftbTeamId.toString());
+            insert.setString(6, treasuryAccountId);
+            insert.setString(7, capitalDimensionId);
+            insert.setInt(8, capitalChunkX);
+            insert.setInt(9, capitalChunkZ);
+            insert.setString(10, reason);
+            insert.setInt(11, minimumEffectiveCandidates);
+            insert.setInt(12, minimumCandidateBypassAllowed ? 1 : 0);
+            insert.setLong(13, observationWindowMillis);
+            insert.setLong(14, preparedAtEpochMillis);
+            insert.executeUpdate();
+            return nationActivation(applicationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to prepare Nation activation " + applicationId, failure);
+        }
+    }
+
+    public synchronized StoredNationActivation markNationTreasuryProvisioned(
+            UUID applicationId, long provisionedAtEpochMillis) {
+        StoredNationActivation activation = nationActivation(applicationId);
+        if (activation == null) {
+            throw new IllegalArgumentException("Unknown Nation activation " + applicationId);
+        }
+        if (!"PREPARED".equals(activation.state())) {
+            return activation;
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE nation_application_activation
+                SET state = 'TREASURY_PROVISIONED', treasury_provisioned_at_epoch_millis = ?
+                WHERE application_id = ? AND state = 'PREPARED'
+                """)) {
+            update.setLong(1, provisionedAtEpochMillis);
+            update.setString(2, applicationId.toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Nation activation state changed before Treasury provision was recorded "
+                                + applicationId);
+            }
+            return nationActivation(applicationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to record National Treasury provision " + applicationId, failure);
+        }
+    }
+
+    public synchronized StoredNationActivation commitNationActivation(
+            UUID applicationId, long committedAtEpochMillis) {
+        StoredNationActivation activation = nationActivation(applicationId);
+        if (activation == null) {
+            throw new IllegalArgumentException("Unknown Nation activation " + applicationId);
+        }
+        if ("COMMITTED".equals(activation.state())) {
+            return activation;
+        }
+        if (!"TREASURY_PROVISIONED".equals(activation.state())) {
+            throw new IllegalStateException(
+                    "National Treasury is not provisioned for application " + applicationId);
+        }
+        StoredNationApplication application = nationApplication(applicationId);
+        List<StoredNationApplicationCandidate> candidates =
+                nationApplicationCandidates(applicationId);
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement nation = connection.prepareStatement("""
+                    INSERT INTO nation_registry (
+                        nation_id, service_identity, request_id, ftb_team_id,
+                        registered_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement citizenship = connection.prepareStatement("""
+                    INSERT INTO citizenship_period (
+                        citizenship_id, player_id, nation_id, joined_at_epoch_millis,
+                        join_service_identity, join_request_id
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement capital = connection.prepareStatement("""
+                    INSERT INTO nation_capital (
+                        nation_id, dimension_id, chunk_x, chunk_z,
+                        established_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement transition = connection.prepareStatement("""
+                    INSERT INTO nation_application_transition (
+                        transition_id, application_id, service_identity, request_id,
+                        actor_player_id, observation_window_millis, from_state, to_state,
+                        reason, effective_at_epoch_millis, transitioned_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 'ACTIVATED', ?, ?, ?)
+                    """);
+                    PreparedStatement closeCandidates = connection.prepareStatement("""
+                    UPDATE nation_application_candidate
+                    SET ended_at_epoch_millis = ?
+                    WHERE application_id = ? AND ended_at_epoch_millis IS NULL
+                    """);
+                    PreparedStatement updateApplication = connection.prepareStatement("""
+                    UPDATE nation_application SET state = 'ACTIVATED'
+                    WHERE application_id = ? AND state = 'PENDING'
+                    """);
+                    PreparedStatement updateActivation = connection.prepareStatement("""
+                    UPDATE nation_application_activation
+                    SET state = 'COMMITTED', committed_at_epoch_millis = ?
+                    WHERE application_id = ? AND state = 'TREASURY_PROVISIONED'
+                    """)) {
+                nation.setString(1, activation.nationId().toString());
+                nation.setString(2, activation.serviceIdentity());
+                nation.setString(3, activation.requestId());
+                nation.setString(4, activation.ftbTeamId().toString());
+                nation.setLong(5, committedAtEpochMillis);
+                nation.executeUpdate();
+
+                for (StoredNationApplicationCandidate candidate : candidates) {
+                    if (candidate.endedAtEpochMillis() != null) {
+                        continue;
+                    }
+                    citizenship.setString(1, UUID.randomUUID().toString());
+                    citizenship.setString(2, candidate.playerId().toString());
+                    citizenship.setString(3, activation.nationId().toString());
+                    citizenship.setLong(4, committedAtEpochMillis);
+                    citizenship.setString(5, activation.serviceIdentity());
+                    citizenship.setString(
+                            6, activation.requestId() + ":citizenship:" + candidate.playerId());
+                    citizenship.addBatch();
+                }
+                citizenship.executeBatch();
+
+                capital.setString(1, activation.nationId().toString());
+                capital.setString(2, activation.capitalDimensionId());
+                capital.setInt(3, activation.capitalChunkX());
+                capital.setInt(4, activation.capitalChunkZ());
+                capital.setLong(5, committedAtEpochMillis);
+                capital.executeUpdate();
+
+                transition.setString(1, UUID.randomUUID().toString());
+                transition.setString(2, applicationId.toString());
+                transition.setString(3, activation.serviceIdentity());
+                transition.setString(4, activation.requestId());
+                transition.setString(5, application.applicantPlayerId().toString());
+                transition.setLong(6, activation.observationWindowMillis());
+                transition.setString(7, activation.reason());
+                transition.setLong(8, committedAtEpochMillis);
+                transition.setLong(9, committedAtEpochMillis);
+                transition.executeUpdate();
+
+                closeCandidates.setLong(1, committedAtEpochMillis);
+                closeCandidates.setString(2, applicationId.toString());
+                closeCandidates.executeUpdate();
+
+                updateApplication.setString(1, applicationId.toString());
+                if (updateApplication.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Nation Application state changed before activation " + applicationId);
+                }
+                updateActivation.setLong(1, committedAtEpochMillis);
+                updateActivation.setString(2, applicationId.toString());
+                if (updateActivation.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Nation activation state changed before commit " + applicationId);
+                }
+            }
+            connection.commit();
+            return nationActivation(applicationId);
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to commit Nation activation " + applicationId, failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Civic database auto-commit", failure);
+            }
+        }
+    }
+
+    private StoredNationActivation nationActivation(UUID applicationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application_activation WHERE application_id = ?
+                """)) {
+            query.setString(1, applicationId.toString());
+            return readNationActivation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Nation activation " + applicationId, failure);
         }
     }
 
@@ -2475,6 +3052,137 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 19");
             }
+            if (version < 20) {
+                statement.execute("""
+                        CREATE TABLE nation_application (
+                            application_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            ftb_team_id TEXT NOT NULL,
+                            applicant_player_id TEXT NOT NULL,
+                            created_at_epoch_millis INTEGER NOT NULL
+                                CHECK (created_at_epoch_millis >= 0),
+                            expires_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expires_at_epoch_millis > created_at_epoch_millis),
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PENDING', 'CANCELLED', 'EXPIRED', 'ACTIVATED'
+                            )),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX nation_application_one_pending_team
+                        ON nation_application (ftb_team_id)
+                        WHERE state = 'PENDING'
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_application_candidate (
+                            application_id TEXT NOT NULL
+                                REFERENCES nation_application(application_id),
+                            player_id TEXT NOT NULL,
+                            affiliated_at_epoch_millis INTEGER NOT NULL
+                                CHECK (affiliated_at_epoch_millis >= 0),
+                            ended_at_epoch_millis INTEGER CHECK (
+                                ended_at_epoch_millis IS NULL
+                                OR ended_at_epoch_millis >= affiliated_at_epoch_millis
+                            ),
+                            PRIMARY KEY (application_id, player_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX nation_application_one_active_candidate_affiliation
+                        ON nation_application_candidate (player_id)
+                        WHERE ended_at_epoch_millis IS NULL
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_application_evidence (
+                            interval_id TEXT PRIMARY KEY
+                                REFERENCES online_time_interval(interval_id),
+                            application_id TEXT NOT NULL,
+                            player_id TEXT NOT NULL,
+                            attributed_start_epoch_millis INTEGER NOT NULL
+                                CHECK (attributed_start_epoch_millis >= 0),
+                            attributed_end_epoch_millis INTEGER NOT NULL CHECK (
+                                attributed_end_epoch_millis > attributed_start_epoch_millis
+                            ),
+                            claimed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (claimed_at_epoch_millis >= 0),
+                            FOREIGN KEY (application_id, player_id)
+                                REFERENCES nation_application_candidate(application_id, player_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX nation_application_evidence_application_candidate
+                        ON nation_application_evidence (application_id, player_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_application_transition (
+                            transition_id TEXT PRIMARY KEY,
+                            application_id TEXT NOT NULL UNIQUE
+                                REFERENCES nation_application(application_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_player_id TEXT,
+                            observation_window_millis INTEGER CHECK (
+                                observation_window_millis IS NULL
+                                OR observation_window_millis > 0
+                            ),
+                            from_state TEXT NOT NULL CHECK (from_state = 'PENDING'),
+                            to_state TEXT NOT NULL CHECK (to_state IN (
+                                'CANCELLED', 'EXPIRED', 'ACTIVATED'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            transitioned_at_epoch_millis INTEGER NOT NULL
+                                CHECK (transitioned_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_application_activation (
+                            application_id TEXT PRIMARY KEY
+                                REFERENCES nation_application(application_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL UNIQUE,
+                            ftb_team_id TEXT NOT NULL UNIQUE,
+                            treasury_account_id TEXT NOT NULL UNIQUE,
+                            capital_dimension_id TEXT NOT NULL
+                                CHECK (length(trim(capital_dimension_id)) > 0),
+                            capital_chunk_x INTEGER NOT NULL,
+                            capital_chunk_z INTEGER NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            minimum_effective_candidates INTEGER NOT NULL
+                                CHECK (minimum_effective_candidates > 0),
+                            minimum_candidate_bypass_allowed INTEGER NOT NULL
+                                CHECK (minimum_candidate_bypass_allowed IN (0, 1)),
+                            observation_window_millis INTEGER NOT NULL
+                                CHECK (observation_window_millis > 0),
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PREPARED', 'TREASURY_PROVISIONED', 'COMMITTED'
+                            )),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            treasury_provisioned_at_epoch_millis INTEGER,
+                            committed_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_capital (
+                            nation_id TEXT PRIMARY KEY
+                                REFERENCES nation_registry(nation_id),
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            established_at_epoch_millis INTEGER NOT NULL
+                                CHECK (established_at_epoch_millis >= 0)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 20");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -2499,6 +3207,79 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("account_id"),
                     result.getString("reason"),
                     result.getLong("granted_at_epoch_millis"));
+        }
+    }
+
+    private StoredNationApplication readNationApplication(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationApplication(
+                    UUID.fromString(result.getString("application_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    UUID.fromString(result.getString("applicant_player_id")),
+                    result.getLong("created_at_epoch_millis"),
+                    result.getLong("expires_at_epoch_millis"),
+                    result.getString("state"));
+        }
+    }
+
+    private StoredNationApplicationTransition readNationApplicationTransition(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationApplicationTransition(
+                    UUID.fromString(result.getString("transition_id")),
+                    UUID.fromString(result.getString("application_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_player_id") == null
+                            ? null
+                            : UUID.fromString(result.getString("actor_player_id")),
+                    result.getObject("observation_window_millis") == null
+                            ? null
+                            : result.getLong("observation_window_millis"),
+                    result.getString("to_state"),
+                    result.getString("reason"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getLong("transitioned_at_epoch_millis"));
+        }
+    }
+
+    private StoredNationActivation readNationActivation(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationActivation(
+                    UUID.fromString(result.getString("application_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    result.getString("treasury_account_id"),
+                    result.getString("capital_dimension_id"),
+                    result.getInt("capital_chunk_x"),
+                    result.getInt("capital_chunk_z"),
+                    result.getString("reason"),
+                    result.getInt("minimum_effective_candidates"),
+                    result.getInt("minimum_candidate_bypass_allowed") != 0,
+                    result.getLong("observation_window_millis"),
+                    result.getString("state"),
+                    result.getLong("prepared_at_epoch_millis"),
+                    result.getObject("treasury_provisioned_at_epoch_millis") == null
+                            ? null
+                            : result.getLong("treasury_provisioned_at_epoch_millis"),
+                    result.getObject("committed_at_epoch_millis") == null
+                            ? null
+                            : result.getLong("committed_at_epoch_millis"));
         }
     }
 

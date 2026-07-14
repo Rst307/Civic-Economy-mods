@@ -12,7 +12,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import net.minecraft.gametest.framework.GameTest;
@@ -59,7 +63,20 @@ import org.civiceconomy.fiscal.TransactionState;
 import org.civiceconomy.integration.lightmanscurrency.FiscalAccountKind;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBalances;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyNationalTreasuryProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
+import org.civiceconomy.nation.ActivateNationApplication;
+import org.civiceconomy.nation.ActivatedNation;
+import org.civiceconomy.nation.Capital;
+import org.civiceconomy.nation.CreateNationApplication;
+import org.civiceconomy.nation.NationActivationCoordinator;
+import org.civiceconomy.nation.NationApplication;
+import org.civiceconomy.nation.NationApplicationRegistry;
+import org.civiceconomy.nation.NationFoundingPolicy;
+import org.civiceconomy.nation.NationTeam;
+import org.civiceconomy.nation.NationTeamDirectory;
+import org.civiceconomy.nation.OnlineTimeLedger;
+import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 
@@ -546,6 +563,75 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
         payments.apply(new ExternalPayment(
                 UUID.randomUUID(), treasury, payerAccount, accounts.balance(treasury)));
         bankData.deleteAccount(payerPlayerId);
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void nationActivationCreatesRealLcNationalTreasury(GameTestHelper helper) {
+        UUID teamId = UUID.randomUUID();
+        UUID headId = UUID.randomUUID();
+        NationTeam team = new NationTeam(teamId, headId, Set.of(headId));
+        NationTeamDirectory teams = new NationTeamDirectory() {
+            @Override
+            public Optional<NationTeam> find(UUID requestedTeamId) {
+                return teamId.equals(requestedTeamId) ? Optional.of(team) : Optional.empty();
+            }
+
+            @Override
+            public Optional<NationTeam> findEffectiveTeamForPlayer(UUID playerId) {
+                return headId.equals(playerId) ? Optional.of(team) : Optional.empty();
+            }
+        };
+        Instant appliedAt = Instant.parse("2026-07-14T08:00:00Z");
+        Path temporaryDirectory = createTemporaryDirectory();
+        LightmansCurrencyFiscalAccounts accounts =
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+
+        try (CivicDatabase database = CivicDatabase.open(
+                temporaryDirectory.resolve("nation-activation.sqlite3"),
+                new DatabaseIdentity(
+                        UUID.randomUUID(),
+                        "0.1.0-probe",
+                        "1.21-2.3.0.5",
+                        "2101.1.10",
+                        "2101.1.20"))) {
+            NationApplication application = new NationApplicationRegistry(
+                            database,
+                            teams,
+                            Clock.fixed(appliedAt, ZoneOffset.UTC))
+                    .create(new CreateNationApplication(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "apply-real-lc-treasury-" + UUID.randomUUID(),
+                            teamId,
+                            headId,
+                            appliedAt.plus(Duration.ofDays(7))));
+            new OnlineTimeLedger(database).record(new RecordOnlineTime(
+                    new ServiceIdentity("civiceconomy-server"),
+                    "real-lc-treasury-candidate-" + UUID.randomUUID(),
+                    headId,
+                    appliedAt.toEpochMilli(),
+                    appliedAt.plus(Duration.ofHours(1)).toEpochMilli()));
+            NationActivationCoordinator coordinator = new NationActivationCoordinator(
+                    database,
+                    new LightmansCurrencyNationalTreasuryProvisioner(accounts),
+                    NationFoundingPolicy.debugWorld(
+                            2, Duration.ofDays(60), Duration.ZERO),
+                    Clock.fixed(appliedAt.plus(Duration.ofHours(2)), ZoneOffset.UTC));
+
+            ActivatedNation activated = coordinator.activate(new ActivateNationApplication(
+                    new ServiceIdentity("civiceconomy-gametest"),
+                    "activate-real-lc-treasury-" + UUID.randomUUID(),
+                    application.applicationId(),
+                    new Capital("minecraft:overworld", 0, 0),
+                    "Real LC National Treasury GameTest"));
+
+            helper.assertValueEqual(
+                    0L,
+                    accounts.balance(activated.treasuryAccountId()).minorUnits(),
+                    "new real LC National Treasury balance");
+        } finally {
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
         helper.succeed();
     }
 
