@@ -1,6 +1,11 @@
 package org.civiceconomy.platform.neoforge;
 
 import com.mojang.authlib.GameProfile;
+import io.github.lightman314.lightmanscurrency.api.money.bank.BankAPI;
+import io.github.lightman314.lightmanscurrency.api.money.coins.CoinAPI;
+import io.github.lightman314.lightmanscurrency.api.money.value.builtin.CoinValue;
+import io.github.lightman314.lightmanscurrency.common.data.CustomSaveData;
+import io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache;
 import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
 import dev.ftb.mods.ftbteams.api.Team;
 import dev.ftb.mods.ftbteams.api.TeamRank;
@@ -30,9 +35,13 @@ import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.ExternalPayment;
+import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
+import org.civiceconomy.integration.lightmanscurrency.FiscalAccountKind;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.CreateNationApplication;
@@ -42,6 +51,11 @@ import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
 import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.JoinCitizenship;
+import org.civiceconomy.nation.GrantNationFiscalPermission;
+import org.civiceconomy.nation.NationFiscalAuthorityRegistry;
+import org.civiceconomy.nation.NationFiscalPermission;
+import org.civiceconomy.nation.FtbTeamsNationProvider;
+import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.RegisterNation;
 import org.civiceconomy.territory.IssueTerritoryClaimPermit;
@@ -103,6 +117,14 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
+        helper.assertValueEqual(
+                Set.of("allowance", "prepare", "cancel"),
+                economy.getChild("nation")
+                        .getChild("territory")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Territory Claim command actions");
         if (CivicDebugWorldCommands.dedicatedStartupPermit()) {
             helper.assertValueEqual(
                     Set.of("status", "enable"),
@@ -612,6 +634,316 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    @GameTest(template = "empty", timeoutTicks = 500)
+    public static void playerPrepareCommandPaysRealLcAndAuthorizesRealFtbClaim(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-paid-claim-test"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(24, 0, 24)).getCenter());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String requestId = "player-paid-claim-" + UUID.randomUUID();
+        ChunkDimPos position = new ChunkDimPos(
+                player.level().dimension(), new ChunkPos(player.blockPosition()));
+        var manager = FTBChunksAPI.api().getManager();
+        ClaimedChunk existing = manager.getChunk(position);
+        if (existing != null) {
+            existing.unclaim(player.createCommandSourceStack(), true);
+        }
+        var teamData = manager.getOrCreateData(team);
+        teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
+        ((ChunkTeamDataImpl) teamData).updateLimits();
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicBoolean claimStarted = new AtomicBoolean();
+        AtomicBoolean cleanupDone = new AtomicBoolean();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(
+                now, java.time.ZoneOffset.UTC);
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "paid-claim-nation-" + UUID.randomUUID(),
+                            team.getId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, java.time.Duration.ofDays(7), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "paid-claim-citizenship-" + UUID.randomUUID(),
+                            player.getUUID(),
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                            .grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "paid-claim-authority-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    player.getUUID(),
+                                    player.getUUID(),
+                                    NationFiscalPermission.MANAGE_TERRITORY_FINANCE,
+                                    "Real player Territory preparation GameTest"));
+                    database.scheduleTerritoryFreeAllocationPolicy(
+                            UUID.randomUUID(),
+                            "civiceconomy-gametest",
+                            "paid-claim-free-policy-" + UUID.randomUUID(),
+                            "gametest",
+                            0,
+                            0,
+                            now.minusSeconds(2L).toEpochMilli(),
+                            "No free claims in paid command GameTest",
+                            now.minusSeconds(3L).toEpochMilli());
+                    database.scheduleTerritoryExpansionPricingPolicy(
+                            UUID.randomUUID(),
+                            "civiceconomy-gametest",
+                            "paid-claim-pricing-" + UUID.randomUUID(),
+                            "gametest",
+                            250L,
+                            0L,
+                            now.minusSeconds(2L).toEpochMilli(),
+                            "Flat paid claim GameTest pricing",
+                            now.minusSeconds(3L).toEpochMilli());
+                    return nation.nationId();
+                })
+                .whenComplete((registeredNationId, setupFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (setupFailure != null) {
+                                asyncFailure.set(setupFailure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                AccountId treasury = new AccountId(
+                                        "nation:" + registeredNationId.value() + ":treasury");
+                                var accounts = LightmansCurrencyFiscalAccounts.forLevel(
+                                        helper.getLevel());
+                                accounts.create(
+                                        treasury,
+                                        FiscalAccountKind.NATIONAL_TREASURY,
+                                        "Paid Claim GameTest Treasury");
+                                UUID fundingPlayerId = UUID.randomUUID();
+                                BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+                                var funding = bankData.getAccount(fundingPlayerId);
+                                funding.getMoneyStorage().clear();
+                                helper.assertTrue(
+                                        BankAPI.getApi().BankDepositFromServer(
+                                                funding,
+                                                CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1_000L)),
+                                        "seed paid claim LC funding account");
+                                LightmansCurrencyPayments.live(helper.getLevel()).apply(
+                                        new ExternalPayment(
+                                                UUID.randomUUID(),
+                                                new AccountId("player:" + fundingPlayerId),
+                                                treasury,
+                                                MoneyAmount.ofMinorUnits(1_000L)));
+                                bankData.deleteAccount(fundingPlayerId);
+                                int result = helper.getLevel()
+                                        .getServer()
+                                        .getCommands()
+                                        .getDispatcher()
+                                        .execute(
+                                                "civic economy nation territory prepare "
+                                                        + requestId,
+                                                player.createCommandSourceStack()
+                                                        .withSuppressedOutput());
+                                helper.assertValueEqual(
+                                        1, result, "Territory preparation command result");
+                                commandStarted.set(true);
+                            } catch (Throwable commandFailure) {
+                                asyncFailure.set(commandFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "paid claim async state"
+                            : "paid claim async failure: " + failure.getMessage());
+            helper.assertTrue(commandStarted.get(), "Territory preparation command started");
+            var permit = territoryPermitByRequest(databaseFile, requestId + ":permit");
+            helper.assertTrue(permit != null, "READY Permit from player preparation command");
+            AccountId treasury = new AccountId(
+                    "nation:" + nationId.get().value() + ":treasury");
+            var accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+            helper.assertValueEqual(
+                    750L, accounts.balance(treasury).minorUnits(), "paid claim Treasury balance");
+            helper.assertValueEqual(
+                    250L,
+                    accounts.balance(org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                                    .CLEARING_ACCOUNT_ID)
+                            .minorUnits(),
+                    "paid claim clearing balance");
+            if (claimStarted.compareAndSet(false, true)) {
+                var claim = teamData.claim(
+                        player.createCommandSourceStack().withSuppressedOutput(),
+                        position,
+                        false);
+                helper.assertTrue(claim.isSuccess(), "real paid FTB claim");
+            }
+            var consumed = territoryPermitByRequest(databaseFile, requestId + ":permit");
+            helper.assertValueEqual(
+                    TerritoryClaimPermitState.CONSUMED,
+                    consumed.state(),
+                    "player-prepared Permit consumed after real claim");
+            if (cleanupDone.compareAndSet(false, true)) {
+                ClaimedChunk claimed = manager.getChunk(position);
+                if (claimed != null) {
+                    claimed.unclaim(player.createCommandSourceStack(), true);
+                }
+                clearFiscalAccount(
+                        helper,
+                        org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                                .CLEARING_ACCOUNT_ID);
+            }
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 500)
+    public static void playerCancelCommandRefundsRealLcAndRemovesClaimAuthorization(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-cancel-claim-test"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(40, 0, 40)).getCenter());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String prepareRequestId = "player-cancel-prepare-" + UUID.randomUUID();
+        String cancelRequestId = "player-cancel-refund-" + UUID.randomUUID();
+        ChunkDimPos position = new ChunkDimPos(
+                player.level().dimension(), new ChunkPos(player.blockPosition()));
+        var manager = FTBChunksAPI.api().getManager();
+        ClaimedChunk existing = manager.getChunk(position);
+        if (existing != null) {
+            existing.unclaim(player.createCommandSourceStack(), true);
+        }
+        var teamData = manager.getOrCreateData(team);
+        teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
+        ((ChunkTeamDataImpl) teamData).updateLimits();
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean prepareStarted = new AtomicBoolean();
+        AtomicBoolean cancelStarted = new AtomicBoolean();
+        AtomicBoolean claimChecked = new AtomicBoolean();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(
+                now, java.time.ZoneOffset.UTC);
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> setupPaidClaimNation(
+                        database, teamSnapshot, player.getUUID(), now, setupClock))
+                .whenComplete((registeredNationId, setupFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (setupFailure != null) {
+                                asyncFailure.set(setupFailure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                fundTreasury(
+                                        helper,
+                                        registeredNationId,
+                                        "Cancelled Claim GameTest Treasury");
+                                int result = helper.getLevel()
+                                        .getServer()
+                                        .getCommands()
+                                        .getDispatcher()
+                                        .execute(
+                                                "civic economy nation territory prepare "
+                                                        + prepareRequestId,
+                                                player.createCommandSourceStack()
+                                                        .withSuppressedOutput());
+                                helper.assertValueEqual(
+                                        1, result, "cancellable Territory preparation command result");
+                                prepareStarted.set(true);
+                            } catch (Throwable commandFailure) {
+                                asyncFailure.set(commandFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "cancelled claim async state"
+                            : "cancelled claim async failure: " + failure.getMessage());
+            helper.assertTrue(prepareStarted.get(), "cancellable preparation command started");
+            TerritoryPermitRow permit = territoryPermitByRequest(
+                    databaseFile, prepareRequestId + ":permit");
+            helper.assertTrue(permit != null, "READY Permit before player cancellation");
+            if (cancelStarted.compareAndSet(false, true)) {
+                try {
+                    int result = helper.getLevel()
+                            .getServer()
+                            .getCommands()
+                            .getDispatcher()
+                            .execute(
+                                    "civic economy nation territory cancel "
+                                            + permit.permitId() + " " + cancelRequestId
+                                            + " Player changed plans",
+                                    player.createCommandSourceStack().withSuppressedOutput());
+                    helper.assertValueEqual(
+                            1, result, "Territory cancellation command result");
+                } catch (Throwable cancellationFailure) {
+                    asyncFailure.set(cancellationFailure);
+                }
+            }
+            TerritoryPermitRow cancelled = territoryPermitByRequest(
+                    databaseFile, prepareRequestId + ":permit");
+            helper.assertValueEqual(
+                    TerritoryClaimPermitState.CANCELLED,
+                    cancelled.state(),
+                    "player-cancelled Permit state");
+            AccountId treasury = new AccountId(
+                    "nation:" + nationId.get().value() + ":treasury");
+            var accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+            helper.assertValueEqual(
+                    1_000L,
+                    accounts.balance(treasury).minorUnits(),
+                    "cancelled claim Treasury refund");
+            helper.assertValueEqual(
+                    0L,
+                    accounts.balance(org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                                    .CLEARING_ACCOUNT_ID)
+                            .minorUnits(),
+                    "cancelled claim clearing balance");
+            if (claimChecked.compareAndSet(false, true)) {
+                var claim = teamData.claim(
+                        player.createCommandSourceStack().withSuppressedOutput(),
+                        position,
+                        false);
+                helper.assertFalse(
+                        claim.isSuccess(), "cancelled Permit cannot authorize a real FTB claim");
+            }
+        });
+    }
+
     private static void assertPersistedInterval(GameTestHelper helper, Path databaseFile, ServerPlayer player) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var query = connection.prepareStatement("""
@@ -627,6 +959,130 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect Civic runtime GameTest database", failure);
         }
+    }
+
+    private static TerritoryPermitRow territoryPermitByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT permit_id, state
+                        FROM territory_claim_permit
+                        WHERE service_identity = ? AND request_id = ?
+                        """)) {
+            query.setString(
+                    1,
+                    org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new TerritoryPermitRow(
+                                UUID.fromString(result.getString(1)),
+                                TerritoryClaimPermitState.valueOf(result.getString(2)))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect player-prepared Territory Claim Permit", failure);
+        }
+    }
+
+    private static org.civiceconomy.nation.NationId setupPaidClaimNation(
+            org.civiceconomy.persistence.CivicDatabase database,
+            NationTeam team,
+            UUID playerId,
+            java.time.Instant now,
+            java.time.Clock setupClock) {
+        NationRegistry nations = new NationRegistry(database, snapshot(team));
+        var nation = nations.register(new RegisterNation(
+                new ServiceIdentity("civiceconomy-gametest"),
+                "paid-claim-nation-" + UUID.randomUUID(),
+                team.teamId()));
+        CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                database, java.time.Duration.ofDays(7), setupClock);
+        citizenships.join(new JoinCitizenship(
+                new ServiceIdentity("civiceconomy-gametest"),
+                "paid-claim-citizenship-" + UUID.randomUUID(),
+                playerId,
+                nation.nationId()));
+        var provider = new FtbTeamsNationProvider(
+                nations,
+                citizenships,
+                new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                snapshot(team));
+        new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                .grant(new GrantNationFiscalPermission(
+                        new ServiceIdentity("civiceconomy-gametest"),
+                        "paid-claim-authority-" + UUID.randomUUID(),
+                        nation.nationId(),
+                        playerId,
+                        playerId,
+                        NationFiscalPermission.MANAGE_TERRITORY_FINANCE,
+                        "Real player Territory preparation GameTest"));
+        database.scheduleTerritoryFreeAllocationPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest",
+                "paid-claim-free-policy-" + UUID.randomUUID(),
+                "gametest",
+                0,
+                0,
+                now.minusSeconds(2L).toEpochMilli(),
+                "No free claims in paid command GameTest",
+                now.minusSeconds(3L).toEpochMilli());
+        database.scheduleTerritoryExpansionPricingPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest",
+                "paid-claim-pricing-" + UUID.randomUUID(),
+                "gametest",
+                250L,
+                0L,
+                now.minusSeconds(2L).toEpochMilli(),
+                "Flat paid claim GameTest pricing",
+                now.minusSeconds(3L).toEpochMilli());
+        return nation.nationId();
+    }
+
+    private static void fundTreasury(
+            GameTestHelper helper,
+            org.civiceconomy.nation.NationId nationId,
+            String displayName) {
+        AccountId treasury = new AccountId(
+                "nation:" + nationId.value() + ":treasury");
+        var accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, displayName);
+        UUID fundingPlayerId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        var funding = bankData.getAccount(fundingPlayerId);
+        funding.getMoneyStorage().clear();
+        if (!BankAPI.getApi().BankDepositFromServer(
+                funding, CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1_000L))) {
+            throw new IllegalStateException("Unable to seed paid claim LC funding account");
+        }
+        LightmansCurrencyPayments.live(helper.getLevel()).apply(new ExternalPayment(
+                UUID.randomUUID(),
+                new AccountId("player:" + fundingPlayerId),
+                treasury,
+                MoneyAmount.ofMinorUnits(1_000L)));
+        bankData.deleteAccount(fundingPlayerId);
+    }
+
+    private static void clearFiscalAccount(GameTestHelper helper, AccountId accountId) {
+        var accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        MoneyAmount balance = accounts.balance(accountId);
+        if (balance.equals(MoneyAmount.ZERO)) {
+            return;
+        }
+        UUID sinkPlayerId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        bankData.getAccount(sinkPlayerId).getMoneyStorage().clear();
+        LightmansCurrencyPayments.live(helper.getLevel()).apply(new ExternalPayment(
+                UUID.randomUUID(),
+                accountId,
+                new AccountId("player:" + sinkPlayerId),
+                balance));
+        bankData.deleteAccount(sinkPlayerId);
     }
 
     private static void assertFiscalServiceRegistered(
@@ -1037,4 +1493,6 @@ public final class CivicServerRuntimeGameTests {
     }
 
     private record PendingApplicationRow(UUID applicationId, long createdAtEpochMillis) {}
+
+    private record TerritoryPermitRow(UUID permitId, TerritoryClaimPermitState state) {}
 }

@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
@@ -28,6 +29,8 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBalances;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyTerritoryClearingAccountProvisioner;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
@@ -47,6 +50,15 @@ import org.civiceconomy.territory.TerritoryClaimPermitEventBridge;
 import org.civiceconomy.territory.TerritoryClaimPermitMirror;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
+import org.civiceconomy.territory.PrepareTerritoryClaimPrepayment;
+import org.civiceconomy.territory.CancelTerritoryClaimPermit;
+import org.civiceconomy.territory.TerritoryClaimPermit;
+import org.civiceconomy.territory.TerritoryClaimPrepaymentCoordinator;
+import org.civiceconomy.territory.TerritoryExpansionPricingPolicyRegistry;
+import org.civiceconomy.territory.TerritoryExpansionPricingPolicyVersion;
+import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
+import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
+import org.civiceconomy.fiscal.FiscalLedger;
 import org.slf4j.Logger;
 
 public final class CivicServerRuntime {
@@ -239,6 +251,173 @@ public final class CivicServerRuntime {
                     new IllegalStateException("Civic server runtime is not active"));
         }
         return current.writer.submitDatabase(operation);
+    }
+
+    CompletableFuture<TerritoryClaimPermit> prepareTerritoryClaim(
+            NationTeam team,
+            UUID actorPlayerId,
+            String requestId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ,
+            int currentClaimedChunks) {
+        Instant commandTime = clock.instant();
+        Clock commandClock = Clock.fixed(commandTime, ZoneOffset.UTC);
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        return current.writer.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var citizenships = new org.civiceconomy.nation.CitizenshipRegistry(
+                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                    var provider = new org.civiceconomy.nation.FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
+                                    database, commandClock),
+                            teams);
+                    var population = new org.civiceconomy.nation.NationPopulationCalculator(
+                                    citizenships,
+                                    new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
+                                            database, commandClock),
+                                    new org.civiceconomy.nation.OnlineTimeLedger(database),
+                                    NATION_APPLICATION_EVIDENCE_WINDOW,
+                                    Duration.ofHours(8))
+                            .calculate(nation.nationId(), commandTime);
+                    var allocation = new TerritoryFreeAllocationPolicyRegistry(
+                                    database,
+                                    commandClock,
+                                    TerritoryFreeAllocationPolicyVersion.defaultPolicy(0, 0))
+                            .current(commandTime)
+                            .policy()
+                            .calculate(population);
+                    TerritoryClaimPermitRegistry permits = new TerritoryClaimPermitRegistry(
+                            database,
+                            new CommittedTerritoryPrepaymentVerifier(
+                                    database, TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID),
+                            commandClock);
+                    var replay = permits.findByRequest(
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                            requestId + ":permit");
+                    if (replay.isPresent()) {
+                        TerritoryClaimPermit permit = replay.orElseThrow();
+                        if (!permit.nationId().equals(nation.nationId())
+                                || !permit.ftbTeamId().equals(team.teamId())
+                                || !permit.actorPlayerId().equals(actorPlayerId)
+                                || !permit.dimensionId().equals(dimensionId)
+                                || permit.chunkX() != chunkX
+                                || permit.chunkZ() != chunkZ) {
+                            throw new org.civiceconomy.fiscal.IdempotencyConflictException(
+                                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId);
+                        }
+                        return permit;
+                    }
+                    int pendingClaims = Math.toIntExact(permits.readyPermits().stream()
+                            .filter(permit -> permit.nationId().equals(nation.nationId()))
+                            .count());
+                    int quotedClaimedChunks = Math.addExact(
+                            currentClaimedChunks, pendingClaims);
+                    var quote = new TerritoryExpansionPricingPolicyRegistry(
+                                    database,
+                                    commandClock,
+                                    TerritoryExpansionPricingPolicyVersion.defaultPolicy(0, 0))
+                            .current(commandTime)
+                            .policy()
+                            .quote(allocation, quotedClaimedChunks, 1, commandTime);
+                    if (quote.prepayment().minorUnits() <= 0L) {
+                        throw new IllegalStateException(
+                                "This claim is within Territory Free Allocation and needs no paid Permit");
+                    }
+                    var authorization = new FiscalAuthorization(database);
+                    var treasury = new org.civiceconomy.fiscal.AccountId(
+                            "nation:" + nation.nationId().value() + ":treasury");
+                    new TerritoryFiscalServiceProvisioner(authorization)
+                            .ensureAuthorized(treasury);
+                    var session = authorization.openSession(
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    return new TerritoryClaimPrepaymentCoordinator(
+                                    nations,
+                                    new org.civiceconomy.nation.NationFiscalAuthorityRegistry(
+                                            database, provider, commandClock),
+                                    LightmansCurrencyTerritoryClearingAccountProvisioner.forLevel(
+                                            current.server.overworld()),
+                                    FiscalLedger.authorized(
+                                            database,
+                                            LightmansCurrencyAccountBalances.live(
+                                                    current.server.overworld()),
+                                            session),
+                                    PaymentCoordinator.authorized(
+                                            database,
+                                            LightmansCurrencyPayments.live(
+                                                    current.server.overworld()),
+                                            session),
+                                    permits,
+                                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID,
+                                    commandClock)
+                            .prepare(new PrepareTerritoryClaimPrepayment(
+                                    requestId,
+                                    nation.nationId(),
+                                    team.teamId(),
+                                    actorPlayerId,
+                                    dimensionId,
+                                    chunkX,
+                                    chunkZ,
+                                    allocation.totalFreeChunks(),
+                                    quote,
+                                    commandTime.plus(Duration.ofMinutes(2))));
+                })
+                .thenApply(permit -> {
+                    if (permit.state()
+                            == org.civiceconomy.territory.TerritoryClaimPermitState.READY) {
+                        publishTerritoryClaimPermit(permit);
+                    }
+                    return permit;
+                });
+    }
+
+    CompletableFuture<TerritoryClaimPermit> cancelTerritoryClaim(
+            UUID actorPlayerId, UUID permitId, String requestId, String reason) {
+        Instant commandTime = clock.instant();
+        Clock commandClock = Clock.fixed(commandTime, ZoneOffset.UTC);
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        return current.writer.submitDatabase(database -> {
+                    var authorization = new FiscalAuthorization(database);
+                    var session = authorization.openSession(
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    TerritoryClaimPermitRegistry permits = new TerritoryClaimPermitRegistry(
+                            database,
+                            new CommittedTerritoryPrepaymentVerifier(
+                                    database, TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID),
+                            commandClock);
+                    return new TerritoryClaimPermitCompensationCoordinator(
+                                    database,
+                                    PaymentCoordinator.authorized(
+                                            database,
+                                            LightmansCurrencyPayments.live(
+                                                    current.server.overworld()),
+                                            session),
+                                    permits,
+                                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    commandClock)
+                            .cancel(new CancelTerritoryClaimPermit(
+                                    requestId, permitId, actorPlayerId, reason));
+                })
+                .thenApply(permit -> {
+                    removeTerritoryClaimPermit(permit);
+                    return permit;
+                });
     }
 
     org.civiceconomy.nation.NationId nationForFtbTeam(UUID ftbTeamId) {

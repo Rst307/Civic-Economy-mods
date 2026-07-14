@@ -22,6 +22,8 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.integration.ftb.FtbChunksAdapter;
+import dev.ftb.mods.ftbchunks.api.FTBChunksAPI;
+import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyNationalTreasuryProvisioner;
 import org.civiceconomy.nation.ActivateNationApplication;
@@ -89,7 +91,85 @@ final class NationApplicationCommands {
     private static LiteralArgumentBuilder<CommandSourceStack> territoryCommand() {
         return Commands.literal("territory")
                 .then(Commands.literal("allowance")
-                        .executes(context -> territoryAllowance(context.getSource())));
+                        .executes(context -> territoryAllowance(context.getSource())))
+                .then(Commands.literal("prepare")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .executes(context -> prepareTerritoryClaim(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "requestId")))))
+                .then(Commands.literal("cancel")
+                        .then(Commands.argument("permitId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> cancelTerritoryClaim(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "permitId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))));
+    }
+
+    private static int prepareTerritoryClaim(CommandSourceStack source, String requestId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+        NationTeam team = teams.findEffectiveTeamForPlayer(player.getUUID())
+                .or(() -> teams.findOwnedTeamForPlayer(player.getUUID()))
+                .orElseThrow(() -> new SecurityException(
+                        "You must belong to a formal Nation FTB Team"));
+        ChunkPos chunk = new ChunkPos(player.blockPosition());
+        int currentClaimedChunks = FTBChunksAPI.api()
+                .getManager()
+                .getOrCreateData(FTBTeamsAPI.api().getManager().getTeamByID(team.teamId()).orElseThrow())
+                .getClaimedChunks()
+                .size();
+        CivicServerRuntime.current()
+                .prepareTerritoryClaim(
+                        team,
+                        player.getUUID(),
+                        requestId,
+                        player.level().dimension().location().toString(),
+                        chunk.x,
+                        chunk.z,
+                        currentClaimedChunks)
+                .whenComplete((permit, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Territory Claim preparation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "READY Territory Claim Permit " + permit.permitId()
+                                                + " prepayment="
+                                                + permit.prepayment().minorUnits()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory Claim preparation queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int cancelTerritoryClaim(
+            CommandSourceStack source, UUID permitId, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .cancelTerritoryClaim(player.getUUID(), permitId, requestId, reason)
+                .whenComplete((permit, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Territory Claim cancellation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Cancelled Territory Claim Permit " + permit.permitId()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory Claim cancellation queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int territoryAllowance(CommandSourceStack source)
