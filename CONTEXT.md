@@ -148,6 +148,14 @@ _Avoid_: 零金额 Permit、免费领土所有权、财政预付
 由 FTB Chunks 归属某国且当前满足 Civic 财政维护条件的区块。
 _Avoid_: 所有已占领区块、国界声明
 
+**领土维护周期（Territory Maintenance Cycle）**:
+全服统一、互不重叠的领土财政结算时间区间；区块的维护评估与财政有效性必须归属于一个明确周期。
+_Avoid_: 实时时钟计费、单个国家周期、FTB 占领周期
+
+**领土财政评估（Territory Fiscal Assessment）**:
+在一个 Territory Maintenance Cycle 内，对 FTB 当前归属区块作出的有效或暂停结论及其应付维护金额；它不复制或改变 FTB 所有权。
+_Avoid_: FTB 所有权、付款交易、永久领土状态
+
 **领土维护抵扣额（Territory Maintenance Credit）**:
 主动放弃领土后形成、只能抵扣后续领土维护而不能提取为货币的财政权益。
 _Avoid_: 退款、账户余额

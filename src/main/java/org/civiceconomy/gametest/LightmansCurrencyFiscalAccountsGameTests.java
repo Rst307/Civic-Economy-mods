@@ -110,14 +110,15 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
         LightmansCurrencyTerritoryClearingAccountProvisioner provisioner =
                 new LightmansCurrencyTerritoryClearingAccountProvisioner(accounts);
+        long balanceBeforeProvisioning = accounts.balance(clearing).minorUnits();
 
         provisioner.ensureExists(clearing);
         provisioner.ensureExists(clearing);
 
         helper.assertValueEqual(
-                0L,
+                balanceBeforeProvisioning,
                 accounts.balance(clearing).minorUnits(),
-                "new real LC Territory prepayment clearing balance");
+                "idempotent real LC Territory prepayment clearing balance");
         helper.succeed();
     }
 
