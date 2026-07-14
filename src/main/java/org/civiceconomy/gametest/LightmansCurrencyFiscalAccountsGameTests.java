@@ -22,14 +22,17 @@ import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.ApproveBudget;
+import org.civiceconomy.fiscal.Budget;
+import org.civiceconomy.fiscal.BudgetState;
 import org.civiceconomy.fiscal.CompensatePayment;
+import org.civiceconomy.fiscal.CreateBudget;
 import org.civiceconomy.fiscal.ExternalPayment;
 import org.civiceconomy.fiscal.Escrow;
 import org.civiceconomy.fiscal.EscrowState;
 import org.civiceconomy.fiscal.FailurePoint;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.MoneyAmount;
-import org.civiceconomy.fiscal.OpenEscrow;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PaymentKind;
 import org.civiceconomy.fiscal.PaymentTransaction;
@@ -135,15 +138,20 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
             FiscalLedger ledger = new FiscalLedger(database, accounts);
-            OpenEscrow escrowRequest = new OpenEscrow(
+            CreateBudget budgetRequest = new CreateBudget(
                     new ServiceIdentity("civiceconomy-gametest"),
-                    "treasury-escrow-" + UUID.randomUUID(),
+                    "treasury-budget-" + UUID.randomUUID(),
                     treasury,
                     MoneyAmount.ofMinorUnits(300),
-                    "gametest:treasury-settlement",
+                    "GAMETEST:TREASURY_SETTLEMENT",
                     "Real LC treasury settlement GameTest",
                     Instant.now().plusSeconds(3_600));
-            Escrow escrow = ledger.openEscrow(escrowRequest);
+            Budget draft = ledger.createBudget(budgetRequest);
+            Budget approved = ledger.approveBudget(new ApproveBudget(
+                    new ServiceIdentity("civiceconomy-gametest-approver"),
+                    "approve-treasury-budget-" + UUID.randomUUID(),
+                    draft.budgetId()));
+            Escrow escrow = ledger.escrow(approved.escrowId().orElseThrow());
             String paymentRequestId = "treasury-payment-" + UUID.randomUUID();
             PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
             try {
@@ -173,8 +181,12 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     MoneyAmount.ZERO, ledger.reservedBalance(treasury), "remaining National Treasury Reservation");
             helper.assertValueEqual(
                     EscrowState.SETTLED,
-                    ledger.openEscrow(escrowRequest).state(),
+                    ledger.escrow(escrow.escrowId()).state(),
                     "settled National Treasury Escrow state");
+            helper.assertValueEqual(
+                    BudgetState.SPENT,
+                    ledger.createBudget(budgetRequest).state(),
+                    "spent National Treasury Budget state");
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
         }

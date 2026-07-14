@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 11;
+    private static final int SCHEMA_VERSION = 12;
 
     private final Connection connection;
 
@@ -439,6 +439,163 @@ public final class CivicDatabase implements AutoCloseable {
         return findReservation(serviceIdentity, requestId);
     }
 
+    public synchronized StoredBudget createBudget(
+            UUID budgetId,
+            String serviceIdentity,
+            String requestId,
+            String sourceAccount,
+            long amountMinorUnits,
+            String budgetCode,
+            String purpose,
+            long expiresAtEpochMillis) {
+        StoredBudget existing = budget(serviceIdentity, requestId);
+        if (existing != null) {
+            return existing;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO fiscal_budget (
+                    budget_id, service_identity, request_id, source_account,
+                    amount_minor_units, budget_code, purpose,
+                    expires_at_epoch_millis, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT')
+                """)) {
+            insert.setString(1, budgetId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, sourceAccount);
+            insert.setLong(5, amountMinorUnits);
+            insert.setString(6, budgetCode);
+            insert.setString(7, purpose);
+            insert.setLong(8, expiresAtEpochMillis);
+            insert.executeUpdate();
+            return budget(budgetId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to create Budget " + budgetCode, failure);
+        }
+    }
+
+    public synchronized StoredBudget budget(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_budget b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.service_identity = ? AND b.request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudget(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget request", failure);
+        }
+    }
+
+    public synchronized StoredBudget budget(UUID budgetId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_budget b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.budget_id = ?
+                """)) {
+            query.setString(1, budgetId.toString());
+            return readBudget(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget " + budgetId, failure);
+        }
+    }
+
+    public synchronized StoredBudget budgetApproval(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_budget b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.approval_service_identity = ? AND b.approval_request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudget(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget approval request", failure);
+        }
+    }
+
+    public synchronized StoredBudget approveBudget(
+            UUID escrowId,
+            UUID reservationId,
+            String serviceIdentity,
+            String requestId,
+            UUID budgetId) {
+        StoredBudget replay = budgetApproval(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        StoredBudget budget = budget(budgetId);
+        if (budget == null) {
+            throw new IllegalArgumentException("Unknown Budget " + budgetId);
+        }
+        if (!"DRAFT".equals(budget.state())) {
+            throw new IllegalStateException("Budget is not a draft: " + budget.state());
+        }
+
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertReservation = connection.prepareStatement("""
+                        INSERT INTO fiscal_reservation (
+                            reservation_id, service_identity, request_id, source_account,
+                            amount_minor_units, purpose, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                        """);
+                    PreparedStatement insertEscrow = connection.prepareStatement("""
+                        INSERT INTO fiscal_escrow (
+                            escrow_id, service_identity, request_id, reservation_id,
+                            external_object_id, purpose, expires_at_epoch_millis, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'RESERVED')
+                        """);
+                    PreparedStatement approve = connection.prepareStatement("""
+                        UPDATE fiscal_budget
+                        SET escrow_id = ?, approval_service_identity = ?,
+                            approval_request_id = ?, state = 'APPROVED'
+                        WHERE budget_id = ? AND state = 'DRAFT' AND escrow_id IS NULL
+                        """)) {
+                insertReservation.setString(1, reservationId.toString());
+                insertReservation.setString(2, serviceIdentity);
+                insertReservation.setString(3, requestId);
+                insertReservation.setString(4, budget.sourceAccount());
+                insertReservation.setLong(5, budget.amountMinorUnits());
+                insertReservation.setString(6, budget.purpose());
+                insertReservation.executeUpdate();
+
+                insertEscrow.setString(1, escrowId.toString());
+                insertEscrow.setString(2, serviceIdentity);
+                insertEscrow.setString(3, requestId);
+                insertEscrow.setString(4, reservationId.toString());
+                insertEscrow.setString(5, "budget:" + budgetId);
+                insertEscrow.setString(6, budget.purpose());
+                insertEscrow.setLong(7, budget.expiresAtEpochMillis());
+                insertEscrow.executeUpdate();
+
+                approve.setString(1, escrowId.toString());
+                approve.setString(2, serviceIdentity);
+                approve.setString(3, requestId);
+                approve.setString(4, budgetId.toString());
+                if (approve.executeUpdate() != 1) {
+                    throw new IllegalStateException("Budget state changed during approval " + budgetId);
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return budget(budgetId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to approve Budget " + budgetId, failure);
+        }
+    }
+
     public synchronized StoredEscrow openEscrow(
             UUID escrowId,
             UUID reservationId,
@@ -574,6 +731,10 @@ public final class CivicDatabase implements AutoCloseable {
                     PreparedStatement expire = connection.prepareStatement("""
                         UPDATE fiscal_escrow SET state = 'EXPIRED'
                         WHERE escrow_id = ? AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
+                        """);
+                    PreparedStatement expireBudget = connection.prepareStatement("""
+                        UPDATE fiscal_budget SET state = 'EXPIRED'
+                        WHERE escrow_id = ? AND state IN ('APPROVED', 'PARTIALLY_SPENT')
                         """)) {
                 if (hasIncompletePayment(escrow.reservationId())) {
                     throw new PendingReservationPaymentException(escrow.reservationId());
@@ -594,6 +755,8 @@ public final class CivicDatabase implements AutoCloseable {
                 if (expire.executeUpdate() != 1) {
                     throw new IllegalStateException("Escrow state changed during expiry " + escrowId);
                 }
+                expireBudget.setString(1, escrowId.toString());
+                expireBudget.executeUpdate();
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -634,6 +797,13 @@ public final class CivicDatabase implements AutoCloseable {
                         UPDATE fiscal_escrow SET state = 'RELEASED'
                         WHERE reservation_id = ?
                           AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
+                        """);
+                    PreparedStatement releaseBudget = connection.prepareStatement("""
+                        UPDATE fiscal_budget SET state = 'RELEASED'
+                        WHERE escrow_id = (
+                            SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
+                        )
+                          AND state IN ('APPROVED', 'PARTIALLY_SPENT')
                         """)) {
                 String state = reservationState(reservationId);
                 if (!"ACTIVE".equals(state)) {
@@ -656,6 +826,8 @@ public final class CivicDatabase implements AutoCloseable {
                 }
                 releaseEscrow.setString(1, reservationId.toString());
                 releaseEscrow.executeUpdate();
+                releaseBudget.setString(1, reservationId.toString());
+                releaseBudget.executeUpdate();
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -889,6 +1061,19 @@ public final class CivicDatabase implements AutoCloseable {
                         END
                         WHERE reservation_id = ?
                           AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
+                        """);
+                    PreparedStatement updateBudget = connection.prepareStatement("""
+                        UPDATE fiscal_budget
+                        SET state = CASE
+                            WHEN (SELECT state FROM fiscal_escrow
+                                  WHERE escrow_id = fiscal_budget.escrow_id) = 'SETTLED'
+                            THEN 'SPENT'
+                            ELSE 'PARTIALLY_SPENT'
+                        END
+                        WHERE escrow_id = (
+                            SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
+                        )
+                          AND state IN ('APPROVED', 'PARTIALLY_SPENT')
                         """)) {
                 settle.setLong(1, transaction.amountMinorUnits());
                 settle.setLong(2, transaction.amountMinorUnits());
@@ -905,6 +1090,8 @@ public final class CivicDatabase implements AutoCloseable {
                 }
                 updateEscrow.setString(1, reservationId.toString());
                 updateEscrow.executeUpdate();
+                updateBudget.setString(1, reservationId.toString());
+                updateBudget.executeUpdate();
                 if (recovery) {
                     insertRecoveryAudit(
                             transactionId,
@@ -1457,6 +1644,34 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 11");
             }
+            if (version < 12) {
+                statement.execute("""
+                        CREATE TABLE fiscal_budget (
+                            budget_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            source_account TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            budget_code TEXT NOT NULL,
+                            purpose TEXT NOT NULL,
+                            expires_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expires_at_epoch_millis >= 0),
+                            escrow_id TEXT UNIQUE REFERENCES fiscal_escrow(escrow_id),
+                            approval_service_identity TEXT,
+                            approval_request_id TEXT,
+                            state TEXT NOT NULL CHECK (state IN (
+                                'DRAFT', 'APPROVED', 'PARTIALLY_SPENT',
+                                'SPENT', 'RELEASED', 'EXPIRED'
+                            )),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (approval_service_identity, approval_request_id),
+                            CHECK ((approval_service_identity IS NULL)
+                                = (approval_request_id IS NULL))
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 12");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -1734,6 +1949,27 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("external_object_id"),
                     result.getString("purpose"),
                     result.getLong("expires_at_epoch_millis"),
+                    result.getString("state"));
+        }
+    }
+
+    private static StoredBudget readBudget(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            String escrowId = result.getString("escrow_id");
+            return new StoredBudget(
+                    UUID.fromString(result.getString("budget_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("source_account"),
+                    result.getLong("amount_minor_units"),
+                    result.getString("budget_code"),
+                    result.getString("purpose"),
+                    result.getLong("expires_at_epoch_millis"),
+                    escrowId == null ? null : UUID.fromString(escrowId),
+                    result.getLong("settled_minor_units"),
                     result.getString("state"));
         }
     }

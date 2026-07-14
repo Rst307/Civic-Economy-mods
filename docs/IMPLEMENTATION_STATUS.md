@@ -58,7 +58,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added idempotent full and partial refunds for committed payments. Refunds reverse source/recipient accounts through the same external transaction UUID marker and reject amounts above the remaining refundable value.
 - Refund recovery covers both ambiguous external application and recorded `EXTERNAL_APPLIED` restart windows; replay does not repeat the economic effect.
 - Added online SQLite backups through Xerial's native backup API, so an open WAL database can produce a consistent point-in-time snapshot without copying live database files directly.
-- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (v11) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
+- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (v12) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
 - Restore refuses to overwrite an existing destination and publishes through a temporary sibling file, using an atomic move when the filesystem supports it.
 - Raised the SQLite schema to v10 with durable payment-compensation requests and immutable recovery-audit records.
 - Added controlled compensation for a `EXTERNAL_APPLIED` payment or refund that must not complete normally. The transaction enters `COMPENSATING` before the reverse transfer and reaches `COMPENSATED` only after the reverse is confirmed.
@@ -72,16 +72,21 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Partial and final payment commits advance the linked Escrow to `PARTIALLY_SETTLED` and `SETTLED` in the same SQLite transaction that advances the Reservation.
 - Reservation release advances the linked Escrow to `RELEASED` in the same transaction and frees only the unpaid remainder.
 - Idempotent server-driven expiry refuses execution before the deadline, blocks while payment is ambiguous or compensating, and atomically records expiry, releases the remaining Reservation, and advances the Escrow to `EXPIRED`.
+- Raised the SQLite schema to v12 with durable Budget drafts and a separate idempotent approval identity.
+- Budget draft creation records source account, amount, budget code, purpose, and expiry without reserving LC funds. Draft replay survives reopen and changed payloads conflict.
+- Budget approval checks current LC-backed available balance and atomically creates the Reservation and Escrow, links them to the Budget, and advances `DRAFT -> APPROVED`; approval replay cannot create a second hold.
+- Payment settlement advances the linked Budget in the same SQLite transaction: `APPROVED -> PARTIALLY_SPENT -> SPENT`, with exact settled and remaining amounts.
+- Reservation release and Escrow expiry advance the linked Budget to `RELEASED` or `EXPIRED` in the same transaction while preserving already-spent amount and freeing only the remainder.
 
 ## In progress
 
-- Add durable Budget request/approval lifecycle over Reservations and Escrow, followed by manual fiscal bills.
+- Add manual fiscal bills over the Budget/Escrow/payment core, then general ledger entries and service authorization policy.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v11, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
+- SQLite migrations beyond schema v12, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
 - Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
-- Player-bank balance adapter; budgets, manual fiscal bills, withdrawals, approvals, general ledger, audit, and service authorization policy.
+- Player-bank balance adapter; manual fiscal bills, withdrawals, configurable multi-person approval policy, general ledger, broader audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
@@ -115,13 +120,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
 - After the compensation/recovery-audit slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
-- After the Escrow/schema-v11 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,504,605 bytes, SHA-256 `8B3F7F381818E942A982748B07408B5D377F2C5E45B1DC81691554CC9B55A9C8`. This is not yet a release artifact.
+- After the Budget/schema-v12 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,514,791 bytes, SHA-256 `230C587B7EF2BDC8BC84775B865F91102743573767CAD66C21F2F74CDACA4055`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v11, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, refund, compensation, recovery-audit, and Escrow storage, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v12, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, refund, compensation, recovery-audit, Escrow, and Budget storage, foreign-world rejection, and unknown-schema rejection.
 - `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
@@ -140,6 +145,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Compensation integration tests use a real temporary SQLite database and a controlled idempotent external adapter. They verify `EXTERNAL_APPLIED -> COMPENSATING -> COMPENSATED`, a crash after reverse transfer, three adapter attempts but only two economic effects, unchanged Reservation value, durable request identity/reason, and ordered start/completion audit records.
 - Ambiguous-payment recovery tests verify that external confirmation and Civic commit audit records are durable, ordered, and not duplicated by a second recovery pass.
 - `FiscalLedgerEscrowTest` uses real temporary SQLite databases and the public fiscal interface. It verifies atomic `400`-unit Escrow creation, replay across reopen, exact `600` available balance, `150 + 250` partial/final settlement, cancellation release, deadline-only expiry, and idempotent expiry replay.
+- `FiscalLedgerBudgetTest` uses real temporary SQLite databases and the public fiscal interface. It verifies draft persistence with no hold, atomic approval and replay, exact `400` Reservation creation, `150 + 250` spend progression, partial-spend release, deadline expiry, and synchronized Budget/Escrow terminal states.
 - The SQLite crash-recovery tests use a controlled external-payment adapter to force exact failure windows; real LC National Treasury commit, refund, and compensation evidence is recorded separately below.
 
 ### Real Lightman's Currency integration
@@ -152,6 +158,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - The interest test funded a National Treasury with 500 LC minor units, invoked LC's interest hook with a multiplier that would otherwise double it, and verified the balance remained exactly 500.
 - The treasury settlement test used a real temporary SQLite database and real LC accounts. Funding player `1000 → 300`, National Treasury `0 → 700 → 400`, and recipient `25 → 325`; ambiguous recovery finished `CIVIC_COMMITTED` and cleared the Reservation without a second economic effect.
 - The same treasury recovery GameTest now opens a durable Escrow rather than a bare Reservation and verifies the real LC recovery commit advances it to `SETTLED`.
+- The treasury recovery GameTest now starts from a durable Budget draft and approval, then proves the real LC recovery path advances Budget `APPROVED -> SPENT` and Escrow `RESERVED -> SETTLED` without a second economic effect.
 - The refund GameTest paid `300` from the real National Treasury to a real LC player account and reversed it exactly once: funding player remained `300`, National Treasury returned to `700`, recipient returned to `25`, replay returned the same committed refund, and the original payment recorded `300` refunded minor units.
 - The compensation GameTest paid `300` from a real National Treasury, entered durable compensation, reversed through real LC, crashed before Civic recorded the reverse, reopened SQLite, and recovered without another economic effect. The National Treasury returned to `700`, the recipient returned to `25`, the `300`-unit Reservation remained active, replay returned `COMPENSATED`, and both audit actions survived reopen.
 - Repeated GameTest runs honor markers persisted by earlier runs; each isolated test therefore uses a fresh transaction UUID while replaying it twice within that run.
@@ -194,6 +201,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the refund/schema-v9 slice, the no-Create server reached `Done (3.571s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.400s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully.
 - After the compensation/schema-v10 slice, the no-Create server reached `Done (3.593s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.418s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully.
 - After the Escrow/schema-v11 slice, the no-Create server reached `Done (3.455s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.153s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully.
+- After the Budget/schema-v12 slice, the no-Create server reached `Done (11.647s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (9.887s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully after fresh spawn preparation.
 
 ### Environment note
 
@@ -215,11 +223,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `CompensatePayment` currently trusts the supplied service identity. Gameplay/admin authorization and approval policy are not yet wired, so no player-facing compensation command may be exposed until the service-authorization slice exists.
 - Escrow expiry is a durable operation but is not yet invoked by a lifecycle scheduler; automatic expiry scanning must run off regular Minecraft ticks.
 - Refunds currently preserve the original Reservation's settled amount and therefore do not reopen or reclassify a settled Escrow. Refund-to-Escrow accounting semantics require an explicit rule before public reporting relies on them.
-- `openEscrow` currently creates an already-authorized `RESERVED` arrangement. Draft creation and approval-to-Reservation orchestration remain part of the Budget/approval slice; no UI should imply that `RESERVED` bypasses future authorization policy.
+- `openEscrow` creates an already-authorized `RESERVED` arrangement for trusted integrations; the Budget path now provides draft and approval orchestration. No player-facing interface may expose direct reserved-Escrow creation before service authorization policy is enforced.
+- Budget approval currently trusts the supplied approval service identity and represents one approval action. Configurable thresholds, distinct approvers, delayed policy changes, and gameplay authorization are not yet wired.
+- A draft Budget past its expiry rejects approval but remains stored as `DRAFT`; automatic stale-draft classification/cleanup is not yet scheduled.
 - Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
 - Lightman's Currency defaults include issuance and interest mechanisms that must be explicitly disabled or blocked before a playable release can satisfy currency conservation.
 
 ## Next step
 
-Implement Budget request and approval lifecycle over the proven Reservation/Escrow/payment core while the founding activation semantic fork remains explicitly documented.
+Implement manual fiscal bills over the proven Budget/Escrow/payment core while the founding activation semantic fork remains explicitly documented.

@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.InactiveReservationException;
 import org.civiceconomy.persistence.PendingReservationPaymentException;
+import org.civiceconomy.persistence.StoredBudget;
 import org.civiceconomy.persistence.StoredEscrow;
 import org.civiceconomy.persistence.StoredEscrowExpiry;
 import org.civiceconomy.persistence.StoredReservation;
@@ -56,6 +57,79 @@ public final class FiscalLedger {
         return MoneyAmount.ofMinorUnits(database.activeReservedMinorUnits(accountId.value()));
     }
 
+    public Budget createBudget(CreateBudget request) {
+        StoredBudget existing = database.budget(
+                request.serviceIdentity().value(), request.requestId());
+        if (existing != null) {
+            if (!existing.sourceAccount().equals(request.sourceAccount().value())
+                    || existing.amountMinorUnits() != request.amount().minorUnits()
+                    || !existing.budgetCode().equals(request.budgetCode())
+                    || !existing.purpose().equals(request.purpose())
+                    || existing.expiresAtEpochMillis() != request.expiresAt().toEpochMilli()) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toBudget(existing);
+        }
+        if (!request.expiresAt().isAfter(clock.instant())) {
+            throw new IllegalArgumentException("Budget expiry must be in the future");
+        }
+        return toBudget(database.createBudget(
+                UUID.randomUUID(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.sourceAccount().value(),
+                request.amount().minorUnits(),
+                request.budgetCode(),
+                request.purpose(),
+                request.expiresAt().toEpochMilli()));
+    }
+
+    public Budget approveBudget(ApproveBudget request) {
+        StoredBudget replay = database.budgetApproval(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.budgetId().equals(request.budgetId())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toBudget(replay);
+        }
+        StoredBudget budget = database.budget(request.budgetId());
+        if (budget == null) {
+            throw new IllegalArgumentException("Unknown Budget " + request.budgetId());
+        }
+        AccountId sourceAccount = new AccountId(budget.sourceAccount());
+        synchronized (accountLocks.computeIfAbsent(sourceAccount, ignored -> new Object())) {
+            replay = database.budgetApproval(
+                    request.serviceIdentity().value(), request.requestId());
+            if (replay != null) {
+                if (!replay.budgetId().equals(request.budgetId())) {
+                    throw new IdempotencyConflictException(
+                            request.serviceIdentity(), request.requestId());
+                }
+                return toBudget(replay);
+            }
+            if (!"DRAFT".equals(budget.state())) {
+                throw new IllegalStateException("Budget is not a draft: " + budget.state());
+            }
+            if (clock.millis() >= budget.expiresAtEpochMillis()) {
+                throw new IllegalStateException("Budget has expired before approval");
+            }
+            MoneyAmount amount = MoneyAmount.ofMinorUnits(budget.amountMinorUnits());
+            MoneyAmount available = availableBalance(sourceAccount);
+            if (available.compareTo(amount) < 0) {
+                throw new InsufficientAvailableBalanceException(sourceAccount, amount, available);
+            }
+            return toBudget(database.approveBudget(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.budgetId()));
+        }
+    }
+
     public Escrow openEscrow(OpenEscrow request) {
         synchronized (accountLocks.computeIfAbsent(request.sourceAccount(), ignored -> new Object())) {
             StoredEscrow existing = database.escrow(
@@ -90,6 +164,14 @@ public final class FiscalLedger {
                     request.purpose(),
                     request.expiresAt().toEpochMilli()));
         }
+    }
+
+    public Escrow escrow(UUID escrowId) {
+        StoredEscrow stored = database.escrow(escrowId);
+        if (stored == null) {
+            throw new IllegalArgumentException("Unknown Escrow " + escrowId);
+        }
+        return toEscrow(stored);
     }
 
     public Escrow expireEscrow(ExpireEscrow request) {
@@ -178,5 +260,20 @@ public final class FiscalLedger {
                 stored.purpose(),
                 java.time.Instant.ofEpochMilli(stored.expiresAtEpochMillis()),
                 EscrowState.valueOf(stored.state()));
+    }
+
+    private static Budget toBudget(StoredBudget stored) {
+        return new Budget(
+                stored.budgetId(),
+                new ServiceIdentity(stored.serviceIdentity()),
+                stored.requestId(),
+                new AccountId(stored.sourceAccount()),
+                MoneyAmount.ofMinorUnits(stored.amountMinorUnits()),
+                stored.budgetCode(),
+                stored.purpose(),
+                java.time.Instant.ofEpochMilli(stored.expiresAtEpochMillis()),
+                java.util.Optional.ofNullable(stored.escrowId()),
+                MoneyAmount.ofMinorUnits(stored.settledMinorUnits()),
+                BudgetState.valueOf(stored.state()));
     }
 }
