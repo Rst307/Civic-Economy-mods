@@ -6,6 +6,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.storage.LevelResource;
@@ -16,6 +18,7 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -139,6 +142,17 @@ public final class CivicServerRuntime {
             state = null;
         }
         LOGGER.info("Civic server runtime closed SQLite after draining buffered online-time intervals");
+    }
+
+    <T> CompletableFuture<T> submitAdministration(
+            Function<FiscalAuthorization, T> operation) {
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        return current.writer.submitDatabase(
+                database -> operation.apply(new FiscalAuthorization(database)));
     }
 
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {

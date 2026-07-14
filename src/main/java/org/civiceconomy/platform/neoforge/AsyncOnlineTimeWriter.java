@@ -4,8 +4,10 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -43,6 +45,26 @@ final class AsyncOnlineTimeWriter implements AutoCloseable {
 
     Throwable failure() {
         return firstFailure.get();
+    }
+
+    <T> CompletableFuture<T> submitDatabase(Function<CivicDatabase, T> work) {
+        Throwable unavailable = firstFailure.get();
+        if (unavailable != null) {
+            return CompletableFuture.failedFuture(unavailable);
+        }
+        CompletableFuture<T> result = new CompletableFuture<>();
+        try {
+            executor.execute(() -> {
+                try {
+                    result.complete(work.apply(database));
+                } catch (RuntimeException failure) {
+                    result.completeExceptionally(failure);
+                }
+            });
+        } catch (RuntimeException rejected) {
+            result.completeExceptionally(rejected);
+        }
+        return result;
     }
 
     @Override

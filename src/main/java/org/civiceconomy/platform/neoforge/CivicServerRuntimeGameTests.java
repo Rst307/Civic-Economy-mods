@@ -6,6 +6,8 @@ import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.UUID;
+import java.util.Set;
+import java.util.stream.Collectors;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.server.level.ClientInformation;
@@ -47,6 +49,44 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void fiscalAdministrationCommandsAreRegistered(GameTestHelper helper) {
+        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+        var service = dispatcher.getRoot()
+                .getChild("civic")
+                .getChild("economy")
+                .getChild("admin")
+                .getChild("service");
+        helper.assertValueEqual(
+                Set.of("list", "show", "register", "grant", "revoke", "disable", "enable"),
+                service.getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted fiscal administration command actions");
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 200)
+    public static void consoleCanRegisterFiscalServiceOffThread(GameTestHelper helper) {
+        String serviceIdentity = "command-gametest-" + UUID.randomUUID();
+        var server = helper.getLevel().getServer();
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin service register " + serviceIdentity
+                        + " civiceconomy register-command-gametest \"Command GameTest Service\""
+                        + " Verify audited asynchronous registration");
+        Path databaseFile = server.getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+
+        helper.succeedWhen(() -> assertFiscalServiceRegistered(
+                helper,
+                databaseFile,
+                serviceIdentity,
+                "civiceconomy",
+                "register-command-gametest"));
+    }
+
     private static void assertPersistedInterval(GameTestHelper helper, Path databaseFile, ServerPlayer player) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var query = connection.prepareStatement("""
@@ -61,6 +101,38 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect Civic runtime GameTest database", failure);
+        }
+    }
+
+    private static void assertFiscalServiceRegistered(
+            GameTestHelper helper,
+            Path databaseFile,
+            String serviceIdentity,
+            String ownerModId,
+            String requestId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT s.owner_mod_id, a.administrator_identity, a.request_id, a.reason
+                        FROM fiscal_service s
+                        JOIN fiscal_service_registration_audit a
+                          ON a.service_identity = s.service_identity
+                        WHERE s.service_identity = ?
+                        """)) {
+            query.setString(1, serviceIdentity);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "registered fiscal service row");
+                helper.assertValueEqual(ownerModId, result.getString(1), "registered owner Mod ID");
+                helper.assertTrue(
+                        result.getString(2).startsWith("civic-admin-console:"),
+                        "registration administrator identity");
+                helper.assertValueEqual(requestId, result.getString(3), "registration request ID");
+                helper.assertValueEqual(
+                        "Verify audited asynchronous registration",
+                        result.getString(4),
+                        "registration reason");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect fiscal service command result", failure);
         }
     }
 }

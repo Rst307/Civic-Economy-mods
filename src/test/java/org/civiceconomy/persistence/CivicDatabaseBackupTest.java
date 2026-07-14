@@ -13,6 +13,7 @@ import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.FiscalCapability;
 import org.civiceconomy.fiscal.FiscalLedger;
+import org.civiceconomy.fiscal.FiscalTestSessions;
 import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.ReserveFunds;
@@ -33,7 +34,7 @@ class CivicDatabaseBackupTest {
         AccountId treasury = new AccountId("nation:aurora:treasury");
 
         try (CivicDatabase live = CivicDatabase.open(liveFile, identity)) {
-            FiscalLedger ledger = ledger(live);
+            FiscalLedger ledger = ledger(live, new ServiceIdentity("backup-test"));
             ledger.reserve(new ReserveFunds(
                     new ServiceIdentity("backup-test"),
                     "before-backup",
@@ -56,10 +57,11 @@ class CivicDatabaseBackupTest {
 
         try (CivicDatabase backup = CivicDatabase.open(backupFile, identity)) {
             assertEquals(identity, backup.identity());
-            assertEquals(18, backup.schemaVersion());
+            assertEquals(19, backup.schemaVersion());
             assertEquals(
                     MoneyAmount.ofMinorUnits(300),
-                    ledger(backup).reservedBalance(new ServiceIdentity("backup-test"), treasury));
+                    ledger(backup, new ServiceIdentity("backup-test"))
+                            .reservedBalance(new ServiceIdentity("backup-test"), treasury));
         }
     }
 
@@ -72,7 +74,7 @@ class CivicDatabaseBackupTest {
         AccountId treasury = new AccountId("nation:aurora:treasury");
 
         try (CivicDatabase live = CivicDatabase.open(liveFile, identity)) {
-            ledger(live).reserve(new ReserveFunds(
+            ledger(live, new ServiceIdentity("restore-test")).reserve(new ReserveFunds(
                     new ServiceIdentity("restore-test"),
                     "restored-hold",
                     treasury,
@@ -85,10 +87,11 @@ class CivicDatabaseBackupTest {
 
         try (CivicDatabase restored = CivicDatabase.open(restoredFile, identity)) {
             assertEquals(identity, restored.identity());
-            assertEquals(18, restored.schemaVersion());
+            assertEquals(19, restored.schemaVersion());
             assertEquals(
                     MoneyAmount.ofMinorUnits(450),
-                    ledger(restored).reservedBalance(new ServiceIdentity("restore-test"), treasury));
+                    ledger(restored, new ServiceIdentity("restore-test"))
+                            .reservedBalance(new ServiceIdentity("restore-test"), treasury));
         }
     }
 
@@ -121,7 +124,7 @@ class CivicDatabaseBackupTest {
         }
         try (Connection backup = DriverManager.getConnection("jdbc:sqlite:" + backupFile);
                 Statement statement = backup.createStatement()) {
-            statement.execute("PRAGMA user_version = 19");
+            statement.execute("PRAGMA user_version = 20");
         }
 
         assertThrows(
@@ -130,11 +133,14 @@ class CivicDatabaseBackupTest {
         assertFalse(java.nio.file.Files.exists(restoredFile));
     }
 
-    private static FiscalLedger ledger(CivicDatabase database) {
+    private static FiscalLedger ledger(
+            CivicDatabase database, ServiceIdentity serviceIdentity) {
         AccountId treasury = new AccountId("nation:aurora:treasury");
-        authorize(database, new ServiceIdentity("backup-test"), treasury);
-        authorize(database, new ServiceIdentity("restore-test"), treasury);
-        return FiscalLedger.authorized(database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+        authorize(database, serviceIdentity, treasury);
+        return FiscalLedger.authorized(
+                database,
+                ignored -> MoneyAmount.ofMinorUnits(1_000),
+                FiscalTestSessions.open(database, serviceIdentity, "civiceconomy-tests"));
     }
 
     private static void authorize(

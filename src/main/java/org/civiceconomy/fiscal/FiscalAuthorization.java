@@ -1,8 +1,12 @@
 package org.civiceconomy.fiscal;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import net.neoforged.fml.ModContainer;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredFiscalService;
+import org.civiceconomy.platform.neoforge.NeoForgeCallerModResolver;
 
 public final class FiscalAuthorization {
     private final CivicDatabase database;
@@ -12,12 +16,26 @@ public final class FiscalAuthorization {
     }
 
     public RegisteredFiscalService register(RegisterFiscalService request) {
+        StoredFiscalService replay = database.fiscalServiceRegistration(
+                request.administrator().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.serviceIdentity().equals(request.serviceIdentity().value())
+                    || !replay.ownerModId().equals(request.ownerModId())
+                    || !replay.displayName().equals(request.displayName())
+                    || !replay.reason().equals(request.reason())) {
+                throw new FiscalServiceRegistrationConflictException(request.serviceIdentity());
+            }
+            return toRegisteredService(replay);
+        }
         StoredFiscalService stored = database.fiscalService(request.serviceIdentity().value());
         if (stored == null) {
             stored = database.registerFiscalService(
                     request.serviceIdentity().value(),
                     request.ownerModId(),
                     request.displayName(),
+                    request.administrator().value(),
+                    request.requestId(),
+                    request.reason(),
                     System.currentTimeMillis());
         }
         if (!stored.ownerModId().equals(request.ownerModId())
@@ -25,6 +43,32 @@ public final class FiscalAuthorization {
             throw new FiscalServiceRegistrationConflictException(request.serviceIdentity());
         }
         return toRegisteredService(stored);
+    }
+
+    FiscalServiceSession openSession(
+            ServiceIdentity serviceIdentity, String verifiedOwnerModId) {
+        StoredFiscalService stored = database.fiscalService(serviceIdentity.value());
+        if (stored == null) {
+            throw new UnknownFiscalServiceException(serviceIdentity);
+        }
+        if (!stored.ownerModId().equals(verifiedOwnerModId)) {
+            throw new FiscalServiceOwnerMismatchException(
+                    serviceIdentity, stored.ownerModId(), verifiedOwnerModId);
+        }
+        return new FiscalServiceSession(serviceIdentity, stored.ownerModId());
+    }
+
+    public FiscalServiceSession openSession(ServiceIdentity serviceIdentity) {
+        ModContainer verifiedOwner = NeoForgeCallerModResolver.resolveCallingModContainer();
+        StoredFiscalService stored = database.fiscalService(serviceIdentity.value());
+        if (stored == null) {
+            throw new UnknownFiscalServiceException(serviceIdentity);
+        }
+        if (!stored.ownerModId().equals(verifiedOwner.getModId())) {
+            throw new FiscalServiceOwnerMismatchException(
+                    serviceIdentity, stored.ownerModId(), verifiedOwner.getModId());
+        }
+        return new FiscalServiceSession(serviceIdentity, verifiedOwner);
     }
 
     public FiscalCapabilityGrant grant(GrantFiscalCapability request) {
@@ -131,6 +175,33 @@ public final class FiscalAuthorization {
                 System.currentTimeMillis()));
     }
 
+    public List<RegisteredFiscalService> registeredServices() {
+        return database.fiscalServices().stream()
+                .map(FiscalAuthorization::toRegisteredService)
+                .toList();
+    }
+
+    public FiscalServiceAuthorizationView describe(ServiceIdentity serviceIdentity) {
+        StoredFiscalService stored = database.fiscalService(serviceIdentity.value());
+        if (stored == null) {
+            throw new UnknownFiscalServiceException(serviceIdentity);
+        }
+        List<FiscalCapabilityGrantStatus> grants = database
+                .fiscalCapabilityGrants(serviceIdentity.value())
+                .stream()
+                .map(grant -> {
+                    var revocation = database.fiscalCapabilityRevocation(grant.grantId());
+                    return new FiscalCapabilityGrantStatus(
+                            toCapabilityGrant(grant),
+                            Optional.ofNullable(revocation).map(this::toCapabilityRevocation));
+                })
+                .toList();
+        return new FiscalServiceAuthorizationView(
+                toRegisteredService(stored),
+                FiscalServiceState.valueOf(database.fiscalServiceState(serviceIdentity.value())),
+                grants);
+    }
+
     void require(
             ServiceIdentity serviceIdentity, FiscalCapability capability, AccountId accountId) {
         if (database.fiscalService(serviceIdentity.value()) == null
@@ -146,6 +217,9 @@ public final class FiscalAuthorization {
                 new ServiceIdentity(stored.serviceIdentity()),
                 stored.ownerModId(),
                 stored.displayName(),
+                new ServiceIdentity(stored.administratorIdentity()),
+                stored.requestId(),
+                stored.reason(),
                 Instant.ofEpochMilli(stored.registeredAtEpochMillis()));
     }
 

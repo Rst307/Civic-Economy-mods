@@ -101,20 +101,26 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised the SQLite schema to v18 with immutable Service Identity state-change records. `DISABLED` immediately overrides every read/write grant, and a later audited `ENABLED` change restores only the grants that remain active.
 - Revocations and service state changes carry administrator identity, stable request ID, reason, and timestamp. Exact replay returns the original record and changed reuse conflicts.
 - Disabling a service blocks all new caller reads and writes but does not block Civic's internal recovery loop from finishing an already externally applied payment, preventing administrative changes from stranding moved LC funds.
+- Added opaque owner-bound fiscal sessions. Public `FiscalLedger` and `PaymentCoordinator` factories now require a session, every caller identity must match that session before protected reads, authorization, SQLite preparation, or LC application, and package-local raw construction remains limited to state-machine tests.
+- Production session opening resolves the first uniquely owned external caller class through the loaded NeoForge scan data and binds the session to the actual `ModContainer`. Unknown or ambiguous ownership fails closed, and the registered `ownerModId` must exactly match the resolved container.
+- Raised the SQLite schema to v19 with immutable audited Service Identity registration metadata: administrator identity, stable request ID, reason, and registration time commit atomically with the service row. Pre-v19 registrations receive explicit `civiceconomy-legacy` backfill provenance.
+- Added OP/console-only `civic economy admin service` commands for register, grant, revoke, disable, enable, list, and show. Registration rejects unloaded owner Mods; administrator identity is derived from the real command source rather than user input.
+- Administration commands enqueue SQLite work on the dedicated `Civic-Economy-SQLite` executor and report completion back on the server thread. Command parsing and permission checks never synchronously execute SQLite on the Minecraft server thread.
+- Added immutable authorization views exposing the registered owner, registration audit, current service state, exact account grants, and revocation status without letting command code query SQLite directly.
 
 ## In progress
 
-- Bind registration to the actual NeoForge Mod container and expose grant/revocation/service-state administration through trusted audited gameplay controls.
+- Add persistent `NationApplication` / `PENDING` founding applications so candidate members can accumulate non-reusable recent online evidence before permanent `NationId`, formal Citizenship, capital, and treasury activation.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v18, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
+- SQLite migrations beyond schema v19, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
 - Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
-- Withdrawals, configurable multi-person approval policy, broader audit, and gameplay/Mod-container authorization binding.
+- Withdrawals, configurable multi-person approval policy, and broader audit.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
-- Commands, menus, public reports, administration, recovery tools, and isolated `DEBUG WORLD` implementation.
+- Remaining gameplay commands, menus, public reports, recovery tools, and isolated `DEBUG WORLD` implementation.
 - Client runtime, GameTest runtime, playable single-player loop, and multiplayer core loop.
 - Installation, configuration, player, administrator, debugging, upgrade, backup, and recovery documentation.
 - Release JAR verification, clean worktree, push, and draft pull request.
@@ -148,12 +154,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the production LC account-balance slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
 - After the service-authorization/schema-v16 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
 - After the authorization-lifecycle/schema-v18 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,569,202 bytes, SHA-256 `B35BB54390428400D2DAAB9F636ED19102006043E2EEC72653C443E5BB744FE2`. This is not yet a release artifact.
+- After the owner-bound-session/trusted-administration/schema-v19 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 105 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,592,541 bytes, SHA-256 `3741B772773067C4FC52AA74B9A8103D3D6E2F9257602F084C8AEA4F1D7D6563`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v18, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, refund, compensation, recovery-audit, Escrow, Budget, Fiscal Bill, general-ledger, Service Identity, capability-grant, revocation, and service-state storage, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v19, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, refund, compensation, recovery-audit, Escrow, Budget, Fiscal Bill, general-ledger, audited Service Identity registration, capability-grant, revocation, and service-state storage, foreign-world rejection, and unknown-schema rejection.
 - `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
@@ -176,7 +183,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `FiscalLedgerBudgetTest` uses real temporary SQLite databases and the public fiscal interface. It verifies draft persistence with no hold, atomic approval and replay, exact `400` Reservation creation, `150 + 250` spend progression, partial-spend release, deadline expiry, and synchronized Budget/Escrow terminal states.
 - `FiscalLedgerBillTest` uses real temporary SQLite databases and the public fiscal/payment interfaces. It verifies issue/funding replay, exact payer holds, exposed required beneficiary, redirected-payment rejection, `100 + 200` payment progression, partial-payment cancellation, and due-date expiry.
 - `FiscalLedgerEntriesTest` uses a real temporary SQLite database and the public account-history interface. It verifies paired payment entries, exact source/counterparty/direction/kind fields, replay non-duplication, and a separate reverse pair for refunds without mutating original entries.
-- `FiscalAuthorizationTest` uses real temporary SQLite databases and the authorized fiscal interfaces. It verifies zero default authority, registration/grant replay and conflicts, persistence across reopen, exact account/capability isolation, protected detailed reads, terminal-state replay, unauthorized settlement with no SQLite transaction or external effect, immutable revocation/re-grant, service disable/re-enable, and recovery completion after disable.
+- `FiscalAuthorizationTest` uses real temporary SQLite databases and the authorized fiscal interfaces. It verifies zero default authority, audited registration/grant replay and conflicts, persistence across reopen, exact account/capability isolation, protected detailed reads, terminal-state replay, unauthorized settlement with no SQLite transaction or external effect, immutable revocation/re-grant, service disable/re-enable, recovery completion after disable, owner mismatch rejection, and cross-identity impersonation rejection before external payment.
+- `NeoForgeCallerModResolverTest` verifies unique scanned-class ownership resolution and fail-closed unknown/ambiguous callers. `AsyncOnlineTimeWriterTest` verifies administration database work runs on the dedicated SQLite thread.
 - The SQLite crash-recovery tests use a controlled external-payment adapter to force exact failure windows; real LC National Treasury commit, refund, and compensation evidence is recorded separately below.
 
 ### Real Lightman's Currency integration
@@ -184,6 +192,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `LightmansCurrencyPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
 - `LightmansCurrencyAccountBalancesTest` verifies exact LC minor-unit propagation through the public balance interface and fail-closed malformed-player, unknown-player, and unknown non-player behavior using a boundary fake only at the LC lookup seam.
 - `gradlew.bat runGameTestServer --no-daemon --console=plain` passed all 11 required GameTests against the real pinned LC/FTB runtime after the service-authorization/schema-v16 slice.
+- After the owner-bound-session/trusted-administration/schema-v19 slice, the same command passed all 13 required GameTests. The added tests inspect the real server dispatcher and execute a real console registration command, then verify its owner, derived administrator identity, request ID, and reason in the world-bound SQLite database.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
@@ -242,6 +251,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the production LC account-balance slice, the no-Create server reached `Done (4.079s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (4.048s)!` with production scoring enabled; both opened the world-bound SQLite runtime successfully.
 - After the service-authorization/schema-v16 slice, the no-Create server reached `Done (3.798s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.878s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
 - After the authorization-lifecycle/schema-v18 slice, the no-Create server reached `Done (4.176s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.777s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
+- After the owner-bound-session/trusted-administration/schema-v19 slice, the no-Create server reached `Done (4.229s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (4.160s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
 
 ### Environment note
 
@@ -257,10 +267,10 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Graceful `ServerStoppedEvent` waits up to ten seconds for queued SQLite writes and close. This is bounded shutdown lifecycle work, not regular tick work, but timeout behavior still needs a controlled fault GameTest.
 - `NationRegistry.register` is currently the durable registration primitive. No gameplay command yet proves the caller is the FTB Team head or enforces the configurable minimum valid-citizen threshold.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
-- Founding eligibility is intentionally not wired to raw FTB members. The spec needs either a pending Nation/application state that can accumulate Citizenship time before activation, or an explicit rule for pre-Nation activity evidence; implementation is paused only at that semantic fork.
+- Founding eligibility is intentionally not wired to raw FTB members. The resolved design is a persistent `NationApplication` / `PENDING` phase that accumulates non-reusable candidate online evidence before activation; implementation is the next slice.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
 - The treasury GameTests prove real LC/SQLite commit and compensation recovery inside one running server across controlled reopen windows. They do not yet prove actual process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files.
-- Compensation now requires an exact `COMPENSATE_PAYMENT` account grant, but the trusted grant-administration primitive is not yet bound to an OP/gameplay authorization check. No player-facing grant or compensation command may be exposed until that binding exists.
+- Compensation requires an exact `COMPENSATE_PAYMENT` account grant. Grant/revocation/service-state administration is now OP/console gated and audited; a direct player compensation command is still intentionally absent.
 - Escrow expiry is a durable operation but is not yet invoked by a lifecycle scheduler; automatic expiry scanning must run off regular Minecraft ticks.
 - Refunds currently preserve the original Reservation's settled amount and therefore do not reopen or reclassify a settled Escrow. Refund-to-Escrow accounting semantics require an explicit rule before public reporting relies on them.
 - `openEscrow` now requires exact `MANAGE_ESCROW` scope, but it still creates an already-approved `RESERVED` arrangement. Player-facing flows should prefer Budget approval or another governance decision rather than exposing this integration primitive directly.
@@ -270,8 +280,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - An unfunded Bill past its due date rejects funding but remains stored as `ISSUED`; automatic overdue classification and scheduled expiry are not yet wired.
 - Refunds of paid Bill transactions currently leave Bill and Escrow settled-state totals unchanged, matching the broader unresolved refund-to-Escrow accounting rule.
 - Schema v14 does not backfill ledger rows for transactions already committed by an older development schema because those rows lack trustworthy original commit timestamps. This is acceptable for the pre-release development baseline but requires an explicit upgrade policy before any public release migration.
-- Schemas v15-v18 do not infer or backfill grants from historical service-identity strings. Existing development callers must register and receive explicit grants before using authorized factories.
-- Grants now support immutable revocation and services support disable/re-enable; grants still have no automatic expiry. `ownerModId` is recorded metadata but is not yet verified against the calling NeoForge Mod container; installed Mods remain inside the trusted operations boundary.
+- Schemas v15-v19 do not infer or backfill grants from historical service-identity strings. Existing development callers must register and receive explicit grants before using authorized factories; pre-v19 registration audit is explicitly marked as legacy backfill.
+- Grants support immutable revocation and services support disable/re-enable; grants still have no automatic expiry. Production sessions now verify `ownerModId` against the actual calling NeoForge Mod container. The resolver relies on exact loaded scan data and direct caller stack provenance; unknown, generated-only, or multiply-owned caller classes fail closed.
 - Current ledger entry kinds cover only committed `PAYMENT` and `REFUND` transfers. Issuance, destruction, withdrawal, public-fund allocation, and administrator/debug adjustments require explicit future entry kinds rather than being forced into payment semantics.
 - Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
@@ -279,4 +289,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Bind registered service ownership to the actual NeoForge Mod container and add trusted OP/gameplay administration for grants, revocations, and service state while the founding activation semantic fork remains explicitly documented.
+Implement persistent `NationApplication` / `PENDING` founding applications, candidate affiliation and non-reusable online evidence, formal-world minimum-effective-citizen activation, and explicit DEBUG WORLD bypass before permanent Nation activation.

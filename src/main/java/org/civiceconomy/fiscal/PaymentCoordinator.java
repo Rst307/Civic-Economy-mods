@@ -14,26 +14,40 @@ public final class PaymentCoordinator {
     private final CivicDatabase database;
     private final ExternalPayments externalPayments;
     private final FiscalAuthorization authorization;
+    private final FiscalServiceSession session;
 
     PaymentCoordinator(CivicDatabase database, ExternalPayments externalPayments) {
-        this(database, externalPayments, null);
+        this(database, externalPayments, null, null);
     }
 
     private PaymentCoordinator(
             CivicDatabase database,
             ExternalPayments externalPayments,
-            FiscalAuthorization authorization) {
+            FiscalAuthorization authorization,
+            FiscalServiceSession session) {
         this.database = database;
         this.externalPayments = externalPayments;
         this.authorization = authorization;
+        this.session = session;
+    }
+
+    static PaymentCoordinator authorized(
+            CivicDatabase database, ExternalPayments externalPayments) {
+        return new PaymentCoordinator(
+                database, externalPayments, new FiscalAuthorization(database), null);
     }
 
     public static PaymentCoordinator authorized(
-            CivicDatabase database, ExternalPayments externalPayments) {
-        return new PaymentCoordinator(database, externalPayments, new FiscalAuthorization(database));
+            CivicDatabase database,
+            ExternalPayments externalPayments,
+            FiscalServiceSession session) {
+        java.util.Objects.requireNonNull(session, "Fiscal service session cannot be null");
+        return new PaymentCoordinator(
+                database, externalPayments, new FiscalAuthorization(database), session);
     }
 
     public PaymentTransaction settle(SettleReservation request, FailurePoint failurePoint) {
+        requireSessionIdentity(request.serviceIdentity());
         if (authorization != null) {
             var reservation = database.reservationRecord(request.reservationId());
             if (reservation == null) {
@@ -76,6 +90,7 @@ public final class PaymentCoordinator {
     }
 
     public PaymentTransaction refund(RefundPayment request, FailurePoint failurePoint) {
+        requireSessionIdentity(request.serviceIdentity());
         StoredPaymentTransaction original = database.paymentTransaction(request.originalTransactionId());
         if (original == null) {
             throw new IllegalArgumentException(
@@ -110,6 +125,7 @@ public final class PaymentCoordinator {
     }
 
     public PaymentTransaction compensate(CompensatePayment request, FailurePoint failurePoint) {
+        requireSessionIdentity(request.serviceIdentity());
         StoredPaymentTransaction original = database.paymentTransaction(request.transactionId());
         if (original == null) {
             throw new IllegalArgumentException(
@@ -206,6 +222,7 @@ public final class PaymentCoordinator {
 
     public List<RecoveryAuditEntry> recoveryAudit(
             ServiceIdentity serviceIdentity, UUID transactionId) {
+        requireSessionIdentity(serviceIdentity);
         StoredPaymentTransaction transaction = database.paymentTransaction(transactionId);
         if (transaction == null) {
             throw new IllegalArgumentException("Unknown payment transaction " + transactionId);
@@ -227,6 +244,7 @@ public final class PaymentCoordinator {
 
     public PaymentTransaction transaction(
             ServiceIdentity serviceIdentity, String requestId) {
+        requireSessionIdentity(serviceIdentity);
         StoredPaymentTransaction stored = database.paymentTransaction(requestId);
         if (stored == null) {
             throw new IllegalArgumentException("Unknown payment request " + requestId);
@@ -297,7 +315,14 @@ public final class PaymentCoordinator {
     private void require(
             ServiceIdentity serviceIdentity, FiscalCapability capability, AccountId accountId) {
         if (authorization != null) {
+            requireSessionIdentity(serviceIdentity);
             authorization.require(serviceIdentity, capability, accountId);
+        }
+    }
+
+    private void requireSessionIdentity(ServiceIdentity serviceIdentity) {
+        if (session != null) {
+            session.requireIdentity(serviceIdentity);
         }
     }
 }

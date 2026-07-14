@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 18;
+    private static final int SCHEMA_VERSION = 19;
 
     private final Connection connection;
 
@@ -86,30 +86,68 @@ public final class CivicDatabase implements AutoCloseable {
             String serviceIdentity,
             String ownerModId,
             String displayName,
+            String administratorIdentity,
+            String requestId,
+            String reason,
             long registeredAtEpochMillis) {
+        StoredFiscalService replay = fiscalServiceRegistration(administratorIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
         StoredFiscalService existing = fiscalService(serviceIdentity);
         if (existing != null) {
             return existing;
         }
-        try (PreparedStatement insert = connection.prepareStatement("""
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
                 INSERT INTO fiscal_service (
                     service_identity, owner_mod_id, display_name, registered_at_epoch_millis
                 ) VALUES (?, ?, ?, ?)
+                """);
+                    PreparedStatement audit = connection.prepareStatement("""
+                INSERT INTO fiscal_service_registration_audit (
+                    service_identity, administrator_identity, request_id, reason,
+                    registered_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?)
                 """)) {
-            insert.setString(1, serviceIdentity);
-            insert.setString(2, ownerModId);
-            insert.setString(3, displayName);
-            insert.setLong(4, registeredAtEpochMillis);
-            insert.executeUpdate();
+                insert.setString(1, serviceIdentity);
+                insert.setString(2, ownerModId);
+                insert.setString(3, displayName);
+                insert.setLong(4, registeredAtEpochMillis);
+                insert.executeUpdate();
+                audit.setString(1, serviceIdentity);
+                audit.setString(2, administratorIdentity);
+                audit.setString(3, requestId);
+                audit.setString(4, reason);
+                audit.setLong(5, registeredAtEpochMillis);
+                audit.executeUpdate();
+            }
+            connection.commit();
             return fiscalService(serviceIdentity);
         } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
             throw new IllegalStateException("Unable to register fiscal service " + serviceIdentity, failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Civic database auto-commit", failure);
+            }
         }
     }
 
     public synchronized StoredFiscalService fiscalService(String serviceIdentity) {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT * FROM fiscal_service WHERE service_identity = ?
+                SELECT s.*, a.administrator_identity, a.request_id, a.reason
+                FROM fiscal_service s
+                JOIN fiscal_service_registration_audit a
+                  ON a.service_identity = s.service_identity
+                WHERE s.service_identity = ?
                 """)) {
             query.setString(1, serviceIdentity);
             try (ResultSet result = query.executeQuery()) {
@@ -120,10 +158,68 @@ public final class CivicDatabase implements AutoCloseable {
                         result.getString("service_identity"),
                         result.getString("owner_mod_id"),
                         result.getString("display_name"),
+                        result.getString("administrator_identity"),
+                        result.getString("request_id"),
+                        result.getString("reason"),
                         result.getLong("registered_at_epoch_millis"));
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read fiscal service " + serviceIdentity, failure);
+        }
+    }
+
+    public synchronized StoredFiscalService fiscalServiceRegistration(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT s.*, a.administrator_identity, a.request_id, a.reason
+                FROM fiscal_service_registration_audit a
+                JOIN fiscal_service s ON s.service_identity = a.service_identity
+                WHERE a.administrator_identity = ? AND a.request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredFiscalService(
+                        result.getString("service_identity"),
+                        result.getString("owner_mod_id"),
+                        result.getString("display_name"),
+                        result.getString("administrator_identity"),
+                        result.getString("request_id"),
+                        result.getString("reason"),
+                        result.getLong("registered_at_epoch_millis"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal service registration request", failure);
+        }
+    }
+
+    public synchronized List<StoredFiscalService> fiscalServices() {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT s.*, a.administrator_identity, a.request_id, a.reason
+                FROM fiscal_service s
+                JOIN fiscal_service_registration_audit a
+                  ON a.service_identity = s.service_identity
+                ORDER BY s.service_identity
+                """)) {
+            List<StoredFiscalService> services = new ArrayList<>();
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    services.add(new StoredFiscalService(
+                            result.getString("service_identity"),
+                            result.getString("owner_mod_id"),
+                            result.getString("display_name"),
+                            result.getString("administrator_identity"),
+                            result.getString("request_id"),
+                            result.getString("reason"),
+                            result.getLong("registered_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(services);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list fiscal services", failure);
         }
     }
 
@@ -214,6 +310,35 @@ public final class CivicDatabase implements AutoCloseable {
             return readFiscalCapabilityGrant(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read fiscal capability grant " + grantId, failure);
+        }
+    }
+
+    public synchronized List<StoredFiscalCapabilityGrant> fiscalCapabilityGrants(
+            String serviceIdentity) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_service_grant
+                WHERE service_identity = ?
+                ORDER BY granted_at_epoch_millis, rowid
+                """)) {
+            query.setString(1, serviceIdentity);
+            List<StoredFiscalCapabilityGrant> grants = new ArrayList<>();
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    grants.add(new StoredFiscalCapabilityGrant(
+                            UUID.fromString(result.getString("grant_id")),
+                            result.getString("administrator_identity"),
+                            result.getString("request_id"),
+                            result.getString("service_identity"),
+                            result.getString("capability"),
+                            result.getString("account_id"),
+                            result.getString("reason"),
+                            result.getLong("granted_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(grants);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list fiscal grants for " + serviceIdentity, failure);
         }
     }
 
@@ -326,6 +451,10 @@ public final class CivicDatabase implements AutoCloseable {
     }
 
     public synchronized boolean isFiscalServiceEnabled(String serviceIdentity) {
+        return "ENABLED".equals(fiscalServiceState(serviceIdentity));
+    }
+
+    public synchronized String fiscalServiceState(String serviceIdentity) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT state FROM fiscal_service_state_change
                 WHERE service_identity = ?
@@ -334,7 +463,7 @@ public final class CivicDatabase implements AutoCloseable {
                 """)) {
             query.setString(1, serviceIdentity);
             try (ResultSet result = query.executeQuery()) {
-                return !result.next() || "ENABLED".equals(result.getString("state"));
+                return result.next() ? result.getString("state") : "ENABLED";
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read fiscal service state " + serviceIdentity, failure);
@@ -2318,6 +2447,33 @@ public final class CivicDatabase implements AutoCloseable {
                         ON fiscal_service_state_change (service_identity, changed_at_epoch_millis)
                         """);
                 statement.execute("PRAGMA user_version = 18");
+            }
+            if (version < 19) {
+                statement.execute("""
+                        CREATE TABLE fiscal_service_registration_audit (
+                            service_identity TEXT PRIMARY KEY
+                                REFERENCES fiscal_service(service_identity),
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            registered_at_epoch_millis INTEGER NOT NULL
+                                CHECK (registered_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_registration_audit (
+                            service_identity, administrator_identity, request_id, reason,
+                            registered_at_epoch_millis
+                        )
+                        SELECT service_identity,
+                               'civiceconomy-legacy',
+                               'legacy-registration:' || service_identity,
+                               'Backfilled from pre-audit fiscal service registration',
+                               registered_at_epoch_millis
+                        FROM fiscal_service
+                        """);
+                statement.execute("PRAGMA user_version = 19");
             }
             connection.commit();
         } catch (SQLException failure) {

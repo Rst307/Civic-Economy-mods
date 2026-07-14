@@ -673,6 +673,180 @@ class FiscalAuthorizationTest {
         }
     }
 
+    @Test
+    void ownerBoundSessionCannotSubmitAnotherServiceIdentity() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity impostor = new ServiceIdentity("impostor-service");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            authorization.register(new RegisterFiscalService(
+                    impostor, "impostormod", "Impostor integration"));
+            for (ServiceIdentity service : new ServiceIdentity[] {publicWorks, impostor}) {
+                authorization.grant(new GrantFiscalCapability(
+                        administrator,
+                        "grant-session-reserve-" + service.value(),
+                        service,
+                        FiscalCapability.RESERVE_FUNDS,
+                        treasury,
+                        "Both identities have database authority"));
+            }
+            FiscalServiceSession publicWorksSession =
+                    authorization.openSession(publicWorks, "publicworksmod");
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    database,
+                    ignored -> MoneyAmount.ofMinorUnits(1_000),
+                    publicWorksSession);
+
+            ledger.reserve(new ReserveFunds(
+                    publicWorks,
+                    "session-authorized-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(100),
+                    "Correct session identity"));
+            assertThrows(
+                    FiscalServiceIdentityMismatchException.class,
+                    () -> ledger.reserve(new ReserveFunds(
+                            impostor,
+                            "session-impersonation-hold",
+                            treasury,
+                            MoneyAmount.ofMinorUnits(100),
+                            "Must fail before authorization")));
+            assertEquals(MoneyAmount.ofMinorUnits(100), ledger.reservedBalance(treasury));
+        }
+    }
+
+    @Test
+    void sessionRejectsOwnerThatDoesNotMatchDurableRegistration() {
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+
+            assertThrows(
+                    FiscalServiceOwnerMismatchException.class,
+                    () -> authorization.openSession(publicWorks, "impostormod"));
+        }
+    }
+
+    @Test
+    void ownerBoundPaymentSessionRejectsAnotherServiceBeforeExternalPayment() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity impostor = new ServiceIdentity("impostor-service");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+        AtomicInteger externalCalls = new AtomicInteger();
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks, "publicworksmod", "Public Works integration"));
+            authorization.register(new RegisterFiscalService(
+                    impostor, "impostormod", "Impostor integration"));
+            for (ServiceIdentity service : new ServiceIdentity[] {publicWorks, impostor}) {
+                for (FiscalCapability capability : new FiscalCapability[] {
+                    FiscalCapability.RESERVE_FUNDS, FiscalCapability.SETTLE_PAYMENT
+                }) {
+                    authorization.grant(new GrantFiscalCapability(
+                            administrator,
+                            "grant-payment-session-" + service.value() + "-" + capability,
+                            service,
+                            capability,
+                            treasury,
+                            "Both identities have database authority"));
+                }
+            }
+            FiscalServiceSession publicWorksSession =
+                    authorization.openSession(publicWorks, "publicworksmod");
+            FiscalLedger ledger = FiscalLedger.authorized(
+                    database,
+                    ignored -> MoneyAmount.ofMinorUnits(1_000),
+                    publicWorksSession);
+            Reservation reservation = ledger.reserve(new ReserveFunds(
+                    publicWorks,
+                    "payment-session-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(100),
+                    "Correct session identity"));
+            PaymentCoordinator coordinator = PaymentCoordinator.authorized(
+                    database,
+                    ignored -> externalCalls.incrementAndGet(),
+                    publicWorksSession);
+
+            assertThrows(
+                    FiscalServiceIdentityMismatchException.class,
+                    () -> coordinator.settle(
+                            new SettleReservation(
+                                    impostor,
+                                    "payment-session-impersonation",
+                                    reservation.reservationId(),
+                                    recipient,
+                                    MoneyAmount.ofMinorUnits(100)),
+                            FailurePoint.NONE));
+            assertEquals(0, externalCalls.get());
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> coordinator.transaction("payment-session-impersonation"));
+        }
+    }
+
+    @Test
+    void authorizationViewShowsOwnerStateAndRevokedExactAccountGrant() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        ServiceIdentity publicWorks = new ServiceIdentity("public-works");
+        ServiceIdentity administrator = new ServiceIdentity("civiceconomy-admin");
+
+        try (CivicDatabase database = database()) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            authorization.register(new RegisterFiscalService(
+                    publicWorks,
+                    "publicworksmod",
+                    "Public Works integration",
+                    administrator,
+                    "register-view-service",
+                    "Trusted OP registration"));
+            FiscalCapabilityGrant grant = authorization.grant(new GrantFiscalCapability(
+                    administrator,
+                    "grant-view-reserve",
+                    publicWorks,
+                    FiscalCapability.RESERVE_FUNDS,
+                    treasury,
+                    "View fixture"));
+            authorization.revoke(new RevokeFiscalCapability(
+                    administrator,
+                    "revoke-view-reserve",
+                    grant.grantId(),
+                    "View revoked fixture"));
+            authorization.changeState(new ChangeFiscalServiceState(
+                    administrator,
+                    "disable-view-service",
+                    publicWorks,
+                    FiscalServiceState.DISABLED,
+                    "View disabled fixture"));
+
+            FiscalServiceAuthorizationView view = authorization.describe(publicWorks);
+
+            assertEquals("publicworksmod", view.service().ownerModId());
+            assertEquals(administrator, view.service().administrator());
+            assertEquals("register-view-service", view.service().requestId());
+            assertEquals("Trusted OP registration", view.service().reason());
+            assertEquals(FiscalServiceState.DISABLED, view.state());
+            assertEquals(1, view.grants().size());
+            assertEquals(grant.grantId(), view.grants().getFirst().grant().grantId());
+            assertEquals(false, view.grants().getFirst().active());
+            assertEquals(
+                    "View revoked fixture",
+                    view.grants().getFirst().revocation().orElseThrow().reason());
+        }
+    }
+
     private CivicDatabase database() {
         return CivicDatabase.open(
                 temporaryDirectory.resolve("authorization.sqlite3"),

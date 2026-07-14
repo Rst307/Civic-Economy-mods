@@ -15,6 +15,7 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAcc
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
 import org.civiceconomy.platform.neoforge.CivicServerRuntime;
 import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
+import org.civiceconomy.platform.neoforge.FiscalAdministrationCommands;
 import org.slf4j.Logger;
 
 @Mod(CivicEconomy.MOD_ID)
@@ -45,6 +46,7 @@ public final class CivicEconomy {
         NeoForge.EVENT_BUS.addListener(runtime::onServerTick);
         NeoForge.EVENT_BUS.addListener(runtime::onServerStopping);
         NeoForge.EVENT_BUS.addListener(runtime::onServerStopped);
+        NeoForge.EVENT_BUS.addListener(FiscalAdministrationCommands::register);
         if (report.productionScoringEnabled()) {
             LOGGER.info("Civic Economy compatibility check passed; Create production scoring is enabled");
         } else if (report.problems().isEmpty()) {

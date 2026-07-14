@@ -19,30 +19,50 @@ public final class FiscalLedger {
     private final AccountBalances accountBalances;
     private final Clock clock;
     private final FiscalAuthorization authorization;
+    private final FiscalServiceSession session;
     private final ConcurrentHashMap<AccountId, Object> accountLocks = new ConcurrentHashMap<>();
 
     FiscalLedger(CivicDatabase database, AccountBalances accountBalances) {
-        this(database, accountBalances, Clock.systemUTC(), null);
+        this(database, accountBalances, Clock.systemUTC(), null, null);
     }
 
     FiscalLedger(CivicDatabase database, AccountBalances accountBalances, Clock clock) {
-        this(database, accountBalances, clock, null);
+        this(database, accountBalances, clock, null, null);
     }
 
     private FiscalLedger(
             CivicDatabase database,
             AccountBalances accountBalances,
             Clock clock,
-            FiscalAuthorization authorization) {
+            FiscalAuthorization authorization,
+            FiscalServiceSession session) {
         this.database = database;
         this.accountBalances = accountBalances;
         this.clock = clock;
         this.authorization = authorization;
+        this.session = session;
     }
 
-    public static FiscalLedger authorized(CivicDatabase database, AccountBalances accountBalances) {
+    static FiscalLedger authorized(CivicDatabase database, AccountBalances accountBalances) {
         return new FiscalLedger(
-                database, accountBalances, Clock.systemUTC(), new FiscalAuthorization(database));
+                database,
+                accountBalances,
+                Clock.systemUTC(),
+                new FiscalAuthorization(database),
+                null);
+    }
+
+    public static FiscalLedger authorized(
+            CivicDatabase database,
+            AccountBalances accountBalances,
+            FiscalServiceSession session) {
+        java.util.Objects.requireNonNull(session, "Fiscal service session cannot be null");
+        return new FiscalLedger(
+                database,
+                accountBalances,
+                Clock.systemUTC(),
+                new FiscalAuthorization(database),
+                session);
     }
 
     public Reservation reserve(ReserveFunds request) {
@@ -124,6 +144,7 @@ public final class FiscalLedger {
     }
 
     public FiscalBill fundBill(FundFiscalBill request) {
+        requireSessionIdentity(request.serviceIdentity());
         StoredFiscalBill bill = database.fiscalBill(request.billId());
         if (bill == null) {
             throw new IllegalArgumentException("Unknown Fiscal Bill " + request.billId());
@@ -201,6 +222,7 @@ public final class FiscalLedger {
     }
 
     public Budget approveBudget(ApproveBudget request) {
+        requireSessionIdentity(request.serviceIdentity());
         StoredBudget budget = database.budget(request.budgetId());
         if (budget == null) {
             throw new IllegalArgumentException("Unknown Budget " + request.budgetId());
@@ -292,6 +314,7 @@ public final class FiscalLedger {
     }
 
     public Escrow escrow(ServiceIdentity serviceIdentity, UUID escrowId) {
+        requireSessionIdentity(serviceIdentity);
         StoredEscrow stored = database.escrow(escrowId);
         if (stored == null) {
             throw new IllegalArgumentException("Unknown Escrow " + escrowId);
@@ -302,6 +325,7 @@ public final class FiscalLedger {
     }
 
     public Escrow expireEscrow(ExpireEscrow request) {
+        requireSessionIdentity(request.serviceIdentity());
         StoredEscrow escrow = database.escrow(request.escrowId());
         if (escrow == null) {
             throw new IllegalArgumentException("Unknown Escrow " + request.escrowId());
@@ -332,6 +356,7 @@ public final class FiscalLedger {
     }
 
     public ReservationRelease release(ReleaseReservation request) {
+        requireSessionIdentity(request.serviceIdentity());
         if (authorization != null) {
             StoredReservation reservation = database.reservationRecord(request.reservationId());
             if (reservation == null) {
@@ -459,7 +484,14 @@ public final class FiscalLedger {
     private void require(
             ServiceIdentity serviceIdentity, FiscalCapability capability, AccountId accountId) {
         if (authorization != null) {
+            requireSessionIdentity(serviceIdentity);
             authorization.require(serviceIdentity, capability, accountId);
+        }
+    }
+
+    private void requireSessionIdentity(ServiceIdentity serviceIdentity) {
+        if (session != null) {
+            session.requireIdentity(serviceIdentity);
         }
     }
 }
