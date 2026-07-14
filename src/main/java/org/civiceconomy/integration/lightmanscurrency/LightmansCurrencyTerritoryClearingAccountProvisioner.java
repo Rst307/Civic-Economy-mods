@@ -3,11 +3,12 @@ package org.civiceconomy.integration.lightmanscurrency;
 import net.minecraft.server.level.ServerLevel;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.territory.TerritoryClearingAccountProvisioner;
+import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 
 public final class LightmansCurrencyTerritoryClearingAccountProvisioner
         implements TerritoryClearingAccountProvisioner {
     public static final AccountId ACCOUNT_ID =
-            new AccountId("system:territory:prepayment-clearing");
+            TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID;
 
     private final LightmansCurrencyFiscalAccounts accounts;
 

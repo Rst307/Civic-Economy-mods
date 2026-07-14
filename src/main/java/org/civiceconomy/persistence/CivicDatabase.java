@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 26;
+    private static final int SCHEMA_VERSION = 27;
 
     private final Connection connection;
 
@@ -1656,6 +1656,32 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredTerritoryClaimPermit> dueTerritoryClaimPermits(
+            long asOfEpochMillis) {
+        List<StoredTerritoryClaimPermit> permits = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT permit.* FROM territory_claim_permit permit
+                WHERE permit.state = 'READY'
+                  AND permit.expires_at_epoch_millis <= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM territory_claim_permit_compensation compensation
+                      WHERE compensation.permit_id = permit.permit_id
+                  )
+                ORDER BY permit.expires_at_epoch_millis, permit.permit_id
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    permits.add(storedTerritoryClaimPermit(result));
+                }
+            }
+            return List.copyOf(permits);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list due Territory Claim Permits", failure);
+        }
+    }
+
     public synchronized StoredTerritoryClaimPermitConsumption territoryClaimPermitConsumption(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -1667,6 +1693,187 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryClaimPermitConsumption(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Claim Permit consumption", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermitCompensation territoryClaimPermitCompensation(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit_compensation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryClaimPermitCompensation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Claim Permit compensation request", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermitCompensation territoryClaimPermitCompensation(
+            UUID permitId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit_compensation WHERE permit_id = ?
+                """)) {
+            query.setString(1, permitId.toString());
+            return readTerritoryClaimPermitCompensation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Claim Permit compensation", failure);
+        }
+    }
+
+    public synchronized List<StoredTerritoryClaimPermitCompensation>
+            incompleteTerritoryClaimPermitCompensations() {
+        List<StoredTerritoryClaimPermitCompensation> compensations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit_compensation
+                WHERE completed_at_epoch_millis IS NULL
+                ORDER BY requested_at_epoch_millis, compensation_id
+                """);
+                ResultSet result = query.executeQuery()) {
+            while (result.next()) {
+                compensations.add(storedTerritoryClaimPermitCompensation(result));
+            }
+            return List.copyOf(compensations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list incomplete Territory Claim Permit compensations", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermitCompensation
+            startTerritoryClaimPermitCompensation(
+                    UUID compensationId,
+                    UUID permitId,
+                    String serviceIdentity,
+                    String requestId,
+                    String actorIdentity,
+                    String kind,
+                    String reason,
+                    String refundRequestId,
+                    long requestedAtEpochMillis) {
+        StoredTerritoryClaimPermitCompensation replay =
+                territoryClaimPermitCompensation(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        StoredTerritoryClaimPermitCompensation existing =
+                territoryClaimPermitCompensation(permitId);
+        if (existing != null) {
+            return existing;
+        }
+        StoredTerritoryClaimPermit permit = territoryClaimPermit(permitId);
+        if (permit == null) {
+            throw new IllegalArgumentException("Unknown Territory Claim Permit " + permitId);
+        }
+        if (!"READY".equals(permit.state())) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit cannot be compensated from state " + permit.state());
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_claim_permit_compensation (
+                    compensation_id, permit_id, service_identity, request_id,
+                    actor_identity, kind, reason, refund_request_id,
+                    requested_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, compensationId.toString());
+            insert.setString(2, permitId.toString());
+            insert.setString(3, serviceIdentity);
+            insert.setString(4, requestId);
+            insert.setString(5, actorIdentity);
+            insert.setString(6, kind);
+            insert.setString(7, reason);
+            insert.setString(8, refundRequestId);
+            insert.setLong(9, requestedAtEpochMillis);
+            insert.executeUpdate();
+            return territoryClaimPermitCompensation(permitId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to start Territory Claim Permit compensation", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermit completeTerritoryClaimPermitCompensation(
+            UUID compensationId, long completedAtEpochMillis) {
+        StoredTerritoryClaimPermitCompensation compensation =
+                territoryClaimPermitCompensationById(compensationId);
+        if (compensation == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Territory Claim Permit compensation " + compensationId);
+        }
+        StoredTerritoryClaimPermit permit = territoryClaimPermit(compensation.permitId());
+        if (compensation.completedAtEpochMillis() != null) {
+            return permit;
+        }
+        if (compensation.refundTransactionId() == null) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit compensation has no refund transaction");
+        }
+        StoredPaymentTransaction refund = paymentTransaction(compensation.refundTransactionId());
+        if (refund == null
+                || !"REFUND".equals(refund.kind())
+                || !"CIVIC_COMMITTED".equals(refund.state())
+                || !refund.parentTransactionId().equals(permit.prepaymentTransactionId())
+                || refund.amountMinorUnits() != permit.prepaymentMinorUnits()) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit compensation refund is not committed exactly");
+        }
+        String finalState = switch (compensation.kind()) {
+            case "CANCEL" -> "CANCELLED";
+            case "EXPIRE" -> "EXPIRED";
+            default -> throw new IllegalStateException(
+                    "Unknown Territory Claim Permit compensation kind " + compensation.kind());
+        };
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement updatePermit = connection.prepareStatement("""
+                        UPDATE territory_claim_permit SET state = ?
+                        WHERE permit_id = ? AND state = 'READY'
+                        """);
+                    PreparedStatement complete = connection.prepareStatement("""
+                        UPDATE territory_claim_permit_compensation
+                        SET completed_at_epoch_millis = ?
+                        WHERE compensation_id = ? AND completed_at_epoch_millis IS NULL
+                        """)) {
+                updatePermit.setString(1, finalState);
+                updatePermit.setString(2, permit.permitId().toString());
+                if (updatePermit.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Territory Claim Permit state changed before compensation completed");
+                }
+                complete.setLong(1, completedAtEpochMillis);
+                complete.setString(2, compensationId.toString());
+                if (complete.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Territory Claim Permit compensation was already completed");
+                }
+                connection.commit();
+                return territoryClaimPermit(permit.permitId());
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to complete Territory Claim Permit compensation", failure);
+        }
+    }
+
+    private StoredTerritoryClaimPermitCompensation territoryClaimPermitCompensationById(
+            UUID compensationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit_compensation WHERE compensation_id = ?
+                """)) {
+            query.setString(1, compensationId.toString());
+            return readTerritoryClaimPermitCompensation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Claim Permit compensation ID", failure);
         }
     }
 
@@ -1692,6 +1899,10 @@ public final class CivicDatabase implements AutoCloseable {
                     PreparedStatement update = connection.prepareStatement("""
                     UPDATE territory_claim_permit SET state = 'CONSUMED'
                     WHERE permit_id = ? AND state = 'READY'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM territory_claim_permit_compensation
+                          WHERE permit_id = ?
+                      )
                     """)) {
                 consume.setString(1, permitId.toString());
                 consume.setString(2, serviceIdentity);
@@ -1705,6 +1916,7 @@ public final class CivicDatabase implements AutoCloseable {
                 consume.setLong(10, consumedAtEpochMillis);
                 consume.executeUpdate();
                 update.setString(1, permitId.toString());
+                update.setString(2, permitId.toString());
                 if (update.executeUpdate() != 1) {
                     throw new IllegalStateException(
                             "Territory Claim Permit was not READY " + permitId);
@@ -2883,6 +3095,101 @@ public final class CivicDatabase implements AutoCloseable {
             return paymentTransaction(serviceIdentity, requestId);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to prepare refund", failure);
+        }
+    }
+
+    public synchronized StoredPaymentTransaction prepareTerritoryClaimPermitRefund(
+            String serviceIdentity,
+            String requestId,
+            UUID permitId,
+            String reason) {
+        StoredPaymentTransaction replay = paymentTransaction(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        StoredTerritoryClaimPermitCompensation compensation =
+                territoryClaimPermitCompensation(permitId);
+        if (compensation == null
+                || !compensation.serviceIdentity().equals(serviceIdentity)
+                || !compensation.refundRequestId().equals(requestId)
+                || !compensation.reason().equals(reason)
+                || compensation.completedAtEpochMillis() != null) {
+            throw new SecurityException(
+                    "Territory Claim Permit refund requires its exact pending compensation");
+        }
+        if (compensation.refundTransactionId() != null) {
+            StoredPaymentTransaction linked = paymentTransaction(compensation.refundTransactionId());
+            if (linked == null) {
+                throw new IllegalStateException(
+                        "Territory Claim Permit compensation references a missing refund");
+            }
+            return linked;
+        }
+        StoredTerritoryClaimPermit permit = territoryClaimPermit(permitId);
+        if (permit == null || !"READY".equals(permit.state())) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit is not awaiting compensation");
+        }
+        StoredPaymentTransaction original = paymentTransaction(permit.prepaymentTransactionId());
+        if (original == null
+                || !"PAYMENT".equals(original.kind())
+                || !"CIVIC_COMMITTED".equals(original.state())
+                || original.amountMinorUnits() != permit.prepaymentMinorUnits()
+                || original.refundedMinorUnits() != 0L) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit prepayment is not exactly refundable");
+        }
+        try {
+            if (hasIncompleteRefund(original.transactionId())) {
+                throw new IllegalStateException(
+                        "Territory Claim Permit prepayment already has an incomplete refund");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Territory Claim Permit refunds", failure);
+        }
+        UUID refundTransactionId = UUID.randomUUID();
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO payment_transaction (
+                            transaction_id, service_identity, request_id, reservation_id,
+                            source_account, recipient_account, amount_minor_units, kind,
+                            parent_transaction_id, reason, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'REFUND', ?, ?, 'PREPARED')
+                        """);
+                    PreparedStatement link = connection.prepareStatement("""
+                        UPDATE territory_claim_permit_compensation
+                        SET refund_transaction_id = ?
+                        WHERE compensation_id = ? AND refund_transaction_id IS NULL
+                        """)) {
+                insert.setString(1, refundTransactionId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, original.reservationId().toString());
+                insert.setString(5, original.recipientAccount());
+                insert.setString(6, original.sourceAccount());
+                insert.setLong(7, original.amountMinorUnits());
+                insert.setString(8, original.transactionId().toString());
+                insert.setString(9, reason);
+                insert.executeUpdate();
+                link.setString(1, refundTransactionId.toString());
+                link.setString(2, compensation.compensationId().toString());
+                if (link.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Territory Claim Permit compensation refund link changed");
+                }
+                connection.commit();
+                return paymentTransaction(refundTransactionId);
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to prepare Territory Claim Permit refund", failure);
         }
     }
 
@@ -4173,6 +4480,36 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 26");
             }
+            if (version < 27) {
+                statement.execute("""
+                        CREATE TABLE territory_claim_permit_compensation (
+                            compensation_id TEXT PRIMARY KEY,
+                            permit_id TEXT NOT NULL UNIQUE
+                                REFERENCES territory_claim_permit(permit_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            kind TEXT NOT NULL CHECK (kind IN ('CANCEL', 'EXPIRE')),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            refund_request_id TEXT NOT NULL UNIQUE,
+                            refund_transaction_id TEXT UNIQUE
+                                REFERENCES payment_transaction(transaction_id),
+                            requested_at_epoch_millis INTEGER NOT NULL
+                                CHECK (requested_at_epoch_millis >= 0),
+                            completed_at_epoch_millis INTEGER
+                                CHECK (completed_at_epoch_millis IS NULL
+                                    OR completed_at_epoch_millis >= requested_at_epoch_millis),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX territory_claim_permit_compensation_incomplete
+                        ON territory_claim_permit_compensation (requested_at_epoch_millis)
+                        WHERE completed_at_epoch_millis IS NULL
+                        """);
+                statement.execute("PRAGMA user_version = 27");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -4260,27 +4597,29 @@ public final class CivicDatabase implements AutoCloseable {
     private StoredTerritoryClaimPermit readTerritoryClaimPermit(PreparedStatement query)
             throws SQLException {
         try (ResultSet result = query.executeQuery()) {
-            if (!result.next()) {
-                return null;
-            }
-            return new StoredTerritoryClaimPermit(
-                    UUID.fromString(result.getString("permit_id")),
-                    result.getString("service_identity"),
-                    result.getString("request_id"),
-                    UUID.fromString(result.getString("nation_id")),
-                    UUID.fromString(result.getString("ftb_team_id")),
-                    UUID.fromString(result.getString("actor_player_id")),
-                    result.getString("dimension_id"),
-                    result.getInt("chunk_x"),
-                    result.getInt("chunk_z"),
-                    result.getInt("quoted_current_claimed_chunks"),
-                    result.getInt("quoted_free_allocation"),
-                    result.getLong("prepayment_minor_units"),
-                    UUID.fromString(result.getString("prepayment_transaction_id")),
-                    result.getString("state"),
-                    result.getLong("issued_at_epoch_millis"),
-                    result.getLong("expires_at_epoch_millis"));
+            return result.next() ? storedTerritoryClaimPermit(result) : null;
         }
+    }
+
+    private static StoredTerritoryClaimPermit storedTerritoryClaimPermit(ResultSet result)
+            throws SQLException {
+        return new StoredTerritoryClaimPermit(
+                UUID.fromString(result.getString("permit_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("nation_id")),
+                UUID.fromString(result.getString("ftb_team_id")),
+                UUID.fromString(result.getString("actor_player_id")),
+                result.getString("dimension_id"),
+                result.getInt("chunk_x"),
+                result.getInt("chunk_z"),
+                result.getInt("quoted_current_claimed_chunks"),
+                result.getInt("quoted_free_allocation"),
+                result.getLong("prepayment_minor_units"),
+                UUID.fromString(result.getString("prepayment_transaction_id")),
+                result.getString("state"),
+                result.getLong("issued_at_epoch_millis"),
+                result.getLong("expires_at_epoch_millis"));
     }
 
     private StoredTerritoryClaimPermitConsumption readTerritoryClaimPermitConsumption(
@@ -4301,6 +4640,32 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getInt("chunk_z"),
                     result.getLong("consumed_at_epoch_millis"));
         }
+    }
+
+    private StoredTerritoryClaimPermitCompensation readTerritoryClaimPermitCompensation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedTerritoryClaimPermitCompensation(result) : null;
+        }
+    }
+
+    private static StoredTerritoryClaimPermitCompensation
+            storedTerritoryClaimPermitCompensation(ResultSet result) throws SQLException {
+        String refundTransactionId = result.getString("refund_transaction_id");
+        long completedAt = result.getLong("completed_at_epoch_millis");
+        boolean completedAtWasNull = result.wasNull();
+        return new StoredTerritoryClaimPermitCompensation(
+                UUID.fromString(result.getString("compensation_id")),
+                UUID.fromString(result.getString("permit_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                result.getString("actor_identity"),
+                result.getString("kind"),
+                result.getString("reason"),
+                result.getString("refund_request_id"),
+                refundTransactionId == null ? null : UUID.fromString(refundTransactionId),
+                result.getLong("requested_at_epoch_millis"),
+                completedAtWasNull ? null : completedAt);
     }
 
     private static StoredNationFiscalPermissionGrant storedNationFiscalPermissionGrant(

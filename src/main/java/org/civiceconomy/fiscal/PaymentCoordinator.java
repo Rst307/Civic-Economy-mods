@@ -124,6 +124,42 @@ public final class PaymentCoordinator {
         return applyAndCommit(transaction, failurePoint);
     }
 
+    public PaymentTransaction refundTerritoryClaimPermit(
+            RefundTerritoryClaimPermitPayment request, FailurePoint failurePoint) {
+        requireSessionIdentity(request.serviceIdentity());
+        var permit = database.territoryClaimPermit(request.permitId());
+        if (permit == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Territory Claim Permit " + request.permitId());
+        }
+        StoredPaymentTransaction original =
+                database.paymentTransaction(permit.prepaymentTransactionId());
+        if (original == null) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit has no prepayment transaction");
+        }
+        require(
+                request.serviceIdentity(),
+                FiscalCapability.REFUND_PAYMENT,
+                new AccountId(original.recipientAccount()));
+        StoredPaymentTransaction stored = database.prepareTerritoryClaimPermitRefund(
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.permitId(),
+                request.reason());
+        PaymentTransaction transaction = toTransaction(stored);
+        if (transaction.kind() != PaymentKind.REFUND
+                || !transaction.parentTransactionId()
+                        .equals(Optional.of(original.transactionId()))
+                || !transaction.amount()
+                        .equals(MoneyAmount.ofMinorUnits(permit.prepaymentMinorUnits()))
+                || !transaction.reason().equals(Optional.of(request.reason()))) {
+            throw new IdempotencyConflictException(
+                    request.serviceIdentity(), request.requestId());
+        }
+        return applyAndCommit(transaction, failurePoint);
+    }
+
     public PaymentTransaction compensate(CompensatePayment request, FailurePoint failurePoint) {
         requireSessionIdentity(request.serviceIdentity());
         StoredPaymentTransaction original = database.paymentTransaction(request.transactionId());

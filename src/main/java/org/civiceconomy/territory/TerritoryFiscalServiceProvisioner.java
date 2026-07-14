@@ -12,6 +12,8 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 public final class TerritoryFiscalServiceProvisioner {
     public static final ServiceIdentity SERVICE_IDENTITY =
             new ServiceIdentity("civiceconomy-territory");
+    public static final AccountId CLEARING_ACCOUNT_ID =
+            new AccountId("system:territory:prepayment-clearing");
     private static final ServiceIdentity INTERNAL_ADMINISTRATOR =
             new ServiceIdentity("civiceconomy-internal");
     private static final EnumSet<FiscalCapability> REQUIRED_CAPABILITIES = EnumSet.of(
@@ -47,6 +49,13 @@ public final class TerritoryFiscalServiceProvisioner {
                     treasuryAccountId,
                     "Exact National Treasury scope for Territory Claim prepayment"));
         }
+        authorization.grant(new GrantFiscalCapability(
+                INTERNAL_ADMINISTRATOR,
+                "territory-service-grant-v1:REFUND_PAYMENT:" + CLEARING_ACCOUNT_ID.value(),
+                SERVICE_IDENTITY,
+                FiscalCapability.REFUND_PAYMENT,
+                CLEARING_ACCOUNT_ID,
+                "Exact Territory prepayment clearing scope for Permit compensation"));
     }
 
     private static void requireNationalTreasury(AccountId accountId) {

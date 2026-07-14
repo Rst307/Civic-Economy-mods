@@ -26,6 +26,8 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.FiscalAuthorization;
+import org.civiceconomy.fiscal.PaymentCoordinator;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
@@ -38,6 +40,10 @@ import org.civiceconomy.nation.NationTeamDirectory;
 import org.civiceconomy.nation.RegisteredNation;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
+import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
+import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
+import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
+import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 import org.slf4j.Logger;
 
 public final class CivicServerRuntime {
@@ -45,6 +51,7 @@ public final class CivicServerRuntime {
     private static final int CHECKPOINT_INTERVAL_TICKS = 20 * 60;
     private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
+    private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
@@ -110,6 +117,7 @@ public final class CivicServerRuntime {
         state = new RuntimeState(server, sessions, writer);
         scheduleNationApplicationExpiry(state);
         scheduleCitizenshipReconciliation(state);
+        scheduleTerritoryPermitCompensation(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
             LOGGER.warn(
@@ -165,6 +173,12 @@ public final class CivicServerRuntime {
                 >= CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS) {
             current.ticksSinceCitizenshipReconciliation = 0;
             scheduleCitizenshipReconciliation(current);
+        }
+        current.ticksSinceTerritoryPermitCompensation++;
+        if (current.ticksSinceTerritoryPermitCompensation
+                >= TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS) {
+            current.ticksSinceTerritoryPermitCompensation = 0;
+            scheduleTerritoryPermitCompensation(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -333,6 +347,55 @@ public final class CivicServerRuntime {
         }
     }
 
+    private void scheduleTerritoryPermitCompensation(RuntimeState current) {
+        if (!current.territoryPermitCompensationQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> {
+                    boolean hasWork = !database.incompleteTerritoryClaimPermitCompensations()
+                                    .isEmpty()
+                            || !database.dueTerritoryClaimPermits(scanClock.millis()).isEmpty();
+                    if (!hasWork) {
+                        return new TerritoryPermitCompensationResult(0, 0);
+                    }
+                    var session = new FiscalAuthorization(database)
+                            .openSession(TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    TerritoryClaimPermitRegistry permits = new TerritoryClaimPermitRegistry(
+                            database,
+                            new CommittedTerritoryPrepaymentVerifier(
+                                    database,
+                                    TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID),
+                            scanClock);
+                    TerritoryClaimPermitCompensationCoordinator coordinator =
+                            new TerritoryClaimPermitCompensationCoordinator(
+                                    database,
+                                    PaymentCoordinator.authorized(
+                                            database,
+                                            LightmansCurrencyPayments.live(current.server.overworld()),
+                                            session),
+                                    permits,
+                                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    scanClock);
+                    int recovered = coordinator.recoverIncomplete().size();
+                    int expired = coordinator.expireDue().size();
+                    return new TerritoryPermitCompensationResult(recovered, expired);
+                })
+                .whenComplete((result, failure) -> {
+                    current.territoryPermitCompensationQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Automatic Territory Claim Permit compensation failed closed",
+                                failure);
+                    } else if (result.recovered() > 0 || result.expired() > 0) {
+                        LOGGER.info(
+                                "Recovered {} and expired {} Territory Claim Permit compensation(s)",
+                                result.recovered(),
+                                result.expired());
+                    }
+                });
+    }
+
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
         return mods.version(modId)
                 .orElseThrow(() -> new IllegalStateException("Loaded mod version is unavailable: " + modId));
@@ -344,9 +407,11 @@ public final class CivicServerRuntime {
         private final AsyncOnlineTimeWriter writer;
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
+        private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
+        private int ticksSinceTerritoryPermitCompensation;
         private boolean failureLogged;
 
         private RuntimeState(
@@ -356,4 +421,6 @@ public final class CivicServerRuntime {
             this.writer = writer;
         }
     }
+
+    private record TerritoryPermitCompensationResult(int recovered, int expired) {}
 }

@@ -88,9 +88,11 @@ import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
+import org.civiceconomy.territory.CancelTerritoryClaimPermit;
 import org.civiceconomy.territory.PrepareTerritoryClaimPrepayment;
 import org.civiceconomy.territory.TerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
+import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
 import org.civiceconomy.territory.TerritoryClaimPermitState;
 import org.civiceconomy.territory.TerritoryClaimPrepaymentCoordinator;
 import org.civiceconomy.territory.TerritoryExpansionQuote;
@@ -198,6 +200,8 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     database,
                     new CommittedTerritoryPrepaymentVerifier(database, clearing),
                     clock);
+            PaymentCoordinator paymentCoordinator =
+                    PaymentCoordinator.authorized(database, lcPayments, session);
             TerritoryClaimPrepaymentCoordinator coordinator =
                     new TerritoryClaimPrepaymentCoordinator(
                             new NationRegistry(database, noTeams),
@@ -207,7 +211,7 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                                     database,
                                     LightmansCurrencyAccountBalances.live(helper.getLevel()),
                                     session),
-                            PaymentCoordinator.authorized(database, lcPayments, session),
+                            paymentCoordinator,
                             permits,
                             territoryService,
                             clearing,
@@ -245,6 +249,31 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     250L,
                     accounts.balance(clearing).minorUnits(),
                     "real LC Territory clearing after prepayment");
+
+            TerritoryClaimPermit cancelled =
+                    new TerritoryClaimPermitCompensationCoordinator(
+                                    database,
+                                    paymentCoordinator,
+                                    permits,
+                                    territoryService,
+                                    clock)
+                            .cancel(new CancelTerritoryClaimPermit(
+                                    "real-lc-territory-cancellation",
+                                    permit.permitId(),
+                                    actorId,
+                                    "Real LC Territory cancellation GameTest"));
+            helper.assertValueEqual(
+                    TerritoryClaimPermitState.CANCELLED,
+                    cancelled.state(),
+                    "real LC cancelled Territory Claim Permit state");
+            helper.assertValueEqual(
+                    1_000L,
+                    accounts.balance(treasury).minorUnits(),
+                    "real LC National Treasury after Permit cancellation");
+            helper.assertValueEqual(
+                    0L,
+                    accounts.balance(clearing).minorUnits(),
+                    "real LC Territory clearing after Permit cancellation");
         } finally {
             clearFiscalAccount(bankData, accounts, lcPayments, treasury);
             clearFiscalAccount(bankData, accounts, lcPayments, clearing);
