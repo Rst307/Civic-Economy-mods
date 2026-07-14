@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.IdempotencyConflictException;
 import org.civiceconomy.fiscal.MoneyAmount;
+import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTerritoryClaimPermit;
 import org.civiceconomy.persistence.StoredTerritoryClaimPermitConsumption;
@@ -66,6 +67,17 @@ public final class TerritoryClaimPermitRegistry {
             throw new IllegalArgumentException("Territory Claim Permit ID cannot be null");
         }
         return Optional.ofNullable(database.territoryClaimPermit(permitId))
+                .map(TerritoryClaimPermitRegistry::toPermit);
+    }
+
+    public Optional<TerritoryClaimPermit> findByRequest(
+            ServiceIdentity serviceIdentity, String requestId) {
+        if (serviceIdentity == null || requestId == null || requestId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Territory Claim Permit request lookup cannot be null or blank");
+        }
+        return Optional.ofNullable(database.territoryClaimPermit(
+                        serviceIdentity.value(), requestId))
                 .map(TerritoryClaimPermitRegistry::toPermit);
     }
 

@@ -141,6 +141,26 @@ public final class NationFiscalAuthorityRegistry {
                 .orElseGet(Set::of);
     }
 
+    public void require(
+            NationId nationId, UUID playerId, NationFiscalPermission permission) {
+        if (nationId == null || playerId == null || permission == null) {
+            throw new IllegalArgumentException("Nation Fiscal Authority requirement cannot be null");
+        }
+        NationFacts facts = nations.findForCitizen(playerId)
+                .orElseThrow(() -> new SecurityException(
+                        "Fiscal actor has no effective Citizenship"));
+        if (!facts.nationId().equals(nationId)) {
+            throw new SecurityException(
+                    "Fiscal actor does not belong to the exact Nation");
+        }
+        boolean granted = activeGrants(nationId, playerId).stream()
+                .anyMatch(grant -> grant.permission() == permission);
+        if (!granted) {
+            throw new SecurityException(
+                    "Fiscal actor lacks " + permission + " for the exact Nation");
+        }
+    }
+
     private static void requirePayload(
             StoredNationFiscalPermissionGrant stored, GrantNationFiscalPermission request) {
         if (!stored.nationId().equals(request.nationId().value())

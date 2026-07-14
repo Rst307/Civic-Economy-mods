@@ -142,10 +142,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised the SQLite schema to v25 with append-only Territory Expansion pricing versions and added OP/console-only `/civic economy admin territory pricing show|schedule`. Pricing changes are audited, request-idempotent, future-effective, and conservatively default to zero until configured.
 - Added ADR 0007 and schema v26 Territory Claim Permits to bridge off-thread fiscal prepayment with synchronous FTB claim decisions. A READY Permit is single-use and bound to one Nation, FTB Team, actor, dimension, and chunk; issue and consume requests are idempotent and persist immutable consumption provenance.
 - Added exact committed-prepayment verification. A charged Permit requires one committed, unrefunded payment from the exact National Treasury to the configured territory clearing account for the exact quoted amount; one payment can back only one Permit, and the normal refund path rejects Permit-linked payments.
+- Added the authorized Territory Claim prepayment coordinator and canonical real-LC clearing account. The internal `civiceconomy`-owned service receives only exact National Treasury reserve/settle/compensation grants; the actor must hold live `MANAGE_TERRITORY_FINANCE` authority for the exact Nation and Team binding before any account or payment side effect. Stable sub-request IDs recover an ambiguous external LC application without paying twice, and a Permit becomes READY only after `CIVIC_COMMITTED`.
 
 ## In progress
 
-- Add the authorized fiscal coordinator that creates the clearing payment, plus permit expiry/cancellation compensation and the in-memory READY mirror consumed by FTB Chunks events.
+- Add Permit expiry/cancellation compensation and the in-memory READY mirror consumed by FTB Chunks events, then expose the server-authoritative player preparation flow.
 
 ## Not yet completed
 
@@ -203,7 +204,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the pure Territory Expansion pricing slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 130 tests with zero failures. This is domain/build evidence only; no FTB claim or LC transfer occurs yet.
 - After persistent Territory Expansion pricing/schema-v25 and its OP command, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 131 tests with zero failures.
 - After Territory Claim Permit/schema-v26, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 135 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,775,816 bytes, SHA-256 `2DDE4C34288A177B5D731A8B4D94D0D0C2465B771FEE974FE494A57F3139EE10`. It remains a development artifact until all v1 completion gates pass.
+- After the authorized Territory Claim prepayment coordinator and real LC clearing account, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 138 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,791,896 bytes, SHA-256 `CFE0E38BB03227FADCC7D77708ECAE1E54CF9B37D0D5EF794D5A37700CA881D8`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -254,6 +256,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After adding the Nation-facing allowance command, the same 21/21 GameTest suite passed; its exact dispatcher assertion now includes `nation territory allowance` while the policy schedule test continues to exercise real SQLite persistence.
 - After persistent Territory Expansion pricing/schema-v25, the same 21/21 GameTest suite passed. The OP/console policy test now schedules and verifies both free-allocation and convex-pricing versions in the real world-bound SQLite database.
 - After Territory Claim Permit/schema-v26, the existing 21/21 real-runtime GameTest suite passed and migrated its world-bound database. Permit behavior itself is currently covered by real SQLite tests with a fiscal-verifier seam, not by an FTB claim event.
+- After the authorized prepayment slice, all 23 required GameTests passed. The two added tests provision the canonical clearing account through Civic's real LC fiscal-account type and execute the owner-bound internal service, exact Nation fiscal authority, real SQLite Reservation/payment/Permit flow, real `BankWithdrawFromServer`/`BankDepositFromServer`, and the applied LC transaction-id Mixin. They observed the National Treasury move from `1000` to `750`, clearing move from `0` to `250`, and only then a READY Permit. This is real LC/SQLite runtime evidence, but still not an FTB `BEFORE_CLAIM` event.
 - `CitizenshipReconciliationTest` uses real temporary SQLite databases to verify immediate Provider suspension, restoration of the same Citizenship, deadline-effective Citizenship leave, no automatic Citizenship for new FTB members, and restart recovery after the Citizenship leave committed but before the Correction Grace resolved.
 - `EffectiveCitizenCalculatorTest` verifies online time during Correction Grace is excluded immediately while eligible time before the grace remains attributed.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
@@ -324,6 +327,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After Territory Free Allocation policy/schema-v24, the no-Create server migrated/opened the world-bound SQLite database, disabled Create production scoring, and reached `Done (11.329s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (10.329s)!`; both task-owned process trees were stopped after startup confirmation.
 - After Territory Expansion pricing/schema-v25, the no-Create server migrated/opened the world-bound database, disabled Create production scoring, and reached `Done (4.082s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (3.735s)!`; both task-owned process trees were stopped after startup confirmation.
 - After Territory Claim Permit/schema-v26, the no-Create server migrated/opened the world-bound database, disabled Create production scoring, and reached `Done (3.624s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (3.373s)!`; both task-owned process trees were stopped after startup confirmation.
+- After the authorized prepayment coordinator, the no-Create server loaded the real LC/FTB stack, disabled Create production scoring, and reached `Done (4.837s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (4.772s)!`; both task-owned process trees were stopped after startup confirmation.
 
 ### Environment note
 
@@ -360,7 +364,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Grants support immutable revocation and services support disable/re-enable; grants still have no automatic expiry. Production sessions now verify `ownerModId` against the actual calling NeoForge Mod container. The resolver relies on exact loaded scan data and direct caller stack provenance; unknown, generated-only, or multiply-owned caller classes fail closed.
 - Nation Fiscal Permissions are persistently grantable/revocable and immediately fail closed when formal Provider authority is unavailable. The current governance command intentionally reserves grant/revoke to the live Nation head; delegated `MANAGE_FISCAL_ROLES`, configurable role bundles, approval-policy thresholds, and human-facing fiscal operations still need wiring.
 - Territory Free Allocation and Territory Expansion pricing versions are persistent and delayed, but both conservative fallbacks are zero until an OP schedules versions. Nation-facing allowance display is wired; FTB claim-event charging is not, so the policies currently move no funds and grant no claim bypass.
-- Territory Claim Permits persist and consume exactly once, but no gameplay coordinator yet creates the real LC clearing payment or publishes READY permits into a server-thread mirror. Permit expiry/cancellation compensation and free-claim authorization are also not yet implemented. The committed-prepayment verifier test uses real SQLite transaction states but does not claim real LC movement.
+- The authorized coordinator now creates and verifies a real LC clearing payment in GameTest, but no player command/UI or FTB claim event invokes it yet. READY Permits are not published into a server-thread mirror, and expiry/cancellation compensation plus free-claim authorization are not yet implemented. The earlier committed-prepayment verifier unit test still uses manually advanced SQLite states; only the new GameTest is real LC movement evidence.
 - Current ledger entry kinds cover only committed `PAYMENT` and `REFUND` transfers. Issuance, destruction, withdrawal, public-fund allocation, and administrator/debug adjustments require explicit future entry kinds rather than being forced into payment semantics.
 - Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
@@ -368,4 +372,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Create the authorized fiscal coordinator and clearing account for Territory Claim prepayment, then add expiry/cancellation compensation and an in-memory READY Permit mirror for FTB Chunks `BEFORE_CLAIM` without blocking the server thread.
+Add a durable Permit expiry/cancellation compensation state machine, then publish READY Permits into an in-memory mirror for synchronous FTB Chunks `BEFORE_CLAIM` authorization without blocking the server thread.

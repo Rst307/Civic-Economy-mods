@@ -65,25 +65,194 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBa
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyNationalTreasuryProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyTerritoryClearingAccountProvisioner;
 import org.civiceconomy.nation.ActivateNationApplication;
 import org.civiceconomy.nation.ActivatedNation;
 import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CreateNationApplication;
+import org.civiceconomy.nation.GrantNationFiscalPermission;
 import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationApplication;
 import org.civiceconomy.nation.NationApplicationRegistry;
 import org.civiceconomy.nation.NationFoundingPolicy;
+import org.civiceconomy.nation.NationFacts;
+import org.civiceconomy.nation.NationFiscalAuthorityRegistry;
+import org.civiceconomy.nation.NationFiscalPermission;
+import org.civiceconomy.nation.NationId;
+import org.civiceconomy.nation.NationProvider;
+import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
+import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
+import org.civiceconomy.territory.PrepareTerritoryClaimPrepayment;
+import org.civiceconomy.territory.TerritoryClaimPermit;
+import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
+import org.civiceconomy.territory.TerritoryClaimPermitState;
+import org.civiceconomy.territory.TerritoryClaimPrepaymentCoordinator;
+import org.civiceconomy.territory.TerritoryExpansionQuote;
+import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
 public final class LightmansCurrencyFiscalAccountsGameTests {
     private LightmansCurrencyFiscalAccountsGameTests() {}
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void territoryPrepaymentClearingUsesRealLcFiscalAccount(GameTestHelper helper) {
+        AccountId clearing = new AccountId("system:territory:prepayment-clearing");
+        LightmansCurrencyFiscalAccounts accounts =
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        LightmansCurrencyTerritoryClearingAccountProvisioner provisioner =
+                new LightmansCurrencyTerritoryClearingAccountProvisioner(accounts);
+
+        provisioner.ensureExists(clearing);
+        provisioner.ensureExists(clearing);
+
+        helper.assertValueEqual(
+                0L,
+                accounts.balance(clearing).minorUnits(),
+                "new real LC Territory prepayment clearing balance");
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void authorizedTerritoryPrepaymentMovesRealLcBeforeReadyPermit(
+            GameTestHelper helper) {
+        Instant now = Instant.parse("2026-07-14T13:30:00Z");
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+        NationId nationId = NationId.create();
+        UUID teamId = UUID.randomUUID();
+        UUID actorId = UUID.randomUUID();
+        NationFacts facts = new NationFacts(nationId, actorId, Set.of(actorId));
+        NationProvider provider = new NationProvider() {
+            @Override
+            public Optional<NationFacts> find(NationId requestedNationId) {
+                return nationId.equals(requestedNationId) ? Optional.of(facts) : Optional.empty();
+            }
+
+            @Override
+            public Optional<NationFacts> findForCitizen(UUID playerId) {
+                return actorId.equals(playerId) ? Optional.of(facts) : Optional.empty();
+            }
+        };
+        NationTeamDirectory noTeams = new NationTeamDirectory() {
+            @Override
+            public Optional<NationTeam> find(UUID requestedTeamId) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<NationTeam> findEffectiveTeamForPlayer(UUID playerId) {
+                return Optional.empty();
+            }
+        };
+        AccountId treasury = new AccountId("nation:" + nationId.value() + ":treasury");
+        AccountId clearing = LightmansCurrencyTerritoryClearingAccountProvisioner.ACCOUNT_ID;
+        UUID fundingPlayerId = UUID.randomUUID();
+        AccountId fundingAccount = new AccountId("player:" + fundingPlayerId);
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        LightmansCurrencyFiscalAccounts accounts =
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        LightmansCurrencyPayments lcPayments = LightmansCurrencyPayments.live(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, "Territory GameTest Treasury");
+        LightmansCurrencyTerritoryClearingAccountProvisioner clearingProvisioner =
+                new LightmansCurrencyTerritoryClearingAccountProvisioner(accounts);
+        clearingProvisioner.ensureExists(clearing);
+        clearFiscalAccount(bankData, accounts, lcPayments, treasury);
+        clearFiscalAccount(bankData, accounts, lcPayments, clearing);
+        reset(bankData, fundingPlayerId, 1_000L);
+        lcPayments.apply(new ExternalPayment(
+                UUID.randomUUID(), fundingAccount, treasury, MoneyAmount.ofMinorUnits(1_000L)));
+
+        Path temporaryDirectory = createTemporaryDirectory();
+        try (CivicDatabase database = CivicDatabase.open(
+                temporaryDirectory.resolve("territory-real-lc.sqlite3"),
+                new DatabaseIdentity(
+                        UUID.randomUUID(),
+                        "0.1.0-probe",
+                        "1.21-2.3.0.5",
+                        "2101.1.10",
+                        "2101.1.20"))) {
+            database.registerNation(
+                    nationId.value(), "territory-gametest", "register", teamId, now.toEpochMilli());
+            NationFiscalAuthorityRegistry nationAuthorities =
+                    new NationFiscalAuthorityRegistry(database, provider, clock);
+            nationAuthorities.grant(new GrantNationFiscalPermission(
+                    new ServiceIdentity("territory-gametest-governance"),
+                    "grant-territory-finance",
+                    nationId,
+                    actorId,
+                    actorId,
+                    NationFiscalPermission.MANAGE_TERRITORY_FINANCE,
+                    "Real LC Territory prepayment GameTest"));
+            ServiceIdentity territoryService =
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY;
+            new TerritoryFiscalServiceProvisioner(new FiscalAuthorization(database))
+                    .ensureAuthorized(treasury);
+            FiscalServiceSession session = session(database, territoryService);
+            TerritoryClaimPermitRegistry permits = new TerritoryClaimPermitRegistry(
+                    database,
+                    new CommittedTerritoryPrepaymentVerifier(database, clearing),
+                    clock);
+            TerritoryClaimPrepaymentCoordinator coordinator =
+                    new TerritoryClaimPrepaymentCoordinator(
+                            new NationRegistry(database, noTeams),
+                            nationAuthorities,
+                            clearingProvisioner,
+                            FiscalLedger.authorized(
+                                    database,
+                                    LightmansCurrencyAccountBalances.live(helper.getLevel()),
+                                    session),
+                            PaymentCoordinator.authorized(database, lcPayments, session),
+                            permits,
+                            territoryService,
+                            clearing,
+                            clock);
+
+            TerritoryClaimPermit permit = coordinator.prepare(
+                    new PrepareTerritoryClaimPrepayment(
+                            "real-lc-territory-prepayment",
+                            nationId,
+                            teamId,
+                            actorId,
+                            "minecraft:overworld",
+                            8,
+                            12,
+                            17,
+                            new TerritoryExpansionQuote(
+                                    nationId,
+                                    17,
+                                    1,
+                                    0,
+                                    1,
+                                    MoneyAmount.ofMinorUnits(250L),
+                                    now),
+                            now.plusSeconds(120L)));
+
+            helper.assertValueEqual(
+                    TerritoryClaimPermitState.READY,
+                    permit.state(),
+                    "real LC Territory Claim Permit state");
+            helper.assertValueEqual(
+                    750L,
+                    accounts.balance(treasury).minorUnits(),
+                    "real LC National Treasury after prepayment");
+            helper.assertValueEqual(
+                    250L,
+                    accounts.balance(clearing).minorUnits(),
+                    "real LC Territory clearing after prepayment");
+        } finally {
+            clearFiscalAccount(bankData, accounts, lcPayments, treasury);
+            clearFiscalAccount(bankData, accounts, lcPayments, clearing);
+            bankData.deleteAccount(fundingPlayerId);
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        helper.succeed();
+    }
 
     @GameTest(template = "empty", timeoutTicks = 100)
     public static void civicFiscalAccountsDenyAllNativePlayerAccess(GameTestHelper helper) {
