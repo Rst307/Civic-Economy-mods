@@ -34,8 +34,11 @@ import org.civiceconomy.fiscal.FailurePoint;
 import org.civiceconomy.fiscal.FiscalBill;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.FiscalBillState;
+import org.civiceconomy.fiscal.FiscalAuthorization;
+import org.civiceconomy.fiscal.FiscalCapability;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.FundFiscalBill;
+import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.IssueFiscalBill;
 import org.civiceconomy.fiscal.LedgerDirection;
 import org.civiceconomy.fiscal.MoneyAmount;
@@ -45,6 +48,7 @@ import org.civiceconomy.fiscal.PaymentTransaction;
 import org.civiceconomy.fiscal.RefundPayment;
 import org.civiceconomy.fiscal.RecoveryAction;
 import org.civiceconomy.fiscal.ReleaseReservation;
+import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.Reservation;
 import org.civiceconomy.fiscal.ReserveFunds;
 import org.civiceconomy.fiscal.ServiceIdentity;
@@ -144,9 +148,19 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 temporaryDirectory.resolve("civic.sqlite3"),
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
-            FiscalLedger ledger = new FiscalLedger(database, accounts);
+            ServiceIdentity fiscalService = new ServiceIdentity("civiceconomy-gametest");
+            ServiceIdentity approver = new ServiceIdentity("civiceconomy-gametest-approver");
+            grant(
+                    database,
+                    fiscalService,
+                    treasury,
+                    FiscalCapability.MANAGE_BUDGET,
+                    FiscalCapability.SETTLE_PAYMENT,
+                    FiscalCapability.READ_ACCOUNT);
+            grant(database, approver, treasury, FiscalCapability.MANAGE_BUDGET);
+            FiscalLedger ledger = FiscalLedger.authorized(database, accounts);
             CreateBudget budgetRequest = new CreateBudget(
-                    new ServiceIdentity("civiceconomy-gametest"),
+                    fiscalService,
                     "treasury-budget-" + UUID.randomUUID(),
                     treasury,
                     MoneyAmount.ofMinorUnits(300),
@@ -155,16 +169,16 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     Instant.now().plusSeconds(3_600));
             Budget draft = ledger.createBudget(budgetRequest);
             Budget approved = ledger.approveBudget(new ApproveBudget(
-                    new ServiceIdentity("civiceconomy-gametest-approver"),
+                    approver,
                     "approve-treasury-budget-" + UUID.randomUUID(),
                     draft.budgetId()));
-            Escrow escrow = ledger.escrow(approved.escrowId().orElseThrow());
+            Escrow escrow = ledger.escrow(fiscalService, approved.escrowId().orElseThrow());
             String paymentRequestId = "treasury-payment-" + UUID.randomUUID();
-            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+            PaymentCoordinator coordinator = PaymentCoordinator.authorized(database, payments);
             try {
                 coordinator.settle(
                         new SettleReservation(
-                                new ServiceIdentity("civiceconomy-gametest"),
+                                fiscalService,
                                 paymentRequestId,
                                 escrow.reservationId(),
                                 recipientAccount,
@@ -182,13 +196,15 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
             helper.assertValueEqual(325L, mainChainBalance(recipientPlayer), "recipient LC player-bank balance");
             helper.assertValueEqual(
                     TransactionState.CIVIC_COMMITTED,
-                    coordinator.transaction(paymentRequestId).state(),
+                    coordinator.transaction(fiscalService, paymentRequestId).state(),
                     "recovered Civic payment state");
             helper.assertValueEqual(
-                    MoneyAmount.ZERO, ledger.reservedBalance(treasury), "remaining National Treasury Reservation");
+                    MoneyAmount.ZERO,
+                    ledger.reservedBalance(fiscalService, treasury),
+                    "remaining National Treasury Reservation");
             helper.assertValueEqual(
                     EscrowState.SETTLED,
-                    ledger.escrow(escrow.escrowId()).state(),
+                    ledger.escrow(fiscalService, escrow.escrowId()).state(),
                     "settled National Treasury Escrow state");
             helper.assertValueEqual(
                     BudgetState.SPENT,
@@ -227,24 +243,33 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 temporaryDirectory.resolve("civic.sqlite3"),
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
-            FiscalLedger ledger = new FiscalLedger(database, accounts);
+            ServiceIdentity fiscalService = new ServiceIdentity("civiceconomy-gametest");
+            grant(
+                    database,
+                    fiscalService,
+                    treasury,
+                    FiscalCapability.RESERVE_FUNDS,
+                    FiscalCapability.SETTLE_PAYMENT,
+                    FiscalCapability.READ_ACCOUNT);
+            grant(database, fiscalService, recipientAccount, FiscalCapability.REFUND_PAYMENT);
+            FiscalLedger ledger = FiscalLedger.authorized(database, accounts);
             Reservation reservation = ledger.reserve(new ReserveFunds(
-                    new ServiceIdentity("civiceconomy-gametest"),
+                    fiscalService,
                     "refund-hold-" + UUID.randomUUID(),
                     treasury,
                     MoneyAmount.ofMinorUnits(300),
                     "Real LC treasury refund GameTest"));
-            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+            PaymentCoordinator coordinator = PaymentCoordinator.authorized(database, payments);
             PaymentTransaction original = coordinator.settle(
                     new SettleReservation(
-                            new ServiceIdentity("civiceconomy-gametest"),
+                            fiscalService,
                             "refund-payment-" + UUID.randomUUID(),
                             reservation.reservationId(),
                             recipientAccount,
                             MoneyAmount.ofMinorUnits(300)),
                     FailurePoint.NONE);
             RefundPayment request = new RefundPayment(
-                    new ServiceIdentity("civiceconomy-gametest"),
+                    fiscalService,
                     "refund-reversal-" + UUID.randomUUID(),
                     original.transactionId(),
                     MoneyAmount.ofMinorUnits(300),
@@ -265,7 +290,7 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     "refund parent transaction");
             helper.assertValueEqual(
                     MoneyAmount.ofMinorUnits(300),
-                    coordinator.transaction(original.requestId()).refundedAmount(),
+                    coordinator.transaction(fiscalService, original.requestId()).refundedAmount(),
                     "original transaction refunded amount");
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
@@ -305,19 +330,29 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
         UUID transactionId;
         UUID reservationId;
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
-            FiscalLedger ledger = new FiscalLedger(database, accounts);
+            ServiceIdentity fiscalService = new ServiceIdentity("civiceconomy-gametest");
+            ServiceIdentity compensationService = new ServiceIdentity("civiceconomy-gametest-admin");
+            grant(
+                    database,
+                    fiscalService,
+                    treasury,
+                    FiscalCapability.RESERVE_FUNDS,
+                    FiscalCapability.SETTLE_PAYMENT,
+                    FiscalCapability.READ_ACCOUNT);
+            grant(database, compensationService, treasury, FiscalCapability.COMPENSATE_PAYMENT);
+            FiscalLedger ledger = FiscalLedger.authorized(database, accounts);
             Reservation reservation = ledger.reserve(new ReserveFunds(
-                    new ServiceIdentity("civiceconomy-gametest"),
+                    fiscalService,
                     "compensation-hold-" + UUID.randomUUID(),
                     treasury,
                     MoneyAmount.ofMinorUnits(300),
                     "Real LC compensation GameTest"));
             reservationId = reservation.reservationId();
-            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+            PaymentCoordinator coordinator = PaymentCoordinator.authorized(database, payments);
             try {
                 coordinator.settle(
                         new SettleReservation(
-                                new ServiceIdentity("civiceconomy-gametest"),
+                                fiscalService,
                                 paymentRequestId,
                                 reservationId,
                                 recipientAccount,
@@ -327,11 +362,11 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
             } catch (SimulatedCrash expected) {
                 // The recorded external payment is now eligible for controlled compensation.
             }
-            transactionId = coordinator.transaction(paymentRequestId).transactionId();
+            transactionId = coordinator.transaction(fiscalService, paymentRequestId).transactionId();
             try {
                 coordinator.compensate(
                         new CompensatePayment(
-                                new ServiceIdentity("civiceconomy-gametest-admin"),
+                                compensationService,
                                 compensationRequestId,
                                 transactionId,
                                 "Controlled real LC compensation"),
@@ -343,12 +378,14 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
-            FiscalLedger ledger = new FiscalLedger(reopened, accounts);
-            PaymentCoordinator recovery = new PaymentCoordinator(reopened, payments);
+            ServiceIdentity fiscalService = new ServiceIdentity("civiceconomy-gametest");
+            ServiceIdentity compensationService = new ServiceIdentity("civiceconomy-gametest-admin");
+            FiscalLedger ledger = FiscalLedger.authorized(reopened, accounts);
+            PaymentCoordinator recovery = PaymentCoordinator.authorized(reopened, payments);
             recovery.recoverIncomplete();
             PaymentTransaction compensated = recovery.compensate(
                     new CompensatePayment(
-                            new ServiceIdentity("civiceconomy-gametest-admin"),
+                            compensationService,
                             compensationRequestId,
                             transactionId,
                             "Controlled real LC compensation"),
@@ -360,14 +397,16 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
             helper.assertValueEqual(TransactionState.COMPENSATED, compensated.state(), "compensated payment state");
             helper.assertValueEqual(
                     MoneyAmount.ofMinorUnits(300),
-                    ledger.reservedBalance(treasury),
+                    ledger.reservedBalance(fiscalService, treasury),
                     "Reservation preserved after compensation");
             helper.assertValueEqual(
                     List.of(RecoveryAction.COMPENSATION_STARTED, RecoveryAction.COMPENSATION_COMPLETED),
-                    recovery.recoveryAudit(transactionId).stream().map(entry -> entry.action()).toList(),
+                    recovery.recoveryAudit(fiscalService, transactionId).stream()
+                            .map(entry -> entry.action())
+                            .toList(),
                     "durable compensation audit actions");
             ledger.release(new ReleaseReservation(
-                    new ServiceIdentity("civiceconomy-gametest"),
+                    fiscalService,
                     "compensation-release-" + UUID.randomUUID(),
                     reservationId,
                     "Compensated GameTest payment no longer needs its hold"));
@@ -413,9 +452,20 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 temporaryDirectory.resolve("civic.sqlite3"),
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
-            FiscalLedger ledger = new FiscalLedger(database, accountBalances);
+            ServiceIdentity issuer = new ServiceIdentity("civiceconomy-gametest-revenue");
+            ServiceIdentity payerService = new ServiceIdentity("civiceconomy-gametest-player");
+            grant(database, issuer, treasury, FiscalCapability.ISSUE_BILL);
+            grant(
+                    database,
+                    payerService,
+                    payerAccount,
+                    FiscalCapability.FUND_BILL,
+                    FiscalCapability.SETTLE_PAYMENT,
+                    FiscalCapability.READ_ACCOUNT);
+            grant(database, payerService, treasury, FiscalCapability.READ_ACCOUNT);
+            FiscalLedger ledger = FiscalLedger.authorized(database, accountBalances);
             IssueFiscalBill issue = new IssueFiscalBill(
-                    new ServiceIdentity("civiceconomy-gametest-revenue"),
+                    issuer,
                     "issue-real-lc-fee-" + UUID.randomUUID(),
                     payerAccount,
                     treasury,
@@ -424,17 +474,17 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     "Real LC permit fee GameTest",
                     Instant.now().plusSeconds(3_600));
             FiscalBill funded = ledger.fundBill(new FundFiscalBill(
-                    new ServiceIdentity("civiceconomy-gametest-player"),
+                    payerService,
                     "fund-real-lc-fee-" + UUID.randomUUID(),
                     ledger.issueBill(issue).billId()));
-            Escrow escrow = ledger.escrow(funded.escrowId().orElseThrow());
+            Escrow escrow = ledger.escrow(payerService, funded.escrowId().orElseThrow());
             SettleReservation settle = new SettleReservation(
-                    new ServiceIdentity("civiceconomy-gametest-player"),
+                    payerService,
                     "pay-real-lc-fee-" + UUID.randomUUID(),
                     escrow.reservationId(),
                     treasury,
                     MoneyAmount.ofMinorUnits(300));
-            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+            PaymentCoordinator coordinator = PaymentCoordinator.authorized(database, payments);
 
             PaymentTransaction paid = coordinator.settle(settle, FailurePoint.NONE);
             PaymentTransaction replay = coordinator.settle(settle, FailurePoint.NONE);
@@ -448,18 +498,27 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     "paid Fiscal Bill state");
             helper.assertValueEqual(
                     EscrowState.SETTLED,
-                    ledger.escrow(escrow.escrowId()).state(),
+                    ledger.escrow(payerService, escrow.escrowId()).state(),
                     "settled Fiscal Bill Escrow state");
-            helper.assertValueEqual(MoneyAmount.ZERO, ledger.reservedBalance(payerAccount), "Fiscal Bill hold");
-            helper.assertValueEqual(1, ledger.ledgerEntries(payerAccount).size(), "payer ledger entry count");
+            helper.assertValueEqual(
+                    MoneyAmount.ZERO,
+                    ledger.reservedBalance(payerService, payerAccount),
+                    "Fiscal Bill hold");
+            helper.assertValueEqual(
+                    1,
+                    ledger.ledgerEntries(payerService, payerAccount).size(),
+                    "payer ledger entry count");
             helper.assertValueEqual(
                     LedgerDirection.OUTFLOW,
-                    ledger.ledgerEntries(payerAccount).getFirst().direction(),
+                    ledger.ledgerEntries(payerService, payerAccount).getFirst().direction(),
                     "payer ledger direction");
-            helper.assertValueEqual(1, ledger.ledgerEntries(treasury).size(), "Treasury ledger entry count");
+            helper.assertValueEqual(
+                    1,
+                    ledger.ledgerEntries(payerService, treasury).size(),
+                    "Treasury ledger entry count");
             helper.assertValueEqual(
                     LedgerDirection.INFLOW,
-                    ledger.ledgerEntries(treasury).getFirst().direction(),
+                    ledger.ledgerEntries(payerService, treasury).getFirst().direction(),
                     "Treasury ledger direction");
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
@@ -501,6 +560,25 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
     private static long mainChainBalance(IBankAccount account) {
         MoneyValue unit = CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1);
         return account.getMoneyStorage().valueOf(unit.getUniqueName()).getCoreValue();
+    }
+
+    private static void grant(
+            CivicDatabase database,
+            ServiceIdentity serviceIdentity,
+            AccountId accountId,
+            FiscalCapability... capabilities) {
+        FiscalAuthorization authorization = new FiscalAuthorization(database);
+        authorization.register(new RegisterFiscalService(
+                serviceIdentity, "civiceconomy", "Civic GameTest " + serviceIdentity.value()));
+        for (FiscalCapability capability : capabilities) {
+            authorization.grant(new GrantFiscalCapability(
+                    new ServiceIdentity("civiceconomy-gametest-admin"),
+                    "grant-" + UUID.randomUUID(),
+                    serviceIdentity,
+                    capability,
+                    accountId,
+                    "Civic real-integration GameTest grant"));
+        }
     }
 
     private static Path createTemporaryDirectory() {

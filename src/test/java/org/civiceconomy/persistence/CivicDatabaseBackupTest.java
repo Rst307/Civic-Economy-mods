@@ -10,9 +10,13 @@ import java.sql.DriverManager;
 import java.sql.Statement;
 import java.util.UUID;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.FiscalAuthorization;
+import org.civiceconomy.fiscal.FiscalCapability;
 import org.civiceconomy.fiscal.FiscalLedger;
+import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.ReserveFunds;
+import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -45,13 +49,17 @@ class CivicDatabaseBackupTest {
                     treasury,
                     MoneyAmount.ofMinorUnits(200),
                     "Post-snapshot mutation"));
-            assertEquals(MoneyAmount.ofMinorUnits(500), ledger.reservedBalance(treasury));
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(500),
+                    ledger.reservedBalance(new ServiceIdentity("backup-test"), treasury));
         }
 
         try (CivicDatabase backup = CivicDatabase.open(backupFile, identity)) {
             assertEquals(identity, backup.identity());
-            assertEquals(14, backup.schemaVersion());
-            assertEquals(MoneyAmount.ofMinorUnits(300), ledger(backup).reservedBalance(treasury));
+            assertEquals(16, backup.schemaVersion());
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(300),
+                    ledger(backup).reservedBalance(new ServiceIdentity("backup-test"), treasury));
         }
     }
 
@@ -77,8 +85,10 @@ class CivicDatabaseBackupTest {
 
         try (CivicDatabase restored = CivicDatabase.open(restoredFile, identity)) {
             assertEquals(identity, restored.identity());
-            assertEquals(14, restored.schemaVersion());
-            assertEquals(MoneyAmount.ofMinorUnits(450), ledger(restored).reservedBalance(treasury));
+            assertEquals(16, restored.schemaVersion());
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(450),
+                    ledger(restored).reservedBalance(new ServiceIdentity("restore-test"), treasury));
         }
     }
 
@@ -111,7 +121,7 @@ class CivicDatabaseBackupTest {
         }
         try (Connection backup = DriverManager.getConnection("jdbc:sqlite:" + backupFile);
                 Statement statement = backup.createStatement()) {
-            statement.execute("PRAGMA user_version = 15");
+            statement.execute("PRAGMA user_version = 17");
         }
 
         assertThrows(
@@ -121,7 +131,27 @@ class CivicDatabaseBackupTest {
     }
 
     private static FiscalLedger ledger(CivicDatabase database) {
-        return new FiscalLedger(database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        authorize(database, new ServiceIdentity("backup-test"), treasury);
+        authorize(database, new ServiceIdentity("restore-test"), treasury);
+        return FiscalLedger.authorized(database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+    }
+
+    private static void authorize(
+            CivicDatabase database, ServiceIdentity serviceIdentity, AccountId accountId) {
+        FiscalAuthorization authorization = new FiscalAuthorization(database);
+        authorization.register(new RegisterFiscalService(
+                serviceIdentity, "civiceconomy-tests", "Backup test " + serviceIdentity.value()));
+        for (FiscalCapability capability :
+                new FiscalCapability[] {FiscalCapability.RESERVE_FUNDS, FiscalCapability.READ_ACCOUNT}) {
+            authorization.grant(new GrantFiscalCapability(
+                    new ServiceIdentity("civiceconomy-test-admin"),
+                    "grant-" + serviceIdentity.value() + "-" + capability,
+                    serviceIdentity,
+                    capability,
+                    accountId,
+                    "Backup/restore integration fixture"));
+        }
     }
 
     private static DatabaseIdentity identity(String worldId) {

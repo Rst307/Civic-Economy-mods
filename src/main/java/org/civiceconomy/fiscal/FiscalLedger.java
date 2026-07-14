@@ -18,19 +18,35 @@ public final class FiscalLedger {
     private final CivicDatabase database;
     private final AccountBalances accountBalances;
     private final Clock clock;
+    private final FiscalAuthorization authorization;
     private final ConcurrentHashMap<AccountId, Object> accountLocks = new ConcurrentHashMap<>();
 
-    public FiscalLedger(CivicDatabase database, AccountBalances accountBalances) {
-        this(database, accountBalances, Clock.systemUTC());
+    FiscalLedger(CivicDatabase database, AccountBalances accountBalances) {
+        this(database, accountBalances, Clock.systemUTC(), null);
     }
 
     FiscalLedger(CivicDatabase database, AccountBalances accountBalances, Clock clock) {
+        this(database, accountBalances, clock, null);
+    }
+
+    private FiscalLedger(
+            CivicDatabase database,
+            AccountBalances accountBalances,
+            Clock clock,
+            FiscalAuthorization authorization) {
         this.database = database;
         this.accountBalances = accountBalances;
         this.clock = clock;
+        this.authorization = authorization;
+    }
+
+    public static FiscalLedger authorized(CivicDatabase database, AccountBalances accountBalances) {
+        return new FiscalLedger(
+                database, accountBalances, Clock.systemUTC(), new FiscalAuthorization(database));
     }
 
     public Reservation reserve(ReserveFunds request) {
+        require(request.serviceIdentity(), FiscalCapability.RESERVE_FUNDS, request.sourceAccount());
         synchronized (accountLocks.computeIfAbsent(request.sourceAccount(), ignored -> new Object())) {
             StoredReservation existing = database.reservation(
                     request.serviceIdentity().value(), request.requestId());
@@ -55,17 +71,29 @@ public final class FiscalLedger {
         }
     }
 
-    public MoneyAmount reservedBalance(AccountId accountId) {
+    MoneyAmount reservedBalance(AccountId accountId) {
         return MoneyAmount.ofMinorUnits(database.activeReservedMinorUnits(accountId.value()));
     }
 
-    public java.util.List<LedgerEntry> ledgerEntries(AccountId accountId) {
+    public MoneyAmount reservedBalance(ServiceIdentity serviceIdentity, AccountId accountId) {
+        require(serviceIdentity, FiscalCapability.READ_ACCOUNT, accountId);
+        return reservedBalance(accountId);
+    }
+
+    java.util.List<LedgerEntry> ledgerEntries(AccountId accountId) {
         return database.ledgerEntries(accountId.value()).stream()
                 .map(FiscalLedger::toLedgerEntry)
                 .toList();
     }
 
+    public java.util.List<LedgerEntry> ledgerEntries(
+            ServiceIdentity serviceIdentity, AccountId accountId) {
+        require(serviceIdentity, FiscalCapability.READ_ACCOUNT, accountId);
+        return ledgerEntries(accountId);
+    }
+
     public FiscalBill issueBill(IssueFiscalBill request) {
+        require(request.serviceIdentity(), FiscalCapability.ISSUE_BILL, request.beneficiaryAccount());
         StoredFiscalBill existing = database.fiscalBill(
                 request.serviceIdentity().value(), request.requestId());
         if (existing != null) {
@@ -96,6 +124,12 @@ public final class FiscalLedger {
     }
 
     public FiscalBill fundBill(FundFiscalBill request) {
+        StoredFiscalBill bill = database.fiscalBill(request.billId());
+        if (bill == null) {
+            throw new IllegalArgumentException("Unknown Fiscal Bill " + request.billId());
+        }
+        AccountId payerAccount = new AccountId(bill.payerAccount());
+        require(request.serviceIdentity(), FiscalCapability.FUND_BILL, payerAccount);
         StoredFiscalBill replay = database.fiscalBillFunding(
                 request.serviceIdentity().value(), request.requestId());
         if (replay != null) {
@@ -105,11 +139,6 @@ public final class FiscalLedger {
             }
             return toFiscalBill(replay);
         }
-        StoredFiscalBill bill = database.fiscalBill(request.billId());
-        if (bill == null) {
-            throw new IllegalArgumentException("Unknown Fiscal Bill " + request.billId());
-        }
-        AccountId payerAccount = new AccountId(bill.payerAccount());
         synchronized (accountLocks.computeIfAbsent(payerAccount, ignored -> new Object())) {
             replay = database.fiscalBillFunding(
                     request.serviceIdentity().value(), request.requestId());
@@ -143,6 +172,7 @@ public final class FiscalLedger {
     }
 
     public Budget createBudget(CreateBudget request) {
+        require(request.serviceIdentity(), FiscalCapability.MANAGE_BUDGET, request.sourceAccount());
         StoredBudget existing = database.budget(
                 request.serviceIdentity().value(), request.requestId());
         if (existing != null) {
@@ -171,6 +201,12 @@ public final class FiscalLedger {
     }
 
     public Budget approveBudget(ApproveBudget request) {
+        StoredBudget budget = database.budget(request.budgetId());
+        if (budget == null) {
+            throw new IllegalArgumentException("Unknown Budget " + request.budgetId());
+        }
+        AccountId sourceAccount = new AccountId(budget.sourceAccount());
+        require(request.serviceIdentity(), FiscalCapability.MANAGE_BUDGET, sourceAccount);
         StoredBudget replay = database.budgetApproval(
                 request.serviceIdentity().value(), request.requestId());
         if (replay != null) {
@@ -180,11 +216,6 @@ public final class FiscalLedger {
             }
             return toBudget(replay);
         }
-        StoredBudget budget = database.budget(request.budgetId());
-        if (budget == null) {
-            throw new IllegalArgumentException("Unknown Budget " + request.budgetId());
-        }
-        AccountId sourceAccount = new AccountId(budget.sourceAccount());
         synchronized (accountLocks.computeIfAbsent(sourceAccount, ignored -> new Object())) {
             replay = database.budgetApproval(
                     request.serviceIdentity().value(), request.requestId());
@@ -216,6 +247,7 @@ public final class FiscalLedger {
     }
 
     public Escrow openEscrow(OpenEscrow request) {
+        require(request.serviceIdentity(), FiscalCapability.MANAGE_ESCROW, request.sourceAccount());
         synchronized (accountLocks.computeIfAbsent(request.sourceAccount(), ignored -> new Object())) {
             StoredEscrow existing = database.escrow(
                     request.serviceIdentity().value(), request.requestId());
@@ -251,7 +283,7 @@ public final class FiscalLedger {
         }
     }
 
-    public Escrow escrow(UUID escrowId) {
+    Escrow escrow(UUID escrowId) {
         StoredEscrow stored = database.escrow(escrowId);
         if (stored == null) {
             throw new IllegalArgumentException("Unknown Escrow " + escrowId);
@@ -259,7 +291,25 @@ public final class FiscalLedger {
         return toEscrow(stored);
     }
 
+    public Escrow escrow(ServiceIdentity serviceIdentity, UUID escrowId) {
+        StoredEscrow stored = database.escrow(escrowId);
+        if (stored == null) {
+            throw new IllegalArgumentException("Unknown Escrow " + escrowId);
+        }
+        AccountId sourceAccount = new AccountId(stored.sourceAccount());
+        require(serviceIdentity, FiscalCapability.READ_ACCOUNT, sourceAccount);
+        return toEscrow(stored);
+    }
+
     public Escrow expireEscrow(ExpireEscrow request) {
+        StoredEscrow escrow = database.escrow(request.escrowId());
+        if (escrow == null) {
+            throw new IllegalArgumentException("Unknown Escrow " + request.escrowId());
+        }
+        require(
+                request.serviceIdentity(),
+                FiscalCapability.MANAGE_ESCROW,
+                new AccountId(escrow.sourceAccount()));
         StoredEscrowExpiry replay = database.escrowExpiry(
                 request.serviceIdentity().value(), request.requestId());
         if (replay != null) {
@@ -282,6 +332,16 @@ public final class FiscalLedger {
     }
 
     public ReservationRelease release(ReleaseReservation request) {
+        if (authorization != null) {
+            StoredReservation reservation = database.reservationRecord(request.reservationId());
+            if (reservation == null) {
+                throw new IllegalArgumentException("Unknown Reservation " + request.reservationId());
+            }
+            require(
+                    request.serviceIdentity(),
+                    FiscalCapability.RESERVE_FUNDS,
+                    new AccountId(reservation.sourceAccount()));
+        }
         StoredReservationRelease replay = database.reservationRelease(
                 request.serviceIdentity().value(), request.requestId());
         if (replay != null) {
@@ -306,8 +366,13 @@ public final class FiscalLedger {
         }
     }
 
-    public MoneyAmount availableBalance(AccountId accountId) {
+    MoneyAmount availableBalance(AccountId accountId) {
         return accountBalances.balance(accountId).minus(reservedBalance(accountId));
+    }
+
+    public MoneyAmount availableBalance(ServiceIdentity serviceIdentity, AccountId accountId) {
+        require(serviceIdentity, FiscalCapability.READ_ACCOUNT, accountId);
+        return availableBalance(accountId);
     }
 
     private static Reservation toReservation(StoredReservation stored) {
@@ -389,5 +454,12 @@ public final class FiscalLedger {
                 LedgerDirection.valueOf(stored.direction()),
                 PaymentKind.valueOf(stored.transactionKind()),
                 java.time.Instant.ofEpochMilli(stored.recordedAtEpochMillis()));
+    }
+
+    private void require(
+            ServiceIdentity serviceIdentity, FiscalCapability capability, AccountId accountId) {
+        if (authorization != null) {
+            authorization.require(serviceIdentity, capability, accountId);
+        }
     }
 }

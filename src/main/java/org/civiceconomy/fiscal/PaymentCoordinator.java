@@ -13,13 +13,37 @@ import org.civiceconomy.persistence.StoredPaymentTransaction;
 public final class PaymentCoordinator {
     private final CivicDatabase database;
     private final ExternalPayments externalPayments;
+    private final FiscalAuthorization authorization;
 
-    public PaymentCoordinator(CivicDatabase database, ExternalPayments externalPayments) {
+    PaymentCoordinator(CivicDatabase database, ExternalPayments externalPayments) {
+        this(database, externalPayments, null);
+    }
+
+    private PaymentCoordinator(
+            CivicDatabase database,
+            ExternalPayments externalPayments,
+            FiscalAuthorization authorization) {
         this.database = database;
         this.externalPayments = externalPayments;
+        this.authorization = authorization;
+    }
+
+    public static PaymentCoordinator authorized(
+            CivicDatabase database, ExternalPayments externalPayments) {
+        return new PaymentCoordinator(database, externalPayments, new FiscalAuthorization(database));
     }
 
     public PaymentTransaction settle(SettleReservation request, FailurePoint failurePoint) {
+        if (authorization != null) {
+            var reservation = database.reservationRecord(request.reservationId());
+            if (reservation == null) {
+                throw new IllegalArgumentException("Unknown Reservation " + request.reservationId());
+            }
+            require(
+                    request.serviceIdentity(),
+                    FiscalCapability.SETTLE_PAYMENT,
+                    new AccountId(reservation.sourceAccount()));
+        }
         StoredPaymentTransaction stored;
         try {
             stored = database.preparePayment(
@@ -52,6 +76,15 @@ public final class PaymentCoordinator {
     }
 
     public PaymentTransaction refund(RefundPayment request, FailurePoint failurePoint) {
+        StoredPaymentTransaction original = database.paymentTransaction(request.originalTransactionId());
+        if (original == null) {
+            throw new IllegalArgumentException(
+                    "Unknown payment transaction " + request.originalTransactionId());
+        }
+        require(
+                request.serviceIdentity(),
+                FiscalCapability.REFUND_PAYMENT,
+                new AccountId(original.recipientAccount()));
         StoredPaymentTransaction stored;
         try {
             stored = database.prepareRefund(
@@ -77,6 +110,15 @@ public final class PaymentCoordinator {
     }
 
     public PaymentTransaction compensate(CompensatePayment request, FailurePoint failurePoint) {
+        StoredPaymentTransaction original = database.paymentTransaction(request.transactionId());
+        if (original == null) {
+            throw new IllegalArgumentException(
+                    "Unknown payment transaction " + request.transactionId());
+        }
+        require(
+                request.serviceIdentity(),
+                FiscalCapability.COMPENSATE_PAYMENT,
+                new AccountId(original.sourceAccount()));
         StoredPaymentCompensation compensation = database.prepareCompensation(
                 request.serviceIdentity().value(),
                 request.requestId(),
@@ -150,7 +192,7 @@ public final class PaymentCoordinator {
         }
     }
 
-    public List<RecoveryAuditEntry> recoveryAudit(UUID transactionId) {
+    List<RecoveryAuditEntry> recoveryAudit(UUID transactionId) {
         return database.recoveryAudit(transactionId).stream()
                 .map(stored -> new RecoveryAuditEntry(
                         stored.auditId(),
@@ -162,11 +204,37 @@ public final class PaymentCoordinator {
                 .toList();
     }
 
-    public PaymentTransaction transaction(String requestId) {
+    public List<RecoveryAuditEntry> recoveryAudit(
+            ServiceIdentity serviceIdentity, UUID transactionId) {
+        StoredPaymentTransaction transaction = database.paymentTransaction(transactionId);
+        if (transaction == null) {
+            throw new IllegalArgumentException("Unknown payment transaction " + transactionId);
+        }
+        require(
+                serviceIdentity,
+                FiscalCapability.READ_ACCOUNT,
+                new AccountId(transaction.sourceAccount()));
+        return recoveryAudit(transactionId);
+    }
+
+    PaymentTransaction transaction(String requestId) {
         StoredPaymentTransaction stored = database.paymentTransaction(requestId);
         if (stored == null) {
             throw new IllegalArgumentException("Unknown payment request " + requestId);
         }
+        return toTransaction(stored);
+    }
+
+    public PaymentTransaction transaction(
+            ServiceIdentity serviceIdentity, String requestId) {
+        StoredPaymentTransaction stored = database.paymentTransaction(requestId);
+        if (stored == null) {
+            throw new IllegalArgumentException("Unknown payment request " + requestId);
+        }
+        require(
+                serviceIdentity,
+                FiscalCapability.READ_ACCOUNT,
+                new AccountId(stored.sourceAccount()));
         return toTransaction(stored);
     }
 
@@ -224,5 +292,12 @@ public final class PaymentCoordinator {
                 MoneyAmount.ofMinorUnits(stored.refundedMinorUnits()),
                 Optional.ofNullable(stored.reason()),
                 TransactionState.valueOf(stored.state()));
+    }
+
+    private void require(
+            ServiceIdentity serviceIdentity, FiscalCapability capability, AccountId accountId) {
+        if (authorization != null) {
+            authorization.require(serviceIdentity, capability, accountId);
+        }
     }
 }
