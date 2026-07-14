@@ -160,6 +160,10 @@ _Avoid_: FTB 所有权、付款交易、有效性结论
 对一个 Nation 在一个 Territory Maintenance Cycle 内全部 Territory Fiscal Assessment 作出的单次财政结论；精确付款证据使其 EFFECTIVE，欠费结论使其 SUSPENDED。
 _Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 
+**领土维护优先级（Territory Maintenance Priority）**:
+国家在维护资金不足时用于选择续费区块的五级顺序：首都、首都连接核心、有效基础设施、普通领土、飞地或跨维度领地；低级别不能挤占高级别。
+_Avoid_: FTB 占领权限、区块遍历顺序、部分付款比例
+
 **领土维护抵扣额（Territory Maintenance Credit）**:
 主动放弃领土后形成、只能抵扣后续领土维护而不能提取为货币的财政权益。
 _Avoid_: 退款、账户余额
