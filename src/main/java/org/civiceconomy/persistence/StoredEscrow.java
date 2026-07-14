@@ -13,4 +13,5 @@ public record StoredEscrow(
         String externalObjectId,
         String purpose,
         long expiresAtEpochMillis,
+        String requiredRecipientAccount,
         String state) {}

@@ -31,7 +31,12 @@ import org.civiceconomy.fiscal.ExternalPayment;
 import org.civiceconomy.fiscal.Escrow;
 import org.civiceconomy.fiscal.EscrowState;
 import org.civiceconomy.fiscal.FailurePoint;
+import org.civiceconomy.fiscal.FiscalBill;
+import org.civiceconomy.fiscal.FiscalBillKind;
+import org.civiceconomy.fiscal.FiscalBillState;
 import org.civiceconomy.fiscal.FiscalLedger;
+import org.civiceconomy.fiscal.FundFiscalBill;
+import org.civiceconomy.fiscal.IssueFiscalBill;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PaymentKind;
@@ -371,6 +376,77 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 UUID.randomUUID(), treasury, fundingAccount, accounts.balance(treasury)));
         bankData.deleteAccount(fundingPlayerId);
         bankData.deleteAccount(recipientPlayerId);
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void playerFiscalBillPaysNationalTreasuryThroughRealLcExactlyOnce(
+            GameTestHelper helper) {
+        UUID payerPlayerId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        AccountId payerAccount = new AccountId("player:" + payerPlayerId);
+        AccountId treasury =
+                new AccountId("nation:4a1ae536-f6aa-4a92-a3a4-5ea8e22fbeea:treasury");
+        LightmansCurrencyFiscalAccounts accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, "Fiscal Bill GameTest Treasury");
+        LightmansCurrencyPayments payments = LightmansCurrencyPayments.live(helper.getLevel());
+        clearFiscalAccount(bankData, accounts, payments, treasury);
+        IBankAccount payer = reset(bankData, payerPlayerId, 500);
+
+        Path temporaryDirectory = createTemporaryDirectory();
+        try (CivicDatabase database = CivicDatabase.open(
+                temporaryDirectory.resolve("civic.sqlite3"),
+                new DatabaseIdentity(
+                        UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
+            FiscalLedger ledger = new FiscalLedger(database, account -> {
+                if (account.equals(payerAccount)) {
+                    return MoneyAmount.ofMinorUnits(mainChainBalance(payer));
+                }
+                return accounts.balance(account);
+            });
+            IssueFiscalBill issue = new IssueFiscalBill(
+                    new ServiceIdentity("civiceconomy-gametest-revenue"),
+                    "issue-real-lc-fee-" + UUID.randomUUID(),
+                    payerAccount,
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    FiscalBillKind.FEE,
+                    "Real LC permit fee GameTest",
+                    Instant.now().plusSeconds(3_600));
+            FiscalBill funded = ledger.fundBill(new FundFiscalBill(
+                    new ServiceIdentity("civiceconomy-gametest-player"),
+                    "fund-real-lc-fee-" + UUID.randomUUID(),
+                    ledger.issueBill(issue).billId()));
+            Escrow escrow = ledger.escrow(funded.escrowId().orElseThrow());
+            SettleReservation settle = new SettleReservation(
+                    new ServiceIdentity("civiceconomy-gametest-player"),
+                    "pay-real-lc-fee-" + UUID.randomUUID(),
+                    escrow.reservationId(),
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+
+            PaymentTransaction paid = coordinator.settle(settle, FailurePoint.NONE);
+            PaymentTransaction replay = coordinator.settle(settle, FailurePoint.NONE);
+
+            helper.assertValueEqual(200L, mainChainBalance(payer), "Fiscal Bill payer LC balance");
+            helper.assertValueEqual(300L, accounts.balance(treasury).minorUnits(), "Fiscal Bill Treasury balance");
+            helper.assertValueEqual(paid, replay, "idempotent Fiscal Bill payment replay");
+            helper.assertValueEqual(
+                    FiscalBillState.PAID,
+                    ledger.issueBill(issue).state(),
+                    "paid Fiscal Bill state");
+            helper.assertValueEqual(
+                    EscrowState.SETTLED,
+                    ledger.escrow(escrow.escrowId()).state(),
+                    "settled Fiscal Bill Escrow state");
+            helper.assertValueEqual(MoneyAmount.ZERO, ledger.reservedBalance(payerAccount), "Fiscal Bill hold");
+        } finally {
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), treasury, payerAccount, accounts.balance(treasury)));
+        bankData.deleteAccount(payerPlayerId);
         helper.succeed();
     }
 

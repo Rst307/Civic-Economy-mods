@@ -9,6 +9,7 @@ import org.civiceconomy.persistence.PendingReservationPaymentException;
 import org.civiceconomy.persistence.StoredBudget;
 import org.civiceconomy.persistence.StoredEscrow;
 import org.civiceconomy.persistence.StoredEscrowExpiry;
+import org.civiceconomy.persistence.StoredFiscalBill;
 import org.civiceconomy.persistence.StoredReservation;
 import org.civiceconomy.persistence.StoredReservationRelease;
 
@@ -55,6 +56,83 @@ public final class FiscalLedger {
 
     public MoneyAmount reservedBalance(AccountId accountId) {
         return MoneyAmount.ofMinorUnits(database.activeReservedMinorUnits(accountId.value()));
+    }
+
+    public FiscalBill issueBill(IssueFiscalBill request) {
+        StoredFiscalBill existing = database.fiscalBill(
+                request.serviceIdentity().value(), request.requestId());
+        if (existing != null) {
+            if (!existing.payerAccount().equals(request.payerAccount().value())
+                    || !existing.beneficiaryAccount().equals(request.beneficiaryAccount().value())
+                    || existing.amountMinorUnits() != request.amount().minorUnits()
+                    || !existing.kind().equals(request.kind().name())
+                    || !existing.purpose().equals(request.purpose())
+                    || existing.dueAtEpochMillis() != request.dueAt().toEpochMilli()) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toFiscalBill(existing);
+        }
+        if (!request.dueAt().isAfter(clock.instant())) {
+            throw new IllegalArgumentException("Fiscal Bill due date must be in the future");
+        }
+        return toFiscalBill(database.issueFiscalBill(
+                UUID.randomUUID(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.payerAccount().value(),
+                request.beneficiaryAccount().value(),
+                request.amount().minorUnits(),
+                request.kind().name(),
+                request.purpose(),
+                request.dueAt().toEpochMilli()));
+    }
+
+    public FiscalBill fundBill(FundFiscalBill request) {
+        StoredFiscalBill replay = database.fiscalBillFunding(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.billId().equals(request.billId())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toFiscalBill(replay);
+        }
+        StoredFiscalBill bill = database.fiscalBill(request.billId());
+        if (bill == null) {
+            throw new IllegalArgumentException("Unknown Fiscal Bill " + request.billId());
+        }
+        AccountId payerAccount = new AccountId(bill.payerAccount());
+        synchronized (accountLocks.computeIfAbsent(payerAccount, ignored -> new Object())) {
+            replay = database.fiscalBillFunding(
+                    request.serviceIdentity().value(), request.requestId());
+            if (replay != null) {
+                if (!replay.billId().equals(request.billId())) {
+                    throw new IdempotencyConflictException(
+                            request.serviceIdentity(), request.requestId());
+                }
+                return toFiscalBill(replay);
+            }
+            if (!"ISSUED".equals(bill.state())) {
+                throw new IllegalStateException(
+                        "Fiscal Bill is not awaiting funding: " + bill.state());
+            }
+            if (clock.millis() >= bill.dueAtEpochMillis()) {
+                throw new IllegalStateException("Fiscal Bill is past due");
+            }
+            MoneyAmount amount = MoneyAmount.ofMinorUnits(bill.amountMinorUnits());
+            MoneyAmount available = availableBalance(payerAccount);
+            if (available.compareTo(amount) < 0) {
+                throw new InsufficientAvailableBalanceException(
+                        payerAccount, amount, available);
+            }
+            return toFiscalBill(database.fundFiscalBill(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.billId()));
+        }
     }
 
     public Budget createBudget(CreateBudget request) {
@@ -259,6 +337,7 @@ public final class FiscalLedger {
                 stored.externalObjectId(),
                 stored.purpose(),
                 java.time.Instant.ofEpochMilli(stored.expiresAtEpochMillis()),
+                java.util.Optional.ofNullable(stored.requiredRecipientAccount()).map(AccountId::new),
                 EscrowState.valueOf(stored.state()));
     }
 
@@ -275,5 +354,21 @@ public final class FiscalLedger {
                 java.util.Optional.ofNullable(stored.escrowId()),
                 MoneyAmount.ofMinorUnits(stored.settledMinorUnits()),
                 BudgetState.valueOf(stored.state()));
+    }
+
+    private static FiscalBill toFiscalBill(StoredFiscalBill stored) {
+        return new FiscalBill(
+                stored.billId(),
+                new ServiceIdentity(stored.serviceIdentity()),
+                stored.requestId(),
+                new AccountId(stored.payerAccount()),
+                new AccountId(stored.beneficiaryAccount()),
+                MoneyAmount.ofMinorUnits(stored.amountMinorUnits()),
+                FiscalBillKind.valueOf(stored.kind()),
+                stored.purpose(),
+                java.time.Instant.ofEpochMilli(stored.dueAtEpochMillis()),
+                java.util.Optional.ofNullable(stored.escrowId()),
+                MoneyAmount.ofMinorUnits(stored.settledMinorUnits()),
+                FiscalBillState.valueOf(stored.state()));
     }
 }

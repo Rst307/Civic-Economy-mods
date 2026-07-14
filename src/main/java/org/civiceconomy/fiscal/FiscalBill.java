@@ -4,19 +4,19 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
-public record Escrow(
-        UUID escrowId,
+public record FiscalBill(
+        UUID billId,
         ServiceIdentity serviceIdentity,
         String requestId,
-        UUID reservationId,
-        AccountId sourceAccount,
+        AccountId payerAccount,
+        AccountId beneficiaryAccount,
         MoneyAmount amount,
-        MoneyAmount settledAmount,
-        String externalObjectId,
+        FiscalBillKind kind,
         String purpose,
-        Instant expiresAt,
-        Optional<AccountId> requiredRecipientAccount,
-        EscrowState state) {
+        Instant dueAt,
+        Optional<UUID> escrowId,
+        MoneyAmount settledAmount,
+        FiscalBillState state) {
     public MoneyAmount remainingAmount() {
         return amount.minus(settledAmount);
     }

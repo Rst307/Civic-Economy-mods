@@ -6,6 +6,7 @@ import java.util.UUID;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.PendingReservationPaymentException;
 import org.civiceconomy.persistence.ReservationRemainderExceededException;
+import org.civiceconomy.persistence.RequiredRecipientMismatchException;
 import org.civiceconomy.persistence.StoredPaymentCompensation;
 import org.civiceconomy.persistence.StoredPaymentTransaction;
 
@@ -34,6 +35,11 @@ public final class PaymentCoordinator {
                     MoneyAmount.ofMinorUnits(exceeded.remainingMinorUnits()));
         } catch (PendingReservationPaymentException pending) {
             throw new ReservationHasPendingPaymentException(pending.reservationId());
+        } catch (RequiredRecipientMismatchException mismatch) {
+            throw new PaymentRecipientMismatchException(
+                    mismatch.reservationId(),
+                    new AccountId(mismatch.expectedRecipient()),
+                    new AccountId(mismatch.actualRecipient()));
         }
         PaymentTransaction transaction = toTransaction(stored);
         if (transaction.kind() != PaymentKind.PAYMENT

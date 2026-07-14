@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 12;
+    private static final int SCHEMA_VERSION = 13;
 
     private final Connection connection;
 
@@ -474,6 +474,167 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredFiscalBill issueFiscalBill(
+            UUID billId,
+            String serviceIdentity,
+            String requestId,
+            String payerAccount,
+            String beneficiaryAccount,
+            long amountMinorUnits,
+            String kind,
+            String purpose,
+            long dueAtEpochMillis) {
+        StoredFiscalBill existing = fiscalBill(serviceIdentity, requestId);
+        if (existing != null) {
+            return existing;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO fiscal_bill (
+                    bill_id, service_identity, request_id, payer_account,
+                    beneficiary_account, amount_minor_units, kind, purpose,
+                    due_at_epoch_millis, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ISSUED')
+                """)) {
+            insert.setString(1, billId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, payerAccount);
+            insert.setString(5, beneficiaryAccount);
+            insert.setLong(6, amountMinorUnits);
+            insert.setString(7, kind);
+            insert.setString(8, purpose);
+            insert.setLong(9, dueAtEpochMillis);
+            insert.executeUpdate();
+            return fiscalBill(billId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to issue Fiscal Bill " + billId, failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill fiscalBill(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.service_identity = ? AND b.request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readFiscalBill(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Fiscal Bill request", failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill fiscalBill(UUID billId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.bill_id = ?
+                """)) {
+            query.setString(1, billId.toString());
+            return readFiscalBill(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Fiscal Bill " + billId, failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill fiscalBillFunding(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.funding_service_identity = ? AND b.funding_request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readFiscalBill(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Fiscal Bill funding request", failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill fundFiscalBill(
+            UUID escrowId,
+            UUID reservationId,
+            String serviceIdentity,
+            String requestId,
+            UUID billId) {
+        StoredFiscalBill replay = fiscalBillFunding(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        StoredFiscalBill bill = fiscalBill(billId);
+        if (bill == null) {
+            throw new IllegalArgumentException("Unknown Fiscal Bill " + billId);
+        }
+        if (!"ISSUED".equals(bill.state())) {
+            throw new IllegalStateException("Fiscal Bill is not awaiting funding: " + bill.state());
+        }
+
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertReservation = connection.prepareStatement("""
+                        INSERT INTO fiscal_reservation (
+                            reservation_id, service_identity, request_id, source_account,
+                            amount_minor_units, purpose, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                        """);
+                    PreparedStatement insertEscrow = connection.prepareStatement("""
+                        INSERT INTO fiscal_escrow (
+                            escrow_id, service_identity, request_id, reservation_id,
+                            external_object_id, purpose, expires_at_epoch_millis,
+                            required_recipient_account, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED')
+                        """);
+                    PreparedStatement fund = connection.prepareStatement("""
+                        UPDATE fiscal_bill
+                        SET escrow_id = ?, funding_service_identity = ?,
+                            funding_request_id = ?, state = 'RESERVED'
+                        WHERE bill_id = ? AND state = 'ISSUED' AND escrow_id IS NULL
+                        """)) {
+                insertReservation.setString(1, reservationId.toString());
+                insertReservation.setString(2, serviceIdentity);
+                insertReservation.setString(3, requestId);
+                insertReservation.setString(4, bill.payerAccount());
+                insertReservation.setLong(5, bill.amountMinorUnits());
+                insertReservation.setString(6, bill.purpose());
+                insertReservation.executeUpdate();
+
+                insertEscrow.setString(1, escrowId.toString());
+                insertEscrow.setString(2, serviceIdentity);
+                insertEscrow.setString(3, requestId);
+                insertEscrow.setString(4, reservationId.toString());
+                insertEscrow.setString(5, "bill:" + billId);
+                insertEscrow.setString(6, bill.purpose());
+                insertEscrow.setLong(7, bill.dueAtEpochMillis());
+                insertEscrow.setString(8, bill.beneficiaryAccount());
+                insertEscrow.executeUpdate();
+
+                fund.setString(1, escrowId.toString());
+                fund.setString(2, serviceIdentity);
+                fund.setString(3, requestId);
+                fund.setString(4, billId.toString());
+                if (fund.executeUpdate() != 1) {
+                    throw new IllegalStateException("Fiscal Bill state changed during funding " + billId);
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return fiscalBill(billId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to fund Fiscal Bill " + billId, failure);
+        }
+    }
+
     public synchronized StoredBudget budget(String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
@@ -735,6 +896,10 @@ public final class CivicDatabase implements AutoCloseable {
                     PreparedStatement expireBudget = connection.prepareStatement("""
                         UPDATE fiscal_budget SET state = 'EXPIRED'
                         WHERE escrow_id = ? AND state IN ('APPROVED', 'PARTIALLY_SPENT')
+                        """);
+                    PreparedStatement expireBill = connection.prepareStatement("""
+                        UPDATE fiscal_bill SET state = 'EXPIRED'
+                        WHERE escrow_id = ? AND state IN ('RESERVED', 'PARTIALLY_PAID')
                         """)) {
                 if (hasIncompletePayment(escrow.reservationId())) {
                     throw new PendingReservationPaymentException(escrow.reservationId());
@@ -757,6 +922,8 @@ public final class CivicDatabase implements AutoCloseable {
                 }
                 expireBudget.setString(1, escrowId.toString());
                 expireBudget.executeUpdate();
+                expireBill.setString(1, escrowId.toString());
+                expireBill.executeUpdate();
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -804,6 +971,13 @@ public final class CivicDatabase implements AutoCloseable {
                             SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
                         )
                           AND state IN ('APPROVED', 'PARTIALLY_SPENT')
+                        """);
+                    PreparedStatement cancelBill = connection.prepareStatement("""
+                        UPDATE fiscal_bill SET state = 'CANCELLED'
+                        WHERE escrow_id = (
+                            SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
+                        )
+                          AND state IN ('RESERVED', 'PARTIALLY_PAID')
                         """)) {
                 String state = reservationState(reservationId);
                 if (!"ACTIVE".equals(state)) {
@@ -828,6 +1002,8 @@ public final class CivicDatabase implements AutoCloseable {
                 releaseEscrow.executeUpdate();
                 releaseBudget.setString(1, reservationId.toString());
                 releaseBudget.executeUpdate();
+                cancelBill.setString(1, reservationId.toString());
+                cancelBill.executeUpdate();
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -882,6 +1058,11 @@ public final class CivicDatabase implements AutoCloseable {
         StoredReservation reservation = reservation(reservationId);
         if (reservation == null) {
             throw new IllegalArgumentException("Unknown Reservation " + reservationId);
+        }
+        String requiredRecipient = requiredRecipient(reservationId);
+        if (requiredRecipient != null && !requiredRecipient.equals(recipientAccount)) {
+            throw new RequiredRecipientMismatchException(
+                    reservationId, requiredRecipient, recipientAccount);
         }
         long remainingMinorUnits = Math.subtractExact(
                 reservation.amountMinorUnits(), reservation.settledMinorUnits());
@@ -1074,6 +1255,19 @@ public final class CivicDatabase implements AutoCloseable {
                             SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
                         )
                           AND state IN ('APPROVED', 'PARTIALLY_SPENT')
+                        """);
+                    PreparedStatement updateBill = connection.prepareStatement("""
+                        UPDATE fiscal_bill
+                        SET state = CASE
+                            WHEN (SELECT state FROM fiscal_escrow
+                                  WHERE escrow_id = fiscal_bill.escrow_id) = 'SETTLED'
+                            THEN 'PAID'
+                            ELSE 'PARTIALLY_PAID'
+                        END
+                        WHERE escrow_id = (
+                            SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
+                        )
+                          AND state IN ('RESERVED', 'PARTIALLY_PAID')
                         """)) {
                 settle.setLong(1, transaction.amountMinorUnits());
                 settle.setLong(2, transaction.amountMinorUnits());
@@ -1092,6 +1286,8 @@ public final class CivicDatabase implements AutoCloseable {
                 updateEscrow.executeUpdate();
                 updateBudget.setString(1, reservationId.toString());
                 updateBudget.executeUpdate();
+                updateBill.setString(1, reservationId.toString());
+                updateBill.executeUpdate();
                 if (recovery) {
                     insertRecoveryAudit(
                             transactionId,
@@ -1672,6 +1868,39 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 12");
             }
+            if (version < 13) {
+                statement.execute("""
+                        ALTER TABLE fiscal_escrow
+                        ADD COLUMN required_recipient_account TEXT
+                        """);
+                statement.execute("""
+                        CREATE TABLE fiscal_bill (
+                            bill_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            payer_account TEXT NOT NULL,
+                            beneficiary_account TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            kind TEXT NOT NULL CHECK (kind IN ('TAX', 'FEE', 'DUES')),
+                            purpose TEXT NOT NULL,
+                            due_at_epoch_millis INTEGER NOT NULL
+                                CHECK (due_at_epoch_millis >= 0),
+                            escrow_id TEXT UNIQUE REFERENCES fiscal_escrow(escrow_id),
+                            funding_service_identity TEXT,
+                            funding_request_id TEXT,
+                            state TEXT NOT NULL CHECK (state IN (
+                                'ISSUED', 'RESERVED', 'PARTIALLY_PAID',
+                                'PAID', 'CANCELLED', 'EXPIRED'
+                            )),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (funding_service_identity, funding_request_id),
+                            CHECK ((funding_service_identity IS NULL)
+                                = (funding_request_id IS NULL))
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 13");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -1788,6 +2017,22 @@ public final class CivicDatabase implements AutoCloseable {
             try (ResultSet result = query.executeQuery()) {
                 return result.next() ? result.getString(1) : null;
             }
+        }
+    }
+
+    private String requiredRecipient(UUID reservationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT required_recipient_account FROM fiscal_escrow
+                WHERE reservation_id = ?
+                """)) {
+            query.setString(1, reservationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getString(1) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read required payment recipient for Reservation " + reservationId,
+                    failure);
         }
     }
 
@@ -1949,6 +2194,7 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("external_object_id"),
                     result.getString("purpose"),
                     result.getLong("expires_at_epoch_millis"),
+                    result.getString("required_recipient_account"),
                     result.getString("state"));
         }
     }
@@ -1968,6 +2214,28 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("budget_code"),
                     result.getString("purpose"),
                     result.getLong("expires_at_epoch_millis"),
+                    escrowId == null ? null : UUID.fromString(escrowId),
+                    result.getLong("settled_minor_units"),
+                    result.getString("state"));
+        }
+    }
+
+    private static StoredFiscalBill readFiscalBill(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            String escrowId = result.getString("escrow_id");
+            return new StoredFiscalBill(
+                    UUID.fromString(result.getString("bill_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("payer_account"),
+                    result.getString("beneficiary_account"),
+                    result.getLong("amount_minor_units"),
+                    result.getString("kind"),
+                    result.getString("purpose"),
+                    result.getLong("due_at_epoch_millis"),
                     escrowId == null ? null : UUID.fromString(escrowId),
                     result.getLong("settled_minor_units"),
                     result.getString("state"));
