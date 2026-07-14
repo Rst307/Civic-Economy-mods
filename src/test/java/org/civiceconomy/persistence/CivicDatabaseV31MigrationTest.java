@@ -30,6 +30,7 @@ class CivicDatabaseV31MigrationTest {
             database.assessTerritoryFiscalValidity(
                     UUID.randomUUID(), "migration", "legacy-assessment", cycleId,
                     nationId, teamId, "minecraft:overworld", 1, 2, 100L,
+                    "ORDINARY",
                     "Legacy conclusion", 3_000L);
         }
         try (var connection = DriverManager.getConnection(
@@ -41,7 +42,7 @@ class CivicDatabaseV31MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(31, migrated.schemaVersion());
+            assertEquals(32, migrated.schemaVersion());
             assertEquals(
                     "EFFECTIVE",
                     migrated.territoryFiscalAssessment("migration", "legacy-assessment").validity());
@@ -50,6 +51,7 @@ class CivicDatabaseV31MigrationTest {
                     migrated.assessTerritoryFiscalValidity(
                                     UUID.randomUUID(), "migration", "new-assessment", cycleId,
                                     nationId, teamId, "minecraft:overworld", 2, 2, 50L,
+                                    "ORDINARY",
                                     "New assessment", 3_500L)
                             .validity());
         }

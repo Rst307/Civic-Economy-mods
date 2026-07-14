@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 31;
+    private static final int SCHEMA_VERSION = 32;
 
     private final Connection connection;
 
@@ -1703,6 +1703,7 @@ public final class CivicDatabase implements AutoCloseable {
             int chunkX,
             int chunkZ,
             long maintenanceDueMinorUnits,
+            String priority,
             String reason,
             long assessedAtEpochMillis) {
         StoredTerritoryFiscalAssessment replay = territoryFiscalAssessment(serviceIdentity, requestId);
@@ -1713,8 +1714,8 @@ public final class CivicDatabase implements AutoCloseable {
                 INSERT INTO territory_fiscal_assessment (
                     assessment_id, service_identity, request_id, cycle_id,
                     nation_id, ftb_team_id, dimension_id, chunk_x, chunk_z,
-                    maintenance_due_minor_units, validity, reason, assessed_at_epoch_millis
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    maintenance_due_minor_units, priority, validity, reason, assessed_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             insert.setString(1, assessmentId.toString());
             insert.setString(2, serviceIdentity);
@@ -1726,9 +1727,10 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setInt(8, chunkX);
             insert.setInt(9, chunkZ);
             insert.setLong(10, maintenanceDueMinorUnits);
-            insert.setString(11, "PENDING");
-            insert.setString(12, reason);
-            insert.setLong(13, assessedAtEpochMillis);
+            insert.setString(11, priority);
+            insert.setString(12, "PENDING");
+            insert.setString(13, reason);
+            insert.setLong(14, assessedAtEpochMillis);
             insert.executeUpdate();
             return territoryFiscalAssessment(serviceIdentity, requestId);
         } catch (SQLException failure) {
@@ -1749,6 +1751,28 @@ public final class CivicDatabase implements AutoCloseable {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to total Territory maintenance due", failure);
+        }
+    }
+
+    public synchronized List<StoredTerritoryFiscalAssessment> pendingTerritoryFiscalAssessments(
+            UUID cycleId, UUID nationId) {
+        List<StoredTerritoryFiscalAssessment> assessments = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_fiscal_assessment
+                WHERE cycle_id = ? AND nation_id = ? AND validity = 'PENDING'
+                ORDER BY priority, dimension_id, chunk_x, chunk_z, assessment_id
+                """)) {
+            query.setString(1, cycleId.toString());
+            query.setString(2, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    assessments.add(storedTerritoryFiscalAssessment(result));
+                }
+            }
+            return List.copyOf(assessments);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list pending Territory Fiscal Assessments", failure);
         }
     }
 
@@ -5422,8 +5446,17 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("""
-                        INSERT INTO territory_fiscal_assessment
-                        SELECT * FROM territory_fiscal_assessment_v30
+                        INSERT INTO territory_fiscal_assessment (
+                            assessment_id, service_identity, request_id, cycle_id,
+                            nation_id, ftb_team_id, dimension_id, chunk_x, chunk_z,
+                            maintenance_due_minor_units, validity, reason,
+                            assessed_at_epoch_millis
+                        )
+                        SELECT assessment_id, service_identity, request_id, cycle_id,
+                               nation_id, ftb_team_id, dimension_id, chunk_x, chunk_z,
+                               maintenance_due_minor_units, validity, reason,
+                               assessed_at_epoch_millis
+                        FROM territory_fiscal_assessment_v30
                         """);
                 statement.execute("DROP TABLE territory_fiscal_assessment_v30");
                 statement.execute("""
@@ -5463,6 +5496,17 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 31");
+            }
+            if (version < 32) {
+                statement.execute("""
+                        ALTER TABLE territory_fiscal_assessment
+                        ADD COLUMN priority TEXT NOT NULL DEFAULT 'ORDINARY'
+                        CHECK (priority IN (
+                            'CAPITAL', 'CAPITAL_CONNECTED_CORE', 'VALID_INFRASTRUCTURE',
+                            'ORDINARY', 'ENCLAVE_OR_CROSS_DIMENSION'
+                        ))
+                        """);
+                statement.execute("PRAGMA user_version = 32");
             }
             connection.commit();
         } catch (SQLException failure) {
@@ -5567,24 +5611,27 @@ public final class CivicDatabase implements AutoCloseable {
     private StoredTerritoryFiscalAssessment readTerritoryFiscalAssessment(
             PreparedStatement query) throws SQLException {
         try (ResultSet result = query.executeQuery()) {
-            if (!result.next()) {
-                return null;
-            }
-            return new StoredTerritoryFiscalAssessment(
-                    UUID.fromString(result.getString("assessment_id")),
-                    result.getString("service_identity"),
-                    result.getString("request_id"),
-                    UUID.fromString(result.getString("cycle_id")),
-                    UUID.fromString(result.getString("nation_id")),
-                    UUID.fromString(result.getString("ftb_team_id")),
-                    result.getString("dimension_id"),
-                    result.getInt("chunk_x"),
-                    result.getInt("chunk_z"),
-                    result.getLong("maintenance_due_minor_units"),
-                    result.getString("validity"),
-                    result.getString("reason"),
-                    result.getLong("assessed_at_epoch_millis"));
+            return result.next() ? storedTerritoryFiscalAssessment(result) : null;
         }
+    }
+
+    private static StoredTerritoryFiscalAssessment storedTerritoryFiscalAssessment(
+            ResultSet result) throws SQLException {
+        return new StoredTerritoryFiscalAssessment(
+                UUID.fromString(result.getString("assessment_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("cycle_id")),
+                UUID.fromString(result.getString("nation_id")),
+                UUID.fromString(result.getString("ftb_team_id")),
+                result.getString("dimension_id"),
+                result.getInt("chunk_x"),
+                result.getInt("chunk_z"),
+                result.getLong("maintenance_due_minor_units"),
+                result.getString("priority"),
+                result.getString("validity"),
+                result.getString("reason"),
+                result.getLong("assessed_at_epoch_millis"));
     }
 
     private StoredTerritoryMaintenanceSettlement readTerritoryMaintenanceSettlement(

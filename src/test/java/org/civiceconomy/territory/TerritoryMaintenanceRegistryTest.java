@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.NationId;
@@ -263,6 +264,73 @@ class TerritoryMaintenanceRegistryTest {
                                     8,
                                     9)
                             .validity());
+        }
+    }
+
+    @Test
+    void persistsPriorityAndListsPendingCandidatesDeterministically() {
+        UUID cycleId;
+        UUID capitalAssessmentId;
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle cycle = registry.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"), "cycle-priority", START, END));
+            cycleId = cycle.cycleId();
+            registry.assess(new AssessTerritoryFiscalValidity(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "ordinary-assessment",
+                    cycleId,
+                    NATION_ID,
+                    TEAM_ID,
+                    "minecraft:overworld",
+                    9,
+                    0,
+                    50L,
+                    TerritoryMaintenancePriority.ORDINARY,
+                    "Ordinary claim"));
+            TerritoryFiscalAssessment capital = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "capital-assessment",
+                            cycleId,
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            0,
+                            0,
+                            100L,
+                            TerritoryMaintenancePriority.CAPITAL,
+                            "Capital claim"));
+            capitalAssessmentId = capital.assessmentId();
+        }
+
+        try (CivicDatabase database = database()) {
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            assertEquals(
+                    List.of(
+                            new TerritoryMaintenanceCandidate(
+                                    capitalAssessmentId,
+                                    TerritoryMaintenancePriority.CAPITAL,
+                                    "minecraft:overworld",
+                                    0,
+                                    0,
+                                    org.civiceconomy.fiscal.MoneyAmount.ofMinorUnits(100L)),
+                            new TerritoryMaintenanceCandidate(
+                                    registry.assessment(
+                                                    cycleId,
+                                                    NATION_ID,
+                                                    TEAM_ID,
+                                                    "minecraft:overworld",
+                                                    9,
+                                                    0)
+                                            .assessmentId(),
+                                    TerritoryMaintenancePriority.ORDINARY,
+                                    "minecraft:overworld",
+                                    9,
+                                    0,
+                                    org.civiceconomy.fiscal.MoneyAmount.ofMinorUnits(50L))),
+                    registry.pendingCandidates(cycleId, NATION_ID));
         }
     }
 

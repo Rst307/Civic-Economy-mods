@@ -240,6 +240,7 @@ public final class LightmansCurrencyPermanentDestructionsGameTests {
                     20,
                     30,
                     101L,
+                    org.civiceconomy.territory.TerritoryMaintenancePriority.ORDINARY.name(),
                     "Real maintenance GameTest assessment",
                     System.currentTimeMillis());
             database.confirmMonetarySupplyChange(

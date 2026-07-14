@@ -14,12 +14,14 @@ public record AssessTerritoryFiscalValidity(
         int chunkX,
         int chunkZ,
         long maintenanceDueMinorUnits,
+        TerritoryMaintenancePriority priority,
         String reason) {
     public AssessTerritoryFiscalValidity {
         if (serviceIdentity == null
                 || cycleId == null
                 || nationId == null
-                || ftbTeamId == null) {
+                || ftbTeamId == null
+                || priority == null) {
             throw new IllegalArgumentException(
                     "Territory Fiscal Assessment cannot contain null values");
         }
@@ -32,5 +34,30 @@ public record AssessTerritoryFiscalValidity(
                 || maintenanceDueMinorUnits < 0L) {
             throw new IllegalArgumentException("Territory Fiscal Assessment values are invalid");
         }
+    }
+
+    public AssessTerritoryFiscalValidity(
+            ServiceIdentity serviceIdentity,
+            String requestId,
+            UUID cycleId,
+            NationId nationId,
+            UUID ftbTeamId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ,
+            long maintenanceDueMinorUnits,
+            String reason) {
+        this(
+                serviceIdentity,
+                requestId,
+                cycleId,
+                nationId,
+                ftbTeamId,
+                dimensionId,
+                chunkX,
+                chunkZ,
+                maintenanceDueMinorUnits,
+                TerritoryMaintenancePriority.ORDINARY,
+                reason);
     }
 }

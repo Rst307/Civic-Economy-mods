@@ -2,6 +2,8 @@ package org.civiceconomy.territory;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.IdempotencyConflictException;
@@ -76,6 +78,7 @@ public final class TerritoryMaintenanceRegistry {
                 request.chunkX(),
                 request.chunkZ(),
                 request.maintenanceDueMinorUnits(),
+                request.priority().name(),
                 request.reason(),
                 clock.millis()));
     }
@@ -113,6 +116,28 @@ public final class TerritoryMaintenanceRegistry {
             throw new IllegalArgumentException("Unknown Territory Fiscal Assessment");
         }
         return toAssessment(stored);
+    }
+
+    public List<TerritoryMaintenanceCandidate> pendingCandidates(
+            UUID cycleId, NationId nationId) {
+        if (cycleId == null || nationId == null) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance candidate query cannot contain null values");
+        }
+        return database.pendingTerritoryFiscalAssessments(cycleId, nationId.value()).stream()
+                .map(stored -> new TerritoryMaintenanceCandidate(
+                        stored.assessmentId(),
+                        TerritoryMaintenancePriority.valueOf(stored.priority()),
+                        stored.dimensionId(),
+                        stored.chunkX(),
+                        stored.chunkZ(),
+                        MoneyAmount.ofMinorUnits(stored.maintenanceDueMinorUnits())))
+                .sorted(Comparator.comparing(TerritoryMaintenanceCandidate::priority)
+                        .thenComparing(TerritoryMaintenanceCandidate::dimensionId)
+                        .thenComparingInt(TerritoryMaintenanceCandidate::chunkX)
+                        .thenComparingInt(TerritoryMaintenanceCandidate::chunkZ)
+                        .thenComparing(TerritoryMaintenanceCandidate::assessmentId))
+                .toList();
     }
 
     public TerritoryMaintenanceSettlement confirmSettlement(
@@ -169,6 +194,7 @@ public final class TerritoryMaintenanceRegistry {
                 || stored.chunkX() != request.chunkX()
                 || stored.chunkZ() != request.chunkZ()
                 || stored.maintenanceDueMinorUnits() != request.maintenanceDueMinorUnits()
+                || !stored.priority().equals(request.priority().name())
                 || !stored.reason().equals(request.reason())) {
             throw new IdempotencyConflictException(
                     request.serviceIdentity(), request.requestId());
@@ -213,6 +239,7 @@ public final class TerritoryMaintenanceRegistry {
                 stored.chunkX(),
                 stored.chunkZ(),
                 MoneyAmount.ofMinorUnits(stored.maintenanceDueMinorUnits()),
+                TerritoryMaintenancePriority.valueOf(stored.priority()),
                 TerritoryFiscalValidity.valueOf(stored.validity()),
                 stored.reason(),
                 Instant.ofEpochMilli(stored.assessedAtEpochMillis()));

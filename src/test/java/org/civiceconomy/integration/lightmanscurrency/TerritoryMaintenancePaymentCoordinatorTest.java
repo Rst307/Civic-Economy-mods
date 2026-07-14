@@ -127,6 +127,7 @@ class TerritoryMaintenancePaymentCoordinatorTest {
                     10,
                     20,
                     1L,
+                    org.civiceconomy.territory.TerritoryMaintenancePriority.ORDINARY.name(),
                     "One-minor-unit assessment",
                     NOW.toEpochMilli());
             database.confirmMonetarySupplyChange(
@@ -198,6 +199,7 @@ class TerritoryMaintenancePaymentCoordinatorTest {
                     10,
                     20,
                     101L,
+                    org.civiceconomy.territory.TerritoryMaintenancePriority.ORDINARY.name(),
                     "Maintenance payment test assessment",
                     NOW.toEpochMilli());
             database.confirmMonetarySupplyChange(

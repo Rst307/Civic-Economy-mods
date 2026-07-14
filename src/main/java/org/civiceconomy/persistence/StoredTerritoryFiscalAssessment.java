@@ -13,6 +13,7 @@ public record StoredTerritoryFiscalAssessment(
         int chunkX,
         int chunkZ,
         long maintenanceDueMinorUnits,
+        String priority,
         String validity,
         String reason,
         long assessedAtEpochMillis) {}

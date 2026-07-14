@@ -17,6 +17,7 @@ public record TerritoryFiscalAssessment(
         int chunkX,
         int chunkZ,
         MoneyAmount maintenanceDue,
+        TerritoryMaintenancePriority priority,
         TerritoryFiscalValidity validity,
         String reason,
         Instant assessedAt) {
@@ -27,6 +28,7 @@ public record TerritoryFiscalAssessment(
                 || nationId == null
                 || ftbTeamId == null
                 || maintenanceDue == null
+                || priority == null
                 || validity == null
                 || assessedAt == null) {
             throw new IllegalArgumentException(
