@@ -1,0 +1,16 @@
+package org.civiceconomy.nation;
+
+public enum NationFiscalPermission {
+    VIEW_ACCOUNT,
+    VIEW_LEDGER,
+    DRAFT_BUDGET,
+    APPROVE_BUDGET,
+    INITIATE_PAYMENT,
+    APPROVE_PAYMENT,
+    MANAGE_WITHDRAWAL,
+    MANAGE_TERRITORY_FINANCE,
+    MANAGE_ISSUANCE,
+    MANAGE_FISCAL_ROLES,
+    MANAGE_PUBLIC_POLICY,
+    MANAGE_RECOVERY
+}

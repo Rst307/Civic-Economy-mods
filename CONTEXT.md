@@ -58,6 +58,14 @@ _Avoid_: 临时退籍、离队即转籍、有效公民
 把正式 Citizenship 与绑定 FTB Team 的当前成员事实进行服务端校验的过程；它可以启动或解除国籍纠错宽限，但不会把新 Team 成员自动登记为 Citizen。
 _Avoid_: FTB 成员同步、自动入籍、团队即国家
 
+**国家财政角色（Nation Fiscal Role）**:
+一个 Citizen 在单一 Nation 内当前持有的精确财政权限集合；它不继承 FTB 等级，并在该 Citizen 不再具有有效国家归属时停止生效。
+_Avoid_: FTB 等级、全局 OP、服务身份
+
+**国家财政权限（Nation Fiscal Permission）**:
+国家治理授予某个 Citizen 的单一、明确财政动作权限，例如批准预算、管理提现或管理领土财政。
+_Avoid_: 全局财政访问、模糊官职、账户余额
+
 **首都（Capital）**:
 国家唯一的领土连续性与财政治理锚点；只有 Nation Activation 才能建立首个首都。
 _Avoid_: 出生点、任意已占领区块、FTB 团队基地

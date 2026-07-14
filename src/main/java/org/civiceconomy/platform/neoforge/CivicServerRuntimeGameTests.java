@@ -94,7 +94,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted fiscal administration command actions");
         helper.assertValueEqual(
-                Set.of("apply", "status", "cancel", "activate", "population"),
+                Set.of("apply", "status", "cancel", "activate", "population", "role"),
                 economy.getChild("nation").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -305,6 +305,80 @@ public final class CivicServerRuntimeGameTests {
     }
 
     @GameTest(template = "empty", timeoutTicks = 300)
+    public static void realFtbNationHeadGrantsOwnFiscalPermissionOffThread(
+            GameTestHelper helper) {
+        ServerPlayer head = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-fiscal-role-head"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(head);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        java.time.Instant joinedAt = java.time.Instant.now();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "fiscal-role-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    new CitizenshipRegistry(
+                                    database,
+                                    java.time.Duration.ofDays(7),
+                                    java.time.Clock.fixed(joinedAt, java.time.ZoneOffset.UTC))
+                            .join(new JoinCitizenship(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "fiscal-role-head-" + UUID.randomUUID(),
+                                    head.getUUID(),
+                                    nation.nationId()));
+                    return nation.nationId();
+                })
+                .whenComplete((nationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                int result = helper.getLevel()
+                                        .getServer()
+                                        .getCommands()
+                                        .getDispatcher()
+                                        .execute(
+                                                "civic economy nation role grant " + head.getUUID()
+                                                        + " APPROVE_BUDGET GameTest appointment",
+                                                head.createCommandSourceStack().withSuppressedOutput());
+                                helper.assertValueEqual(
+                                        1, result, "Nation fiscal role grant command result");
+                                commandStarted.set(true);
+                            } catch (Throwable commandFailure) {
+                                asyncFailure.set(commandFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "Nation fiscal role async state"
+                            : "Nation fiscal role async failure: " + failure.getMessage());
+            helper.assertTrue(commandStarted.get(), "Nation fiscal role command started");
+            assertNationFiscalPermissionGranted(
+                    helper, databaseFile, team.getId(), head.getUUID());
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 300)
     public static void debugWorldHeadActivatesClaimedCapitalOffThread(GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(
                 helper.getLevel().getServer(),
@@ -444,6 +518,41 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect fiscal service command result", failure);
+        }
+    }
+
+    private static void assertNationFiscalPermissionGranted(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID ftbTeamId,
+            UUID headPlayerId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT grant_row.actor_player_id,
+                               grant_row.player_id,
+                               grant_row.permission,
+                               grant_row.reason
+                        FROM nation_fiscal_permission_grant grant_row
+                        JOIN nation_registry nation
+                          ON nation.nation_id = grant_row.nation_id
+                        LEFT JOIN nation_fiscal_permission_revocation revocation
+                          ON revocation.grant_id = grant_row.grant_id
+                        WHERE nation.ftb_team_id = ?
+                          AND revocation.grant_id IS NULL
+                        """)) {
+            query.setString(1, ftbTeamId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Nation Fiscal Permission grant");
+                helper.assertValueEqual(
+                        headPlayerId.toString(), result.getString(1), "server-derived Nation head actor");
+                helper.assertValueEqual(
+                        headPlayerId.toString(), result.getString(2), "exact Citizen scope");
+                helper.assertValueEqual("APPROVE_BUDGET", result.getString(3), "exact fiscal permission");
+                helper.assertValueEqual("GameTest appointment", result.getString(4), "grant audit reason");
+                helper.assertFalse(result.next(), "duplicate Nation Fiscal Permission grant");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Nation fiscal role command result", failure);
         }
     }
 

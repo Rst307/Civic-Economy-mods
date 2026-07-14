@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 22;
+    private static final int SCHEMA_VERSION = 23;
 
     private final Connection connection;
 
@@ -1554,6 +1554,187 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Citizenship players for Nation " + nationId, failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionGrant nationFiscalPermissionGrant(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_fiscal_permission_grant
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationFiscalPermissionGrant(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Fiscal Permission grant", failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionGrant nationFiscalPermissionGrant(UUID grantId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_fiscal_permission_grant WHERE grant_id = ?
+                """)) {
+            query.setString(1, grantId.toString());
+            return readNationFiscalPermissionGrant(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Fiscal Permission grant", failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionGrant activeNationFiscalPermissionGrant(
+            UUID nationId, UUID playerId, String permission) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT grant_row.* FROM nation_fiscal_permission_grant grant_row
+                LEFT JOIN nation_fiscal_permission_revocation revocation
+                    ON revocation.grant_id = grant_row.grant_id
+                WHERE grant_row.nation_id = ?
+                    AND grant_row.player_id = ?
+                    AND grant_row.permission = ?
+                    AND revocation.grant_id IS NULL
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setString(2, playerId.toString());
+            query.setString(3, permission);
+            return readNationFiscalPermissionGrant(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read active Nation Fiscal Permission grant", failure);
+        }
+    }
+
+    public synchronized List<StoredNationFiscalPermissionGrant> activeNationFiscalPermissionGrants(
+            UUID nationId, UUID playerId) {
+        List<StoredNationFiscalPermissionGrant> grants = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT grant_row.* FROM nation_fiscal_permission_grant grant_row
+                LEFT JOIN nation_fiscal_permission_revocation revocation
+                    ON revocation.grant_id = grant_row.grant_id
+                WHERE grant_row.nation_id = ?
+                    AND grant_row.player_id = ?
+                    AND revocation.grant_id IS NULL
+                ORDER BY grant_row.permission, grant_row.granted_at_epoch_millis, grant_row.grant_id
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setString(2, playerId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    grants.add(storedNationFiscalPermissionGrant(result));
+                }
+            }
+            return List.copyOf(grants);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list active Nation Fiscal Permission grants", failure);
+        }
+    }
+
+    public synchronized List<StoredNationFiscalPermissionGrant> activeNationFiscalPermissionGrants(
+            UUID nationId) {
+        List<StoredNationFiscalPermissionGrant> grants = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT grant_row.* FROM nation_fiscal_permission_grant grant_row
+                LEFT JOIN nation_fiscal_permission_revocation revocation
+                    ON revocation.grant_id = grant_row.grant_id
+                WHERE grant_row.nation_id = ? AND revocation.grant_id IS NULL
+                ORDER BY grant_row.player_id, grant_row.permission,
+                         grant_row.granted_at_epoch_millis, grant_row.grant_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    grants.add(storedNationFiscalPermissionGrant(result));
+                }
+            }
+            return List.copyOf(grants);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list Nation Fiscal Permission grants", failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionGrant grantNationFiscalPermission(
+            UUID grantId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID actorPlayerId,
+            UUID playerId,
+            String permission,
+            String reason,
+            long grantedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO nation_fiscal_permission_grant (
+                    grant_id, service_identity, request_id, nation_id, actor_player_id,
+                    player_id, permission, reason, granted_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, grantId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, nationId.toString());
+            insert.setString(5, actorPlayerId.toString());
+            insert.setString(6, playerId.toString());
+            insert.setString(7, permission);
+            insert.setString(8, reason);
+            insert.setLong(9, grantedAtEpochMillis);
+            insert.executeUpdate();
+            return nationFiscalPermissionGrant(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to grant Nation Fiscal Permission", failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionRevocation nationFiscalPermissionRevocation(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_fiscal_permission_revocation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationFiscalPermissionRevocation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Fiscal Permission revocation", failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionRevocation nationFiscalPermissionRevocation(
+            UUID grantId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_fiscal_permission_revocation WHERE grant_id = ?
+                """)) {
+            query.setString(1, grantId.toString());
+            return readNationFiscalPermissionRevocation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Fiscal Permission revocation", failure);
+        }
+    }
+
+    public synchronized StoredNationFiscalPermissionRevocation revokeNationFiscalPermission(
+            UUID revocationId,
+            UUID grantId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID actorPlayerId,
+            String reason,
+            long revokedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO nation_fiscal_permission_revocation (
+                    revocation_id, grant_id, service_identity, request_id, nation_id,
+                    actor_player_id, reason, revoked_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, revocationId.toString());
+            insert.setString(2, grantId.toString());
+            insert.setString(3, serviceIdentity);
+            insert.setString(4, requestId);
+            insert.setString(5, nationId.toString());
+            insert.setString(6, actorPlayerId.toString());
+            insert.setString(7, reason);
+            insert.setLong(8, revokedAtEpochMillis);
+            insert.executeUpdate();
+            return nationFiscalPermissionRevocation(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to revoke Nation Fiscal Permission", failure);
         }
     }
 
@@ -3522,6 +3703,49 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 22");
             }
+            if (version < 23) {
+                statement.execute("""
+                        CREATE TABLE nation_fiscal_permission_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            player_id TEXT NOT NULL,
+                            permission TEXT NOT NULL CHECK (permission IN (
+                                'VIEW_ACCOUNT', 'VIEW_LEDGER', 'DRAFT_BUDGET',
+                                'APPROVE_BUDGET', 'INITIATE_PAYMENT', 'APPROVE_PAYMENT',
+                                'MANAGE_WITHDRAWAL', 'MANAGE_TERRITORY_FINANCE',
+                                'MANAGE_ISSUANCE', 'MANAGE_FISCAL_ROLES',
+                                'MANAGE_PUBLIC_POLICY', 'MANAGE_RECOVERY'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX nation_fiscal_permission_grant_player
+                        ON nation_fiscal_permission_grant (nation_id, player_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_fiscal_permission_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES nation_fiscal_permission_grant(grant_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 23");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -3558,6 +3782,45 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("account_id"),
                     result.getString("reason"),
                     result.getLong("granted_at_epoch_millis"));
+        }
+    }
+
+    private StoredNationFiscalPermissionGrant readNationFiscalPermissionGrant(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedNationFiscalPermissionGrant(result) : null;
+        }
+    }
+
+    private static StoredNationFiscalPermissionGrant storedNationFiscalPermissionGrant(
+            ResultSet result) throws SQLException {
+        return new StoredNationFiscalPermissionGrant(
+                UUID.fromString(result.getString("grant_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("nation_id")),
+                UUID.fromString(result.getString("actor_player_id")),
+                UUID.fromString(result.getString("player_id")),
+                result.getString("permission"),
+                result.getString("reason"),
+                result.getLong("granted_at_epoch_millis"));
+    }
+
+    private StoredNationFiscalPermissionRevocation readNationFiscalPermissionRevocation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationFiscalPermissionRevocation(
+                    UUID.fromString(result.getString("revocation_id")),
+                    UUID.fromString(result.getString("grant_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("reason"),
+                    result.getLong("revoked_at_epoch_millis"));
         }
     }
 

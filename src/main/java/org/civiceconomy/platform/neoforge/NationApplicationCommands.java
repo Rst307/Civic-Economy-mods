@@ -16,6 +16,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.UuidArgument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
@@ -35,7 +36,15 @@ import org.civiceconomy.nation.NationApplicationRegistry;
 import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationFoundingPolicy;
 import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
+import org.civiceconomy.nation.GrantNationFiscalPermission;
+import org.civiceconomy.nation.FtbTeamsNationProvider;
+import org.civiceconomy.nation.NationFiscalAuthorityRegistry;
+import org.civiceconomy.nation.NationFiscalPermission;
+import org.civiceconomy.nation.NationFiscalPermissionGrant;
 import org.civiceconomy.nation.NationPopulationCalculator;
+import org.civiceconomy.nation.NationRegistry;
+import org.civiceconomy.nation.RevokeNationFiscalPermission;
+import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.nation.NationalTreasuryProvisioner;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.NationTeam;
@@ -50,6 +59,8 @@ final class NationApplicationCommands {
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final ServiceIdentity FOUNDING_SERVICE =
             new ServiceIdentity("civiceconomy-founding");
+    private static final ServiceIdentity GOVERNANCE_SERVICE =
+            new ServiceIdentity("civiceconomy-governance");
 
     private NationApplicationCommands() {}
 
@@ -66,8 +77,160 @@ final class NationApplicationCommands {
                                         StringArgumentType.getString(context, "reason")))))
                 .then(Commands.literal("population")
                         .executes(context -> population(context.getSource())))
+                .then(roleCommand())
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> roleCommand() {
+        return Commands.literal("role")
+                .then(Commands.literal("list")
+                        .executes(context -> listRoles(context.getSource())))
+                .then(Commands.literal("grant")
+                        .then(Commands.argument("playerId", UuidArgument.uuid())
+                                .then(Commands.argument("permission", StringArgumentType.word())
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(context -> grantRole(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(context, "playerId"),
+                                                        StringArgumentType.getString(
+                                                                context, "permission"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))))
+                .then(Commands.literal("revoke")
+                        .then(Commands.argument("grantId", UuidArgument.uuid())
+                                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                        .executes(context -> revokeRole(
+                                                context.getSource(),
+                                                UuidArgument.getUuid(context, "grantId"),
+                                                StringArgumentType.getString(context, "reason"))))));
+    }
+
+    private static int listRoles(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer actor = source.getPlayerOrException();
+        NationTeam team = FtbNationTeamDirectory.live()
+                .findEffectiveTeamForPlayer(actor.getUUID())
+                .orElseThrow(() -> new SecurityException(
+                        "You must be an effective member of a registered Nation"));
+        Clock commandClock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationFiscalCommandContext governance =
+                            fiscalGovernance(database, team, commandClock);
+                    if (governance.provider().findForCitizen(actor.getUUID()).isEmpty()) {
+                        throw new SecurityException(
+                                "Your effective Citizenship is unavailable or suspended");
+                    }
+                    return governance.authorities().activeGrants(governance.nationId());
+                })
+                .whenComplete((grants, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation fiscal role list", failure);
+                    } else {
+                        String details = grants.stream()
+                                .map(NationApplicationCommands::formatFiscalGrant)
+                                .collect(Collectors.joining(", "));
+                        source.sendSuccess(
+                                () -> Component.literal("Nation fiscal roles [" + details + "]"),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation fiscal role query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int grantRole(
+            CommandSourceStack source,
+            UUID targetPlayerId,
+            String permissionName,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer actor = source.getPlayerOrException();
+        NationTeam team = ownedTeam(actor);
+        NationFiscalPermission permission = NationFiscalPermission.valueOf(
+                permissionName.toUpperCase(Locale.ROOT));
+        Clock commandClock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationFiscalCommandContext governance =
+                            fiscalGovernance(database, team, commandClock);
+                    return governance.authorities().grant(new GrantNationFiscalPermission(
+                                    GOVERNANCE_SERVICE,
+                                    "player-role-grant:" + UUID.randomUUID(),
+                                    governance.nationId(),
+                                    actor.getUUID(),
+                                    targetPlayerId,
+                                    permission,
+                                    reason));
+                })
+                .whenComplete((grant, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation fiscal role grant", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal("Granted " + formatFiscalGrant(grant)),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation fiscal role grant queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int revokeRole(CommandSourceStack source, UUID grantId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer actor = source.getPlayerOrException();
+        NationTeam team = ownedTeam(actor);
+        Clock commandClock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationFiscalCommandContext governance =
+                            fiscalGovernance(database, team, commandClock);
+                    return governance.authorities().revoke(new RevokeNationFiscalPermission(
+                                    GOVERNANCE_SERVICE,
+                                    "player-role-revoke:" + UUID.randomUUID(),
+                                    governance.nationId(),
+                                    actor.getUUID(),
+                                    grantId,
+                                    reason));
+                })
+                .whenComplete((revocation, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation fiscal role revocation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Revoked Nation fiscal grant " + revocation.grantId()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation fiscal role revocation queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatFiscalGrant(NationFiscalPermissionGrant grant) {
+        return grant.grantId() + " player=" + grant.playerId()
+                + " permission=" + grant.permission();
+    }
+
+    private static NationFiscalCommandContext fiscalGovernance(
+            CivicDatabase database, NationTeam team, Clock clock) {
+        NationTeamDirectory teamSnapshot = snapshot(team);
+        NationRegistry nations = new NationRegistry(database, teamSnapshot);
+        var nation = nations.findByFtbTeam(team.teamId())
+                .orElseThrow(() -> new IllegalStateException(
+                        "Your FTB Team is not bound to a Nation"));
+        CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                database, CITIZENSHIP_TRANSFER_COOLDOWN, clock);
+        FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
+                nations,
+                citizenships,
+                new CitizenshipCorrectionGraceRegistry(database, clock),
+                teamSnapshot);
+        return new NationFiscalCommandContext(
+                nation.nationId(),
+                provider,
+                new NationFiscalAuthorityRegistry(database, provider, clock));
     }
 
     private static int apply(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
@@ -382,4 +545,9 @@ final class NationApplicationCommands {
             int effectiveCandidates,
             int requiredEffectiveCandidates,
             boolean debugWorld) {}
+
+    private record NationFiscalCommandContext(
+            org.civiceconomy.nation.NationId nationId,
+            FtbTeamsNationProvider provider,
+            NationFiscalAuthorityRegistry authorities) {}
 }
