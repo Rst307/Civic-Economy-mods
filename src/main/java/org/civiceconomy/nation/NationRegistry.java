@@ -1,5 +1,6 @@
 package org.civiceconomy.nation;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.IdempotencyConflictException;
@@ -45,6 +46,12 @@ public final class NationRegistry {
 
     public Optional<RegisteredNation> findByFtbTeam(UUID ftbTeamId) {
         return Optional.ofNullable(database.nationByFtbTeam(ftbTeamId)).map(NationRegistry::toRegisteredNation);
+    }
+
+    public List<RegisteredNation> registeredNations() {
+        return database.registeredNations().stream()
+                .map(NationRegistry::toRegisteredNation)
+                .toList();
     }
 
     private static RegisteredNation toRegisteredNation(StoredNation stored) {

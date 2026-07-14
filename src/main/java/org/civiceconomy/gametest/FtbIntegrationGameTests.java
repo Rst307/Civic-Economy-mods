@@ -10,6 +10,8 @@ import dev.ftb.mods.ftbteams.api.Team;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
@@ -26,6 +28,9 @@ import org.civiceconomy.integration.ftb.FtbTeamFacts;
 import org.civiceconomy.integration.ftb.FtbTeamsAdapter;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.FtbTeamsNationProvider;
+import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
+import org.civiceconomy.nation.CitizenshipRegistry;
+import org.civiceconomy.nation.JoinCitizenship;
 import org.civiceconomy.nation.NationFacts;
 import org.civiceconomy.nation.NationProvider;
 import org.civiceconomy.nation.NationRegistry;
@@ -114,7 +119,13 @@ public final class FtbIntegrationGameTests {
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
             NationRegistry registry = new NationRegistry(database, teams);
-            NationProvider provider = new FtbTeamsNationProvider(registry, teams);
+            CitizenshipRegistry citizenships =
+                    new CitizenshipRegistry(database, Duration.ZERO, Clock.systemUTC());
+            NationProvider provider = new FtbTeamsNationProvider(
+                    registry,
+                    citizenships,
+                    new CitizenshipCorrectionGraceRegistry(database, Clock.systemUTC()),
+                    teams);
             helper.assertTrue(
                     provider.findForCitizen(team.getOwner()).isEmpty(),
                     "an ordinary unregistered FTB Team is not a Nation");
@@ -123,6 +134,13 @@ public final class FtbIntegrationGameTests {
                     new ServiceIdentity("civiceconomy-gametest"),
                     "register-real-ftb-team-" + UUID.randomUUID(),
                     team.getId()));
+            for (UUID memberId : team.getMembers()) {
+                citizenships.join(new JoinCitizenship(
+                        new ServiceIdentity("civiceconomy-gametest"),
+                        "join-real-ftb-citizen-" + memberId + "-" + UUID.randomUUID(),
+                        memberId,
+                        registered.nationId()));
+            }
             NationFacts facts = provider.find(registered.nationId()).orElseThrow();
 
             helper.assertFalse(

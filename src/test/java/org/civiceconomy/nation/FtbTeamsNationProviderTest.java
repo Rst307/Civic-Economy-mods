@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -28,7 +30,8 @@ class FtbTeamsNationProviderTest {
                 .add(new NationTeam(teamId, ownerId, Set.of(ownerId)));
 
         try (CivicDatabase database = database()) {
-            NationProvider provider = new FtbTeamsNationProvider(new NationRegistry(database, teams), teams);
+            NationProvider provider = provider(
+                    database, new NationRegistry(database, teams), teams);
 
             assertTrue(provider.findForCitizen(ownerId).isEmpty());
         }
@@ -47,9 +50,23 @@ class FtbTeamsNationProviderTest {
             NationRegistry registry = new NationRegistry(database, teams);
             RegisteredNation registered = registry.register(new RegisterNation(
                     new ServiceIdentity("civiceconomy"), "register-current-facts", teamId));
-            NationProvider provider = new FtbTeamsNationProvider(registry, teams);
-
             teams.add(new NationTeam(teamId, currentHeadId, Set.of(currentHeadId, citizenId)));
+            CitizenshipRegistry citizenships = citizenships(database);
+            citizenships.join(new JoinCitizenship(
+                    new ServiceIdentity("civiceconomy"),
+                    "provider-current-head",
+                    currentHeadId,
+                    registered.nationId()));
+            citizenships.join(new JoinCitizenship(
+                    new ServiceIdentity("civiceconomy"),
+                    "provider-current-citizen",
+                    citizenId,
+                    registered.nationId()));
+            NationProvider provider = new FtbTeamsNationProvider(
+                    registry,
+                    citizenships,
+                    new CitizenshipCorrectionGraceRegistry(database, Clock.systemUTC()),
+                    teams);
 
             NationFacts facts = provider.find(registered.nationId()).orElseThrow();
             assertEquals(currentHeadId, facts.headId());
@@ -68,7 +85,7 @@ class FtbTeamsNationProviderTest {
             NationRegistry registry = new NationRegistry(database, teams);
             RegisteredNation registered = registry.register(new RegisterNation(
                     new ServiceIdentity("civiceconomy"), "register-missing-binding", teamId));
-            NationProvider provider = new FtbTeamsNationProvider(registry, teams);
+            NationProvider provider = provider(database, registry, teams);
 
             teams.remove(teamId);
 
@@ -89,7 +106,17 @@ class FtbTeamsNationProviderTest {
             NationRegistry registry = new NationRegistry(database, teams);
             RegisteredNation registered = registry.register(new RegisterNation(
                     new ServiceIdentity("civiceconomy"), "register-citizen", teamId));
-            NationProvider provider = new FtbTeamsNationProvider(registry, teams);
+            CitizenshipRegistry citizenships = citizenships(database);
+            citizenships.join(new JoinCitizenship(
+                    new ServiceIdentity("civiceconomy"),
+                    "provider-registered-citizen",
+                    citizenId,
+                    registered.nationId()));
+            NationProvider provider = new FtbTeamsNationProvider(
+                    registry,
+                    citizenships,
+                    new CitizenshipCorrectionGraceRegistry(database, Clock.systemUTC()),
+                    teams);
 
             NationFacts facts = provider.findForCitizen(citizenId).orElseThrow();
             assertEquals(registered.nationId(), facts.nationId());
@@ -106,6 +133,19 @@ class FtbTeamsNationProviderTest {
                         "1.21-2.3.0.5",
                         "2101.1.10",
                         "2101.1.20"));
+    }
+
+    private static NationProvider provider(
+            CivicDatabase database, NationRegistry registry, NationTeamDirectory teams) {
+        return new FtbTeamsNationProvider(
+                registry,
+                citizenships(database),
+                new CitizenshipCorrectionGraceRegistry(database, Clock.systemUTC()),
+                teams);
+    }
+
+    private static CitizenshipRegistry citizenships(CivicDatabase database) {
+        return new CitizenshipRegistry(database, Duration.ZERO, Clock.systemUTC());
     }
 
     private static final class TestNationTeamDirectory implements NationTeamDirectory {

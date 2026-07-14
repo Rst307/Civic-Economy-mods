@@ -40,6 +40,10 @@ import org.civiceconomy.nation.NationApplicationId;
 import org.civiceconomy.nation.NationApplicationRegistry;
 import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
+import org.civiceconomy.nation.CitizenshipRegistry;
+import org.civiceconomy.nation.JoinCitizenship;
+import org.civiceconomy.nation.NationRegistry;
+import org.civiceconomy.nation.RegisterNation;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -237,6 +241,66 @@ public final class CivicServerRuntimeGameTests {
             helper.assertTrue(observed != null, "scheduled-expiry Nation Application");
             assertNationApplicationAutomaticallyExpired(
                     helper, databaseFile, observed, headId);
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 1800)
+    public static void runtimeStartsCorrectionGraceForRealFtbDepartureOffThread(
+            GameTestHelper helper) {
+        ServerPlayer owner = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-reconciliation-owner"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(owner);
+        UUID citizenId = UUID.randomUUID();
+        ((AbstractTeamBase) team).addMember(citizenId, TeamRank.MEMBER);
+        team.markDirty();
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        java.time.Instant joinedAt = java.time.Instant.now();
+        AtomicBoolean departed = new AtomicBoolean();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "reconciliation-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    new CitizenshipRegistry(
+                                    database,
+                                    java.time.Duration.ofDays(7),
+                                    java.time.Clock.fixed(joinedAt, java.time.ZoneOffset.UTC))
+                            .join(new JoinCitizenship(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "reconciliation-citizen-" + UUID.randomUUID(),
+                                    citizenId,
+                                    nation.nationId()));
+                    return nation.nationId();
+                })
+                .whenComplete((nationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            ((AbstractTeamBase) team).removeMember(citizenId);
+                            team.markDirty();
+                            departed.set(true);
+                        }));
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(asyncFailure.get() == null, "Citizenship reconciliation setup");
+            helper.assertTrue(departed.get(), "real FTB member departure");
+            assertCitizenshipCorrectionGraceStarted(
+                    helper, databaseFile, team.getId(), citizenId);
         });
     }
 
@@ -509,6 +573,41 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect automatic Nation Application expiry", failure);
+        }
+    }
+
+    private static void assertCitizenshipCorrectionGraceStarted(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID ftbTeamId,
+            UUID playerId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT grace.ftb_team_id, grace.resolution,
+                               grace.deadline_epoch_millis - grace.started_at_epoch_millis,
+                               citizenship.ended_at_epoch_millis
+                        FROM citizenship_correction_grace grace
+                        JOIN citizenship_period citizenship
+                          ON citizenship.citizenship_id = grace.citizenship_id
+                        WHERE grace.player_id = ?
+                        ORDER BY grace.started_at_epoch_millis DESC
+                        LIMIT 1
+                        """)) {
+            query.setString(1, playerId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Citizenship Correction Grace");
+                helper.assertValueEqual(ftbTeamId.toString(), result.getString(1), "grace FTB Team");
+                helper.assertTrue(result.getString(2) == null, "active Citizenship Correction Grace");
+                helper.assertValueEqual(
+                        java.time.Duration.ofDays(2).toMillis(),
+                        result.getLong(3),
+                        "Citizenship Correction Grace duration");
+                helper.assertTrue(
+                        result.getObject(4) == null,
+                        "formal Citizenship remains during Correction Grace");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Citizenship Correction Grace", failure);
         }
     }
 

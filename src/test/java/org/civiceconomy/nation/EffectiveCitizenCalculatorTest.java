@@ -49,7 +49,11 @@ class EffectiveCitizenCalculatorTest {
                     Instant.parse("2026-07-02T22:00:00Z").toEpochMilli(),
                     Instant.parse("2026-07-03T02:00:00Z").toEpochMilli()));
             EffectiveCitizenCalculator calculator = new EffectiveCitizenCalculator(
-                    transferCitizenship, onlineTime, Duration.ofDays(60), Duration.ofHours(8));
+                    transferCitizenship,
+                    new CitizenshipCorrectionGraceRegistry(database, Clock.fixed(asOf, ZoneOffset.UTC)),
+                    onlineTime,
+                    Duration.ofDays(60),
+                    Duration.ofHours(8));
 
             EffectiveCitizenContribution first = calculator.contribution(playerId, firstNationId, asOf);
             EffectiveCitizenContribution second = calculator.contribution(playerId, secondNationId, asOf);
@@ -88,12 +92,67 @@ class EffectiveCitizenCalculatorTest {
                     Instant.parse("2026-07-10T00:00:00Z").toEpochMilli(),
                     Instant.parse("2026-07-10T10:00:00Z").toEpochMilli()));
             EffectiveCitizenCalculator calculator = new EffectiveCitizenCalculator(
-                    citizenships, onlineTime, Duration.ofDays(60), Duration.ofHours(8));
+                    citizenships,
+                    new CitizenshipCorrectionGraceRegistry(database, Clock.fixed(asOf, ZoneOffset.UTC)),
+                    onlineTime,
+                    Duration.ofDays(60),
+                    Duration.ofHours(8));
 
             EffectiveCitizenContribution contribution = calculator.contribution(playerId, nationId, asOf);
 
             assertEquals(Duration.ofHours(10).toMillis(), contribution.attributedOnlineMillis());
             assertEquals(1D, contribution.contribution(), 0.0000001D);
+        }
+    }
+
+    @Test
+    void correctionGraceImmediatelySuspendsPopulationContribution() {
+        UUID playerId = UUID.fromString("0754f914-13ae-43c4-a667-334e8b8e6ed1");
+        UUID teamId = UUID.fromString("cf059f2f-6fb2-446c-a465-eeb5095f571c");
+        Instant joinedAt = Instant.parse("2026-07-01T00:00:00Z");
+        Instant missingAt = Instant.parse("2026-07-14T08:00:00Z");
+        Instant asOf = missingAt.plus(Duration.ofHours(2));
+
+        try (CivicDatabase database = database()) {
+            NationId nationId = registerNation(database, "effective-correction-grace").nationId();
+            CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                    database, Duration.ZERO, Clock.fixed(joinedAt, ZoneOffset.UTC));
+            Citizenship citizenship = citizenships.join(new JoinCitizenship(
+                    new ServiceIdentity("civiceconomy"),
+                    "effective-correction-join",
+                    playerId,
+                    nationId));
+            CitizenshipCorrectionGraceRegistry corrections =
+                    new CitizenshipCorrectionGraceRegistry(
+                            database, Clock.fixed(missingAt, ZoneOffset.UTC));
+            corrections.start(new StartCitizenshipCorrectionGrace(
+                    new ServiceIdentity("civiceconomy-citizenship-reconciliation"),
+                    "effective-correction-start",
+                    citizenship.citizenshipId(),
+                    playerId,
+                    nationId,
+                    teamId,
+                    missingAt.plus(Duration.ofDays(2)),
+                    "Player left the bound team"));
+            OnlineTimeLedger onlineTime = new OnlineTimeLedger(database);
+            onlineTime.record(new RecordOnlineTime(
+                    new ServiceIdentity("civiceconomy-server"),
+                    "effective-correction-interval",
+                    playerId,
+                    missingAt.minus(Duration.ofHours(1)).toEpochMilli(),
+                    missingAt.plus(Duration.ofHours(2)).toEpochMilli()));
+            EffectiveCitizenCalculator calculator = new EffectiveCitizenCalculator(
+                    citizenships,
+                    corrections,
+                    onlineTime,
+                    Duration.ofDays(60),
+                    Duration.ofHours(8));
+
+            EffectiveCitizenContribution contribution =
+                    calculator.contribution(playerId, nationId, asOf);
+
+            assertEquals(Duration.ofHours(1).toMillis(), contribution.attributedOnlineMillis());
+            assertEquals(0.125D, contribution.contribution(), 0.0000001D);
         }
     }
 

@@ -67,6 +67,15 @@ public final class CitizenshipRegistry {
         return Optional.ofNullable(database.currentCitizenship(playerId)).map(CitizenshipRegistry::toCitizenship);
     }
 
+    public List<Citizenship> currentForNation(NationId nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException("Nation identity cannot be null");
+        }
+        return database.currentCitizenships(nationId.value()).stream()
+                .map(CitizenshipRegistry::toCitizenship)
+                .toList();
+    }
+
     public Citizenship leave(LeaveCitizenship request) {
         StoredCitizenship replay = database.citizenshipLeave(
                 request.serviceIdentity().value(), request.requestId());

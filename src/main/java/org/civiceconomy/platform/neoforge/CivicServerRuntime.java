@@ -7,7 +7,11 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
@@ -25,6 +29,13 @@ import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
+import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
+import org.civiceconomy.nation.CitizenshipReconciler;
+import org.civiceconomy.nation.CitizenshipReconciliationResult;
+import org.civiceconomy.nation.NationRegistry;
+import org.civiceconomy.nation.NationTeam;
+import org.civiceconomy.nation.NationTeamDirectory;
+import org.civiceconomy.nation.RegisteredNation;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.slf4j.Logger;
@@ -33,7 +44,21 @@ public final class CivicServerRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int CHECKPOINT_INTERVAL_TICKS = 20 * 60;
     private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
+    private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
+    private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
+    private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
+    private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
+        @Override
+        public Optional<NationTeam> find(UUID teamId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<NationTeam> findEffectiveTeamForPlayer(UUID playerId) {
+            return Optional.empty();
+        }
+    };
     private static volatile CivicServerRuntime current;
 
     private final Clock clock;
@@ -84,6 +109,7 @@ public final class CivicServerRuntime {
         }
         state = new RuntimeState(server, sessions, writer);
         scheduleNationApplicationExpiry(state);
+        scheduleCitizenshipReconciliation(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
             LOGGER.warn(
@@ -133,6 +159,12 @@ public final class CivicServerRuntime {
                 >= NATION_APPLICATION_EXPIRY_INTERVAL_TICKS) {
             current.ticksSinceNationApplicationExpiry = 0;
             scheduleNationApplicationExpiry(current);
+        }
+        current.ticksSinceCitizenshipReconciliation++;
+        if (current.ticksSinceCitizenshipReconciliation
+                >= CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS) {
+            current.ticksSinceCitizenshipReconciliation = 0;
+            scheduleCitizenshipReconciliation(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -194,6 +226,113 @@ public final class CivicServerRuntime {
                 });
     }
 
+    private void scheduleCitizenshipReconciliation(RuntimeState current) {
+        if (!current.citizenshipReconciliationQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database ->
+                        new NationRegistry(database, NO_TEAM_LOOKUPS).registeredNations())
+                .whenComplete((nations, listFailure) -> {
+                    if (listFailure != null) {
+                        finishCitizenshipReconciliation(current, null, listFailure);
+                        return;
+                    }
+                    current.server.execute(() -> {
+                        try {
+                            snapshotAndReconcile(current, nations, scanClock);
+                        } catch (RuntimeException failure) {
+                            finishCitizenshipReconciliation(current, null, failure);
+                        }
+                    });
+                });
+    }
+
+    private void snapshotAndReconcile(
+            RuntimeState current, List<RegisteredNation> nations, Clock scanClock) {
+        if (state != current) {
+            current.citizenshipReconciliationQueued.set(false);
+            return;
+        }
+        Map<UUID, NationTeam> snapshots = new HashMap<>();
+        FtbNationTeamDirectory liveTeams = FtbNationTeamDirectory.live();
+        int unavailable = 0;
+        for (RegisteredNation nation : nations) {
+            Optional<NationTeam> team = liveTeams.find(nation.ftbTeamId());
+            if (team.isPresent()) {
+                snapshots.put(nation.ftbTeamId(), team.orElseThrow());
+            } else {
+                unavailable++;
+            }
+        }
+        if (unavailable > 0) {
+            LOGGER.warn(
+                    "Skipped Citizenship reconciliation for {} Nation(s) with unavailable FTB Team facts",
+                    unavailable);
+        }
+        NationTeamDirectory snapshotDirectory = snapshotDirectory(snapshots);
+        current.writer.submitDatabase(database -> {
+                    int started = 0;
+                    int restored = 0;
+                    int ended = 0;
+                    CitizenshipReconciler reconciler = new CitizenshipReconciler(
+                            database,
+                            snapshotDirectory,
+                            CITIZENSHIP_CORRECTION_GRACE,
+                            CITIZENSHIP_TRANSFER_COOLDOWN,
+                            scanClock);
+                    for (RegisteredNation nation : nations) {
+                        if (!snapshots.containsKey(nation.ftbTeamId())) {
+                            continue;
+                        }
+                        CitizenshipReconciliationResult result =
+                                reconciler.reconcile(nation.nationId());
+                        started += result.startedGraceCount();
+                        restored += result.restoredCount();
+                        ended += result.endedCitizenshipCount();
+                    }
+                    return new CitizenshipReconciliationResult(started, restored, ended);
+                })
+                .whenComplete((result, failure) ->
+                        finishCitizenshipReconciliation(current, result, failure));
+    }
+
+    private static NationTeamDirectory snapshotDirectory(Map<UUID, NationTeam> snapshots) {
+        Map<UUID, NationTeam> immutable = Map.copyOf(snapshots);
+        return new NationTeamDirectory() {
+            @Override
+            public Optional<NationTeam> find(UUID teamId) {
+                return Optional.ofNullable(immutable.get(teamId));
+            }
+
+            @Override
+            public Optional<NationTeam> findEffectiveTeamForPlayer(UUID playerId) {
+                return immutable.values().stream()
+                        .filter(team -> team.citizens().contains(playerId))
+                        .findFirst();
+            }
+        };
+    }
+
+    private static void finishCitizenshipReconciliation(
+            RuntimeState current,
+            CitizenshipReconciliationResult result,
+            Throwable failure) {
+        current.citizenshipReconciliationQueued.set(false);
+        if (failure != null) {
+            LOGGER.error("Automatic Citizenship reconciliation failed closed", failure);
+        } else if (result != null
+                && (result.startedGraceCount() > 0
+                        || result.restoredCount() > 0
+                        || result.endedCitizenshipCount() > 0)) {
+            LOGGER.info(
+                    "Citizenship reconciliation started {} grace(s), restored {}, ended {}",
+                    result.startedGraceCount(),
+                    result.restoredCount(),
+                    result.endedCitizenshipCount());
+        }
+    }
+
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
         return mods.version(modId)
                 .orElseThrow(() -> new IllegalStateException("Loaded mod version is unavailable: " + modId));
@@ -204,8 +343,10 @@ public final class CivicServerRuntime {
         private final OnlineSessionAccumulator sessions;
         private final AsyncOnlineTimeWriter writer;
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
+        private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
+        private int ticksSinceCitizenshipReconciliation;
         private boolean failureLogged;
 
         private RuntimeState(

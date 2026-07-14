@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 20;
+    private static final int SCHEMA_VERSION = 22;
 
     private final Connection connection;
 
@@ -1190,6 +1190,23 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredNation> registeredNations() {
+        List<StoredNation> nations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_registry
+                ORDER BY registered_at_epoch_millis, nation_id
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    nations.add(readNation(result));
+                }
+            }
+            return List.copyOf(nations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list registered Nations", failure);
+        }
+    }
+
     public synchronized StoredCitizenship joinCitizenship(
             UUID citizenshipId,
             String serviceIdentity,
@@ -1242,6 +1259,221 @@ public final class CivicDatabase implements AutoCloseable {
             return readCitizenship(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read current Citizenship for player " + playerId, failure);
+        }
+    }
+
+    public synchronized List<StoredCitizenship> currentCitizenships(UUID nationId) {
+        List<StoredCitizenship> current = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_period
+                WHERE nation_id = ? AND ended_at_epoch_millis IS NULL
+                ORDER BY joined_at_epoch_millis, citizenship_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    current.add(readCitizenship(result));
+                }
+            }
+            return List.copyOf(current);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Citizenships for Nation " + nationId, failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace startCitizenshipCorrectionGrace(
+            UUID graceId,
+            UUID citizenshipId,
+            UUID playerId,
+            UUID nationId,
+            UUID ftbTeamId,
+            String serviceIdentity,
+            String requestId,
+            String reason,
+            long startedAtEpochMillis,
+            long deadlineEpochMillis) {
+        StoredCitizenshipCorrectionGrace replay =
+                citizenshipCorrectionGraceStart(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO citizenship_correction_grace (
+                    grace_id, citizenship_id, player_id, nation_id, ftb_team_id,
+                    start_service_identity, start_request_id, reason,
+                    started_at_epoch_millis, deadline_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, graceId.toString());
+            insert.setString(2, citizenshipId.toString());
+            insert.setString(3, playerId.toString());
+            insert.setString(4, nationId.toString());
+            insert.setString(5, ftbTeamId.toString());
+            insert.setString(6, serviceIdentity);
+            insert.setString(7, requestId);
+            insert.setString(8, reason);
+            insert.setLong(9, startedAtEpochMillis);
+            insert.setLong(10, deadlineEpochMillis);
+            insert.executeUpdate();
+            return citizenshipCorrectionGrace(graceId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to start Citizenship Correction Grace for " + citizenshipId,
+                    failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace citizenshipCorrectionGraceStart(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace
+                WHERE start_service_identity = ? AND start_request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readCitizenshipCorrectionGrace(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Citizenship Correction Grace start request", failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace citizenshipCorrectionGraceResolution(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace
+                WHERE resolution_service_identity = ? AND resolution_request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readCitizenshipCorrectionGrace(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Citizenship Correction Grace resolution request", failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace resolveCitizenshipCorrectionGrace(
+            UUID graceId,
+            String serviceIdentity,
+            String requestId,
+            String resolution,
+            String reason,
+            long resolvedAtEpochMillis) {
+        StoredCitizenshipCorrectionGrace replay =
+                citizenshipCorrectionGraceResolution(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE citizenship_correction_grace
+                SET resolution = ?, resolution_service_identity = ?,
+                    resolution_request_id = ?, resolution_reason = ?,
+                    resolved_at_epoch_millis = ?
+                WHERE grace_id = ? AND resolution IS NULL
+                """)) {
+            update.setString(1, resolution);
+            update.setString(2, serviceIdentity);
+            update.setString(3, requestId);
+            update.setString(4, reason);
+            update.setLong(5, resolvedAtEpochMillis);
+            update.setString(6, graceId.toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Citizenship Correction Grace is not active " + graceId);
+            }
+            return citizenshipCorrectionGrace(graceId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to resolve Citizenship Correction Grace " + graceId, failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace activeCitizenshipCorrectionGraceByPlayer(
+            UUID playerId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace
+                WHERE player_id = ? AND resolution IS NULL
+                """)) {
+            query.setString(1, playerId.toString());
+            return readCitizenshipCorrectionGrace(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read active Citizenship Correction Grace for player " + playerId,
+                    failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace activeCitizenshipCorrectionGraceByCitizenship(
+            UUID citizenshipId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace
+                WHERE citizenship_id = ? AND resolution IS NULL
+                """)) {
+            query.setString(1, citizenshipId.toString());
+            return readCitizenshipCorrectionGrace(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read active Citizenship Correction Grace for Citizenship "
+                            + citizenshipId,
+                    failure);
+        }
+    }
+
+    public synchronized List<StoredCitizenshipCorrectionGrace> activeCitizenshipCorrectionGracesByNation(
+            UUID nationId) {
+        List<StoredCitizenshipCorrectionGrace> active = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace
+                WHERE nation_id = ? AND resolution IS NULL
+                ORDER BY started_at_epoch_millis, grace_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    active.add(readCitizenshipCorrectionGrace(result));
+                }
+            }
+            return List.copyOf(active);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read active Citizenship Correction Graces for Nation " + nationId,
+                    failure);
+        }
+    }
+
+    public synchronized List<StoredCitizenshipCorrectionGrace> citizenshipCorrectionGraceHistory(
+            UUID playerId) {
+        List<StoredCitizenshipCorrectionGrace> history = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace
+                WHERE player_id = ?
+                ORDER BY started_at_epoch_millis, grace_id
+                """)) {
+            query.setString(1, playerId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    history.add(readCitizenshipCorrectionGrace(result));
+                }
+            }
+            return List.copyOf(history);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Citizenship Correction Grace history for player " + playerId,
+                    failure);
+        }
+    }
+
+    public synchronized StoredCitizenshipCorrectionGrace citizenshipCorrectionGrace(UUID graceId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM citizenship_correction_grace WHERE grace_id = ?
+                """)) {
+            query.setString(1, graceId.toString());
+            return readCitizenshipCorrectionGrace(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Citizenship Correction Grace " + graceId, failure);
         }
     }
 
@@ -3205,12 +3437,88 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 20");
             }
+            if (version < 21) {
+                statement.execute("""
+                        CREATE TABLE citizenship_correction_grace (
+                            grace_id TEXT PRIMARY KEY,
+                            citizenship_id TEXT NOT NULL
+                                REFERENCES citizenship_period(citizenship_id),
+                            player_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ftb_team_id TEXT NOT NULL,
+                            start_service_identity TEXT NOT NULL,
+                            start_request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            started_at_epoch_millis INTEGER NOT NULL
+                                CHECK (started_at_epoch_millis >= 0),
+                            deadline_epoch_millis INTEGER NOT NULL
+                                CHECK (deadline_epoch_millis > started_at_epoch_millis),
+                            resolution TEXT CHECK (resolution IN (
+                                'RESTORED', 'CITIZENSHIP_ENDED'
+                            )),
+                            resolution_service_identity TEXT,
+                            resolution_request_id TEXT,
+                            resolved_at_epoch_millis INTEGER CHECK (
+                                resolved_at_epoch_millis IS NULL
+                                OR resolved_at_epoch_millis >= started_at_epoch_millis
+                            ),
+                            CHECK ((resolution IS NULL
+                                    AND resolution_service_identity IS NULL
+                                    AND resolution_request_id IS NULL
+                                    AND resolved_at_epoch_millis IS NULL)
+                                OR (resolution IS NOT NULL
+                                    AND resolution_service_identity IS NOT NULL
+                                    AND resolution_request_id IS NOT NULL
+                                    AND resolved_at_epoch_millis IS NOT NULL)),
+                            UNIQUE (start_service_identity, start_request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX citizenship_one_active_correction_grace
+                        ON citizenship_correction_grace (citizenship_id)
+                        WHERE resolution IS NULL
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX citizenship_correction_grace_resolution_request
+                        ON citizenship_correction_grace (
+                            resolution_service_identity, resolution_request_id
+                        )
+                        WHERE resolution_request_id IS NOT NULL
+                        """);
+                statement.execute("PRAGMA user_version = 21");
+            }
+            if (version < 22) {
+                if (!tableHasColumn("citizenship_correction_grace", "resolution_reason")) {
+                    statement.execute("""
+                            ALTER TABLE citizenship_correction_grace
+                            ADD COLUMN resolution_reason TEXT
+                            """);
+                }
+                statement.execute("""
+                        UPDATE citizenship_correction_grace
+                        SET resolution_reason = 'civiceconomy-legacy-v21-resolution'
+                        WHERE resolution IS NOT NULL AND resolution_reason IS NULL
+                        """);
+                statement.execute("PRAGMA user_version = 22");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
             throw failure;
         } finally {
             connection.setAutoCommit(true);
+        }
+    }
+
+    private boolean tableHasColumn(String tableName, String columnName) throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet columns = statement.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+            while (columns.next()) {
+                if (columnName.equals(columns.getString("name"))) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -3277,6 +3585,35 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getLong("effective_at_epoch_millis"),
                     result.getLong("transitioned_at_epoch_millis"));
         }
+    }
+
+    private StoredCitizenshipCorrectionGrace readCitizenshipCorrectionGrace(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? readCitizenshipCorrectionGrace(result) : null;
+        }
+    }
+
+    private static StoredCitizenshipCorrectionGrace readCitizenshipCorrectionGrace(
+            ResultSet result) throws SQLException {
+        return new StoredCitizenshipCorrectionGrace(
+                UUID.fromString(result.getString("grace_id")),
+                UUID.fromString(result.getString("citizenship_id")),
+                UUID.fromString(result.getString("player_id")),
+                UUID.fromString(result.getString("nation_id")),
+                UUID.fromString(result.getString("ftb_team_id")),
+                result.getString("start_service_identity"),
+                result.getString("start_request_id"),
+                result.getString("reason"),
+                result.getLong("started_at_epoch_millis"),
+                result.getLong("deadline_epoch_millis"),
+                result.getString("resolution"),
+                result.getString("resolution_service_identity"),
+                result.getString("resolution_request_id"),
+                result.getString("resolution_reason"),
+                result.getObject("resolved_at_epoch_millis") == null
+                        ? null
+                        : result.getLong("resolved_at_epoch_millis"));
     }
 
     private StoredNationActivation readNationActivation(PreparedStatement query)
@@ -3570,13 +3907,17 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            return new StoredNation(
-                    UUID.fromString(result.getString("nation_id")),
-                    result.getString("service_identity"),
-                    result.getString("request_id"),
-                    UUID.fromString(result.getString("ftb_team_id")),
-                    result.getLong("registered_at_epoch_millis"));
+            return readNation(result);
         }
+    }
+
+    private static StoredNation readNation(ResultSet result) throws SQLException {
+        return new StoredNation(
+                UUID.fromString(result.getString("nation_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("ftb_team_id")),
+                result.getLong("registered_at_epoch_millis"));
     }
 
     private StoredCitizenship citizenship(UUID citizenshipId) {
