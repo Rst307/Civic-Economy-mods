@@ -76,7 +76,7 @@ class TerritoryMaintenanceRegistryTest {
                             evidence.publicFundPaymentId(),
                             evidence.destructionOperationId(),
                             "Maintenance funded"));
-            assertEquals(TerritoryFiscalValidity.EFFECTIVE, settlement.validity());
+            assertEquals(TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED, settlement.outcome());
 
             TerritoryFiscalAssessment replay = registry.assess(new AssessTerritoryFiscalValidity(
                     new ServiceIdentity("civiceconomy-territory"),
@@ -174,7 +174,7 @@ class TerritoryMaintenanceRegistryTest {
                             cycle.cycleId(),
                             NATION_ID,
                             "Insufficient maintenance funds"));
-            assertEquals(TerritoryFiscalValidity.SUSPENDED, suspended.validity());
+            assertEquals(TerritoryMaintenanceSettlementOutcome.UNFUNDED, suspended.outcome());
             assertTrue(suspended.reservationId().isEmpty());
             assertTrue(suspended.publicFundPaymentId().isEmpty());
             assertTrue(suspended.destructionOperationId().isEmpty());
@@ -332,6 +332,178 @@ class TerritoryMaintenanceRegistryTest {
                                     org.civiceconomy.fiscal.MoneyAmount.ofMinorUnits(50L))),
                     registry.pendingCandidates(cycleId, NATION_ID));
         }
+    }
+
+    @Test
+    void partialSettlementFundsCapitalAndSuspendsOrdinaryTerritory() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle cycle = registry.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"), "cycle-partial", START, END));
+            TerritoryFiscalAssessment ordinary = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "partial-ordinary",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            9,
+                            0,
+                            50L,
+                            TerritoryMaintenancePriority.ORDINARY,
+                            "Ordinary claim"));
+            TerritoryFiscalAssessment capital = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "partial-capital",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            0,
+                            0,
+                            100L,
+                            TerritoryMaintenancePriority.CAPITAL,
+                            "Capital claim"));
+            SettlementEvidence evidence = committedSettlementEvidence(
+                    database, cycle.cycleId(), "partial", 100L, 40L, 60L);
+
+            TerritoryMaintenanceSettlement settlement = registry.confirmSettlement(
+                    new ConfirmTerritoryMaintenanceSettlement(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "partial-settlement",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            evidence.reservationId(),
+                            evidence.publicFundPaymentId(),
+                            evidence.destructionOperationId(),
+                            "Partial maintenance funding"));
+
+            assertEquals(TerritoryMaintenanceSettlementOutcome.PARTIALLY_FUNDED, settlement.outcome());
+            assertEquals(List.of(capital.assessmentId()), settlement.fundedAssessmentIds());
+            assertEquals(List.of(ordinary.assessmentId()), settlement.suspendedAssessmentIds());
+            assertTrue(registry.isEffective(
+                    cycle.cycleId(), NATION_ID, TEAM_ID, "minecraft:overworld", 0, 0));
+            assertFalse(registry.isEffective(
+                    cycle.cycleId(), NATION_ID, TEAM_ID, "minecraft:overworld", 9, 0));
+        }
+    }
+
+    @Test
+    void databaseRejectsCallerSuppliedPartitionThatViolatesPersistedPriority() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle cycle = registry.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "cycle-forged-partition",
+                    START,
+                    END));
+            TerritoryFiscalAssessment capital = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "forged-capital",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            0,
+                            0,
+                            100L,
+                            TerritoryMaintenancePriority.CAPITAL,
+                            "Capital claim"));
+            TerritoryFiscalAssessment ordinary = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "forged-ordinary",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            9,
+                            0,
+                            50L,
+                            TerritoryMaintenancePriority.ORDINARY,
+                            "Ordinary claim"));
+            SettlementEvidence evidence = committedSettlementEvidence(
+                    database, cycle.cycleId(), "forged", 100L, 40L, 60L);
+
+            assertThrows(SecurityException.class, () ->
+                    database.confirmTerritoryMaintenanceSettlement(
+                            UUID.randomUUID(),
+                            "civiceconomy-territory",
+                            "forged-settlement",
+                            cycle.cycleId(),
+                            NATION_ID.value(),
+                            evidence.reservationId(),
+                            evidence.publicFundPaymentId(),
+                            evidence.destructionOperationId(),
+                            List.of(ordinary.assessmentId()),
+                            List.of(capital.assessmentId()),
+                            "Forged maintenance priority",
+                            START.toEpochMilli()));
+
+            assertEquals(
+                    TerritoryFiscalValidity.PENDING,
+                    registry.assessment(
+                                    cycle.cycleId(),
+                                    NATION_ID,
+                                    TEAM_ID,
+                                    "minecraft:overworld",
+                                    0,
+                                    0)
+                            .validity());
+            assertEquals(
+                    TerritoryFiscalValidity.PENDING,
+                    registry.assessment(
+                                    cycle.cycleId(),
+                                    NATION_ID,
+                                    TEAM_ID,
+                                    "minecraft:overworld",
+                                    9,
+                                    0)
+                            .validity());
+            assertEquals(
+                    null,
+                    database.territoryMaintenanceSettlement(
+                            "civiceconomy-territory", "forged-settlement"));
+        }
+    }
+
+    private SettlementEvidence committedSettlementEvidence(
+            CivicDatabase database,
+            UUID cycleId,
+            String requestPrefix,
+            long total,
+            long publicFundAmount,
+            long destructionAmount) {
+        String service = "civiceconomy-territory";
+        String treasury = "nation:" + NATION_ID.value() + ":treasury";
+        var reservation = database.reserve(
+                service, requestPrefix + "-reserve", treasury, total, "Maintenance " + cycleId);
+        var payment = database.preparePayment(
+                service,
+                requestPrefix + "-public-fund",
+                reservation.reservationId(),
+                "system:territory:public-maintenance-fund",
+                publicFundAmount);
+        database.markExternalApplied(payment.transactionId());
+        database.commitPayment(payment.transactionId(), reservation.reservationId());
+        database.confirmMonetarySupplyChange(
+                UUID.randomUUID(), service, requestPrefix + "-issuance", "ISSUANCE", total,
+                "mint:" + requestPrefix, "Fixture issuance", START.toEpochMilli(), 1_000L);
+        var destruction = database.preparePermanentDestruction(
+                UUID.randomUUID(), service, requestPrefix + "-destruction", treasury,
+                destructionAmount, "Maintenance " + cycleId, START.toEpochMilli());
+        database.commitPermanentDestruction(
+                destruction.operationId(), START.plusSeconds(1).toEpochMilli());
+        database.releaseReservation(
+                UUID.randomUUID(), service, requestPrefix + "-release", reservation.reservationId(),
+                "Release destroyed share", START.plusSeconds(2).toEpochMilli());
+        return new SettlementEvidence(
+                reservation.reservationId(), payment.transactionId(), destruction.operationId());
     }
 
     private void registerNation(CivicDatabase database) {

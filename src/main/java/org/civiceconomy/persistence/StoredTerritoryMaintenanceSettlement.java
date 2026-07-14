@@ -1,6 +1,7 @@
 package org.civiceconomy.persistence;
 
 import java.util.UUID;
+import java.util.List;
 
 public record StoredTerritoryMaintenanceSettlement(
         UUID settlementId,
@@ -11,6 +12,13 @@ public record StoredTerritoryMaintenanceSettlement(
         UUID reservationId,
         UUID publicFundPaymentId,
         UUID destructionOperationId,
-        String validity,
+        String outcome,
+        List<UUID> fundedAssessmentIds,
+        List<UUID> suspendedAssessmentIds,
         String reason,
-        long settledAtEpochMillis) {}
+        long settledAtEpochMillis) {
+    public StoredTerritoryMaintenanceSettlement {
+        fundedAssessmentIds = List.copyOf(fundedAssessmentIds);
+        suspendedAssessmentIds = List.copyOf(suspendedAssessmentIds);
+    }
+}

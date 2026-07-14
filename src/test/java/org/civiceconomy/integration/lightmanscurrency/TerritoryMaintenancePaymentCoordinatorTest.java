@@ -28,6 +28,7 @@ import org.civiceconomy.territory.ChargeTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 import org.civiceconomy.territory.TerritoryFiscalValidity;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
+import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -91,7 +92,9 @@ class TerritoryMaintenancePaymentCoordinatorTest {
 
             assertEquals(MoneyAmount.ofMinorUnits(41L), payment.publicFundAmount());
             assertEquals(MoneyAmount.ofMinorUnits(60L), payment.destroyedAmount());
-            assertEquals(TerritoryFiscalValidity.EFFECTIVE, payment.settlement().validity());
+            assertEquals(
+                    TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED,
+                    payment.settlement().outcome());
             assertEquals(899L, balances.get(TREASURY));
             assertEquals(41L, balances.get(PUBLIC_FUND));
             assertEquals(940L, database.cumulativeNetIssuanceMinorUnits());
@@ -159,7 +162,9 @@ class TerritoryMaintenancePaymentCoordinatorTest {
 
             assertEquals(MoneyAmount.ZERO, payment.destroyedAmount());
             assertEquals(MoneyAmount.ofMinorUnits(1L), payment.publicFundAmount());
-            assertEquals(TerritoryFiscalValidity.EFFECTIVE, payment.settlement().validity());
+            assertEquals(
+                    TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED,
+                    payment.settlement().outcome());
             assertEquals(0L, balances.get(TREASURY));
             assertEquals(1L, balances.get(PUBLIC_FUND));
             assertEquals(1L, database.cumulativeNetIssuanceMinorUnits());

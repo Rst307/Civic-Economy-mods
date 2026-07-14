@@ -148,6 +148,16 @@ public final class TerritoryMaintenanceRegistry {
             requireSettlementPayload(replay, request);
             return toSettlement(replay);
         }
+        long available = database.territoryMaintenanceSettlementEvidenceAmount(
+                request.serviceIdentity().value(),
+                request.nationId().value(),
+                request.reservationId(),
+                request.publicFundPaymentId(),
+                request.destructionOperationId());
+        TerritoryMaintenancePriorityDecision decision =
+                new TerritoryMaintenancePriorityPolicy().select(
+                        pendingCandidates(request.cycleId(), request.nationId()),
+                        MoneyAmount.ofMinorUnits(available));
         return toSettlement(database.confirmTerritoryMaintenanceSettlement(
                 UUID.randomUUID(),
                 request.serviceIdentity().value(),
@@ -157,6 +167,12 @@ public final class TerritoryMaintenanceRegistry {
                 request.reservationId(),
                 request.publicFundPaymentId(),
                 request.destructionOperationId(),
+                decision.funded().stream()
+                        .map(TerritoryMaintenanceCandidate::assessmentId)
+                        .toList(),
+                decision.suspended().stream()
+                        .map(TerritoryMaintenanceCandidate::assessmentId)
+                        .toList(),
                 request.reason(),
                 clock.millis()));
     }
@@ -168,7 +184,8 @@ public final class TerritoryMaintenanceRegistry {
             if (!replay.cycleId().equals(request.cycleId())
                     || !replay.nationId().equals(request.nationId().value())
                     || !replay.reason().equals(request.reason())
-                    || !replay.validity().equals(TerritoryFiscalValidity.SUSPENDED.name())) {
+                    || !replay.outcome().equals(
+                            TerritoryMaintenanceSettlementOutcome.UNFUNDED.name())) {
                 throw new IdempotencyConflictException(
                         request.serviceIdentity(), request.requestId());
             }
@@ -256,7 +273,9 @@ public final class TerritoryMaintenanceRegistry {
                 Optional.ofNullable(stored.reservationId()),
                 Optional.ofNullable(stored.publicFundPaymentId()),
                 Optional.ofNullable(stored.destructionOperationId()),
-                TerritoryFiscalValidity.valueOf(stored.validity()),
+                TerritoryMaintenanceSettlementOutcome.valueOf(stored.outcome()),
+                stored.fundedAssessmentIds(),
+                stored.suspendedAssessmentIds(),
                 stored.reason(),
                 Instant.ofEpochMilli(stored.settledAtEpochMillis()));
     }

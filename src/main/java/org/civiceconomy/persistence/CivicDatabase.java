@@ -13,12 +13,19 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import org.civiceconomy.fiscal.MoneyAmount;
+import org.civiceconomy.territory.TerritoryMaintenanceCandidate;
+import org.civiceconomy.territory.TerritoryMaintenancePriority;
+import org.civiceconomy.territory.TerritoryMaintenancePriorityDecision;
+import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 32;
+    private static final int SCHEMA_VERSION = 33;
 
     private final Connection connection;
 
@@ -1790,6 +1797,51 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized long territoryMaintenanceSettlementEvidenceAmount(
+            String serviceIdentity,
+            UUID nationId,
+            UUID reservationId,
+            UUID publicFundPaymentId,
+            UUID destructionOperationId) {
+        String treasury = "nation:" + nationId + ":treasury";
+        StoredReservation reservation = reservationForSettlement(reservationId);
+        StoredPaymentTransaction payment = paymentTransaction(publicFundPaymentId);
+        StoredPermanentDestructionOperation destruction = destructionOperationId == null
+                ? null
+                : permanentDestructionOperation(destructionOperationId);
+        if (reservation == null
+                || !reservation.serviceIdentity().equals(serviceIdentity)
+                || !reservation.sourceAccount().equals(treasury)
+                || payment == null
+                || !payment.serviceIdentity().equals(serviceIdentity)
+                || !payment.reservationId().equals(reservationId)
+                || !payment.sourceAccount().equals(treasury)
+                || !payment.recipientAccount().equals("system:territory:public-maintenance-fund")
+                || !payment.kind().equals("PAYMENT")
+                || !payment.state().equals("CIVIC_COMMITTED")
+                || payment.refundedMinorUnits() != 0L
+                || reservation.settledMinorUnits() != payment.amountMinorUnits()
+                || (destruction != null
+                        && (!destruction.serviceIdentity().equals(serviceIdentity)
+                                || !destruction.sourceAccount().equals(treasury)
+                                || !destruction.state().equals("COMMITTED")))) {
+            throw new IllegalStateException(
+                    "Territory maintenance settlement evidence is not exact and committed");
+        }
+        long destructionAmount = destruction == null ? 0L : destruction.amountMinorUnits();
+        long evidenceAmount = Math.addExact(payment.amountMinorUnits(), destructionAmount);
+        if (reservation.amountMinorUnits() != evidenceAmount) {
+            throw new IllegalStateException(
+                    "Territory maintenance settlement evidence does not close its Reservation");
+        }
+        String expectedReservationState = destruction == null ? "SETTLED" : "RELEASED";
+        if (!reservation.state().equals(expectedReservationState)) {
+            throw new IllegalStateException(
+                    "Territory maintenance Reservation state does not match settlement effects");
+        }
+        return evidenceAmount;
+    }
+
     public synchronized StoredTerritoryMaintenanceSettlement confirmTerritoryMaintenanceSettlement(
             UUID settlementId,
             String serviceIdentity,
@@ -1799,6 +1851,8 @@ public final class CivicDatabase implements AutoCloseable {
             UUID reservationId,
             UUID publicFundPaymentId,
             UUID destructionOperationId,
+            List<UUID> fundedAssessmentIds,
+            List<UUID> suspendedAssessmentIds,
             String reason,
             long settledAtEpochMillis) {
         StoredTerritoryMaintenanceSettlement replay =
@@ -1809,61 +1863,66 @@ public final class CivicDatabase implements AutoCloseable {
         RuntimeException primaryFailure = null;
         try {
             connection.setAutoCommit(false);
-            long due = territoryMaintenanceDueMinorUnits(cycleId, nationId);
-            int pendingCount = pendingTerritoryAssessmentCount(cycleId, nationId);
-            if (due <= 0L
-                    || pendingCount == 0
+            long evidenceAmount = territoryMaintenanceSettlementEvidenceAmount(
+                    serviceIdentity,
+                    nationId,
+                    reservationId,
+                    publicFundPaymentId,
+                    destructionOperationId);
+            List<StoredTerritoryFiscalAssessment> pending =
+                    pendingTerritoryFiscalAssessments(cycleId, nationId);
+            if (pending.isEmpty()
                     || !territoryMaintenanceOwnedBy(
-                            cycleId, nationId, serviceIdentity, pendingCount)) {
+                            cycleId, nationId, serviceIdentity, pending.size())) {
                 throw new IllegalStateException("Territory maintenance has no pending assessment due");
             }
-            String treasury = "nation:" + nationId + ":treasury";
-            StoredReservation reservation = reservationForSettlement(reservationId);
-            StoredPaymentTransaction payment = paymentTransaction(publicFundPaymentId);
-            StoredPermanentDestructionOperation destruction = destructionOperationId == null
-                    ? null
-                    : permanentDestructionOperation(destructionOperationId);
-            if (reservation == null
-                    || !reservation.serviceIdentity().equals(serviceIdentity)
-                    || !reservation.sourceAccount().equals(treasury)
-                    || reservation.amountMinorUnits() != due
-                    || payment == null
-                    || !payment.serviceIdentity().equals(serviceIdentity)
-                    || !payment.reservationId().equals(reservationId)
-                    || !payment.sourceAccount().equals(treasury)
-                    || !payment.recipientAccount().equals("system:territory:public-maintenance-fund")
-                    || !payment.kind().equals("PAYMENT")
-                    || !payment.state().equals("CIVIC_COMMITTED")
-                    || payment.refundedMinorUnits() != 0L
-                    || reservation.settledMinorUnits() != payment.amountMinorUnits()
-                    || (destruction != null
-                            && (!destruction.serviceIdentity().equals(serviceIdentity)
-                                    || !destruction.sourceAccount().equals(treasury)
-                                    || !destruction.state().equals("COMMITTED")))) {
+            List<TerritoryMaintenanceCandidate> candidates = pending.stream()
+                    .map(assessment -> new TerritoryMaintenanceCandidate(
+                            assessment.assessmentId(),
+                            TerritoryMaintenancePriority.valueOf(assessment.priority()),
+                            assessment.dimensionId(),
+                            assessment.chunkX(),
+                            assessment.chunkZ(),
+                            MoneyAmount.ofMinorUnits(assessment.maintenanceDueMinorUnits())))
+                    .toList();
+            TerritoryMaintenancePriorityDecision expected =
+                    new TerritoryMaintenancePriorityPolicy().select(
+                            candidates, MoneyAmount.ofMinorUnits(evidenceAmount));
+            List<UUID> expectedFunded = expected.funded().stream()
+                    .map(TerritoryMaintenanceCandidate::assessmentId)
+                    .toList();
+            List<UUID> expectedSuspended = expected.suspended().stream()
+                    .map(TerritoryMaintenanceCandidate::assessmentId)
+                    .toList();
+            requireExactTerritorySettlementPartition(
+                    fundedAssessmentIds,
+                    suspendedAssessmentIds,
+                    expectedFunded,
+                    expectedSuspended);
+            long fundedDue = expected.funded().stream()
+                    .mapToLong(candidate -> candidate.maintenanceDue().minorUnits())
+                    .reduce(0L, Math::addExact);
+            if (fundedDue != evidenceAmount) {
                 throw new IllegalStateException(
-                        "Territory maintenance settlement evidence is not exact and committed");
+                        "Territory maintenance evidence must exactly fund the selected assessments");
             }
-            long destructionAmount = destruction == null ? 0L : destruction.amountMinorUnits();
-            if (Math.addExact(payment.amountMinorUnits(), destructionAmount) != due) {
-                throw new IllegalStateException(
-                        "Territory maintenance settlement evidence does not match assessment due");
-            }
-            String expectedReservationState = destruction == null ? "SETTLED" : "RELEASED";
-            if (!reservation.state().equals(expectedReservationState)) {
-                throw new IllegalStateException(
-                        "Territory maintenance Reservation state does not match settlement effects");
-            }
+            String outcome = expectedSuspended.isEmpty() ? "FULLY_FUNDED" : "PARTIALLY_FUNDED";
             try (PreparedStatement insert = connection.prepareStatement("""
                         INSERT INTO territory_maintenance_settlement (
                             settlement_id, service_identity, request_id, cycle_id, nation_id,
                             reservation_id, public_fund_payment_id, destruction_operation_id,
-                            validity, reason, settled_at_epoch_millis
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'EFFECTIVE', ?, ?)
+                            outcome, reason, settled_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement detail = connection.prepareStatement("""
+                        INSERT INTO territory_maintenance_settlement_assessment (
+                            settlement_id, assessment_id, validity
+                        ) VALUES (?, ?, ?)
                         """);
                     PreparedStatement update = connection.prepareStatement("""
                         UPDATE territory_fiscal_assessment
-                        SET validity = 'EFFECTIVE'
-                        WHERE cycle_id = ? AND nation_id = ? AND validity = 'PENDING'
+                        SET validity = ?
+                        WHERE assessment_id = ? AND validity = 'PENDING'
                         """)) {
                 insert.setString(1, settlementId.toString());
                 insert.setString(2, serviceIdentity);
@@ -1877,14 +1936,17 @@ public final class CivicDatabase implements AutoCloseable {
                 } else {
                     insert.setString(8, destructionOperationId.toString());
                 }
-                insert.setString(9, reason);
-                insert.setLong(10, settledAtEpochMillis);
+                insert.setString(9, outcome);
+                insert.setString(10, reason);
+                insert.setLong(11, settledAtEpochMillis);
                 insert.executeUpdate();
-                update.setString(1, cycleId.toString());
-                update.setString(2, nationId.toString());
-                if (update.executeUpdate() == 0) {
-                    throw new IllegalStateException(
-                            "Territory maintenance assessments changed before settlement");
+                for (TerritoryMaintenanceCandidate candidate : expected.funded()) {
+                    persistTerritorySettlementAssessment(
+                            detail, update, settlementId, candidate.assessmentId(), "EFFECTIVE");
+                }
+                for (TerritoryMaintenanceCandidate candidate : expected.suspended()) {
+                    persistTerritorySettlementAssessment(
+                            detail, update, settlementId, candidate.assessmentId(), "SUSPENDED");
                 }
             }
             connection.commit();
@@ -1932,8 +1994,16 @@ public final class CivicDatabase implements AutoCloseable {
             try (PreparedStatement insert = connection.prepareStatement("""
                         INSERT INTO territory_maintenance_settlement (
                             settlement_id, service_identity, request_id, cycle_id, nation_id,
-                            validity, reason, settled_at_epoch_millis
-                        ) VALUES (?, ?, ?, ?, ?, 'SUSPENDED', ?, ?)
+                            outcome, reason, settled_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, 'UNFUNDED', ?, ?)
+                        """);
+                    PreparedStatement detail = connection.prepareStatement("""
+                        INSERT INTO territory_maintenance_settlement_assessment (
+                            settlement_id, assessment_id, validity
+                        )
+                        SELECT ?, assessment_id, 'SUSPENDED'
+                        FROM territory_fiscal_assessment
+                        WHERE cycle_id = ? AND nation_id = ? AND validity = 'PENDING'
                         """);
                     PreparedStatement update = connection.prepareStatement("""
                         UPDATE territory_fiscal_assessment
@@ -1948,9 +2018,16 @@ public final class CivicDatabase implements AutoCloseable {
                 insert.setString(6, reason);
                 insert.setLong(7, settledAtEpochMillis);
                 insert.executeUpdate();
+                detail.setString(1, settlementId.toString());
+                detail.setString(2, cycleId.toString());
+                detail.setString(3, nationId.toString());
+                if (detail.executeUpdate() != pendingCount) {
+                    throw new IllegalStateException(
+                            "Territory maintenance assessments changed before suspension");
+                }
                 update.setString(1, cycleId.toString());
                 update.setString(2, nationId.toString());
-                if (update.executeUpdate() == 0) {
+                if (update.executeUpdate() != pendingCount) {
                     throw new IllegalStateException(
                             "Territory maintenance assessments changed before suspension");
                 }
@@ -5508,6 +5585,84 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 32");
             }
+            if (version < 33) {
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_settlement
+                        RENAME TO territory_maintenance_settlement_v32
+                        """);
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_settlement (
+                            settlement_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            cycle_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_cycle(cycle_id),
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            reservation_id TEXT UNIQUE
+                                REFERENCES fiscal_reservation(reservation_id),
+                            public_fund_payment_id TEXT UNIQUE
+                                REFERENCES payment_transaction(transaction_id),
+                            destruction_operation_id TEXT UNIQUE
+                                REFERENCES permanent_destruction_operation(operation_id),
+                            outcome TEXT NOT NULL CHECK (outcome IN (
+                                'FULLY_FUNDED', 'PARTIALLY_FUNDED', 'UNFUNDED'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            settled_at_epoch_millis INTEGER NOT NULL
+                                CHECK (settled_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (cycle_id, nation_id),
+                            CHECK ((outcome IN ('FULLY_FUNDED', 'PARTIALLY_FUNDED')
+                                    AND reservation_id IS NOT NULL
+                                    AND public_fund_payment_id IS NOT NULL)
+                                OR (outcome = 'UNFUNDED'
+                                    AND reservation_id IS NULL
+                                    AND public_fund_payment_id IS NULL
+                                    AND destruction_operation_id IS NULL))
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO territory_maintenance_settlement (
+                            settlement_id, service_identity, request_id, cycle_id, nation_id,
+                            reservation_id, public_fund_payment_id, destruction_operation_id,
+                            outcome, reason, settled_at_epoch_millis
+                        )
+                        SELECT settlement_id, service_identity, request_id, cycle_id, nation_id,
+                               reservation_id, public_fund_payment_id, destruction_operation_id,
+                               CASE validity
+                                   WHEN 'EFFECTIVE' THEN 'FULLY_FUNDED'
+                                   ELSE 'UNFUNDED'
+                               END,
+                               reason, settled_at_epoch_millis
+                        FROM territory_maintenance_settlement_v32
+                        """);
+                statement.execute("DROP TABLE territory_maintenance_settlement_v32");
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_settlement_assessment (
+                            settlement_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_settlement(settlement_id)
+                                ON DELETE CASCADE,
+                            assessment_id TEXT NOT NULL UNIQUE
+                                REFERENCES territory_fiscal_assessment(assessment_id),
+                            validity TEXT NOT NULL
+                                CHECK (validity IN ('EFFECTIVE', 'SUSPENDED')),
+                            PRIMARY KEY (settlement_id, assessment_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO territory_maintenance_settlement_assessment (
+                            settlement_id, assessment_id, validity
+                        )
+                        SELECT settlement_id, assessment_id,
+                               CASE outcome
+                                   WHEN 'UNFUNDED' THEN 'SUSPENDED'
+                                   ELSE 'EFFECTIVE'
+                               END
+                        FROM territory_maintenance_settlement
+                        JOIN territory_fiscal_assessment USING (cycle_id, nation_id)
+                        """);
+                statement.execute("PRAGMA user_version = 33");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -5654,10 +5809,37 @@ public final class CivicDatabase implements AutoCloseable {
                     destructionOperationId == null
                             ? null
                             : UUID.fromString(destructionOperationId),
-                    result.getString("validity"),
+                    result.getString("outcome"),
+                    territoryMaintenanceSettlementAssessmentIds(
+                            UUID.fromString(result.getString("settlement_id")), "EFFECTIVE"),
+                    territoryMaintenanceSettlementAssessmentIds(
+                            UUID.fromString(result.getString("settlement_id")), "SUSPENDED"),
                     result.getString("reason"),
                     result.getLong("settled_at_epoch_millis"));
         }
+    }
+
+    private List<UUID> territoryMaintenanceSettlementAssessmentIds(
+            UUID settlementId, String validity) throws SQLException {
+        List<UUID> assessmentIds = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT detail.assessment_id
+                FROM territory_maintenance_settlement_assessment detail
+                JOIN territory_fiscal_assessment assessment
+                  ON assessment.assessment_id = detail.assessment_id
+                WHERE detail.settlement_id = ? AND detail.validity = ?
+                ORDER BY assessment.priority, assessment.dimension_id,
+                         assessment.chunk_x, assessment.chunk_z, assessment.assessment_id
+                """)) {
+            query.setString(1, settlementId.toString());
+            query.setString(2, validity);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    assessmentIds.add(UUID.fromString(result.getString("assessment_id")));
+                }
+            }
+        }
+        return List.copyOf(assessmentIds);
     }
 
     private StoredMonetarySupplyEvent readMonetarySupplyEvent(
@@ -6110,6 +6292,45 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to verify Territory maintenance ownership", failure);
+        }
+    }
+
+    private static void requireExactTerritorySettlementPartition(
+            List<UUID> fundedAssessmentIds,
+            List<UUID> suspendedAssessmentIds,
+            List<UUID> expectedFunded,
+            List<UUID> expectedSuspended) {
+        if (fundedAssessmentIds == null || suspendedAssessmentIds == null) {
+            throw new IllegalArgumentException(
+                    "Territory maintenance Settlement partition cannot be null");
+        }
+        Set<UUID> provided = new HashSet<>();
+        boolean unique = fundedAssessmentIds.stream().allMatch(provided::add)
+                && suspendedAssessmentIds.stream().allMatch(provided::add);
+        if (!unique
+                || provided.size() != expectedFunded.size() + expectedSuspended.size()
+                || !fundedAssessmentIds.equals(expectedFunded)
+                || !suspendedAssessmentIds.equals(expectedSuspended)) {
+            throw new SecurityException(
+                    "Territory maintenance Settlement partition does not match persisted Priority");
+        }
+    }
+
+    private static void persistTerritorySettlementAssessment(
+            PreparedStatement detail,
+            PreparedStatement update,
+            UUID settlementId,
+            UUID assessmentId,
+            String validity) throws SQLException {
+        detail.setString(1, settlementId.toString());
+        detail.setString(2, assessmentId.toString());
+        detail.setString(3, validity);
+        detail.executeUpdate();
+        update.setString(1, validity);
+        update.setString(2, assessmentId.toString());
+        if (update.executeUpdate() != 1) {
+            throw new IllegalStateException(
+                    "Territory maintenance assessments changed before settlement");
         }
     }
 

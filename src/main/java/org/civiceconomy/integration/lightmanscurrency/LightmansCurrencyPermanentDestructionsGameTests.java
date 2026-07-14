@@ -281,8 +281,8 @@ public final class LightmansCurrencyPermanentDestructionsGameTests {
             helper.assertValueEqual(
                     41L, maintenance.publicFundAmount().minorUnits(), "public-fund maintenance share");
             helper.assertValueEqual(
-                    org.civiceconomy.territory.TerritoryFiscalValidity.EFFECTIVE,
-                    maintenance.settlement().validity(),
+                    org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED,
+                    maintenance.settlement().outcome(),
                     "maintenance settlement validity");
             helper.assertValueEqual(
                     maintenance.publicFundPayment().transactionId(),

@@ -37,12 +37,13 @@ class CivicDatabaseV31MigrationTest {
                 "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("UPDATE territory_fiscal_assessment SET validity = 'EFFECTIVE'");
+            statement.execute("DROP TABLE territory_maintenance_settlement_assessment");
             statement.execute("DROP TABLE territory_maintenance_settlement");
             statement.execute("PRAGMA user_version = 30");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(32, migrated.schemaVersion());
+            assertEquals(33, migrated.schemaVersion());
             assertEquals(
                     "EFFECTIVE",
                     migrated.territoryFiscalAssessment("migration", "legacy-assessment").validity());

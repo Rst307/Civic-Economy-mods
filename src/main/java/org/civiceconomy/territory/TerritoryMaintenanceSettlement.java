@@ -1,6 +1,7 @@
 package org.civiceconomy.territory;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.ServiceIdentity;
@@ -15,7 +16,9 @@ public record TerritoryMaintenanceSettlement(
         Optional<UUID> reservationId,
         Optional<UUID> publicFundPaymentId,
         Optional<UUID> destructionOperationId,
-        TerritoryFiscalValidity validity,
+        TerritoryMaintenanceSettlementOutcome outcome,
+        List<UUID> fundedAssessmentIds,
+        List<UUID> suspendedAssessmentIds,
         String reason,
         Instant settledAt) {
     public TerritoryMaintenanceSettlement {
@@ -26,7 +29,9 @@ public record TerritoryMaintenanceSettlement(
                 || reservationId == null
                 || publicFundPaymentId == null
                 || destructionOperationId == null
-                || validity == null
+                || outcome == null
+                || fundedAssessmentIds == null
+                || suspendedAssessmentIds == null
                 || settledAt == null) {
             throw new IllegalArgumentException(
                     "Territory Maintenance Settlement cannot contain null values");
@@ -38,5 +43,7 @@ public record TerritoryMaintenanceSettlement(
             throw new IllegalArgumentException(
                     "Territory Maintenance Settlement values are invalid");
         }
+        fundedAssessmentIds = List.copyOf(fundedAssessmentIds);
+        suspendedAssessmentIds = List.copyOf(suspendedAssessmentIds);
     }
 }

@@ -36,11 +36,36 @@ class CivicDatabaseV32MigrationTest {
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN priority");
+            statement.execute("DROP TABLE territory_maintenance_settlement_assessment");
+            statement.execute("DROP TABLE territory_maintenance_settlement");
+            statement.execute("""
+                    CREATE TABLE territory_maintenance_settlement (
+                        settlement_id TEXT PRIMARY KEY,
+                        service_identity TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        cycle_id TEXT NOT NULL
+                            REFERENCES territory_maintenance_cycle(cycle_id),
+                        nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                        reservation_id TEXT UNIQUE
+                            REFERENCES fiscal_reservation(reservation_id),
+                        public_fund_payment_id TEXT UNIQUE
+                            REFERENCES payment_transaction(transaction_id),
+                        destruction_operation_id TEXT UNIQUE
+                            REFERENCES permanent_destruction_operation(operation_id),
+                        validity TEXT NOT NULL
+                            CHECK (validity IN ('EFFECTIVE', 'SUSPENDED')),
+                        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                        settled_at_epoch_millis INTEGER NOT NULL
+                            CHECK (settled_at_epoch_millis >= 0),
+                        UNIQUE (service_identity, request_id),
+                        UNIQUE (cycle_id, nation_id)
+                    )
+                    """);
             statement.execute("PRAGMA user_version = 31");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(32, migrated.schemaVersion());
+            assertEquals(33, migrated.schemaVersion());
             assertEquals(
                     "ORDINARY",
                     migrated.territoryFiscalAssessment("migration", "assessment").priority());

@@ -157,7 +157,7 @@ _Avoid_: 实时时钟计费、单个国家周期、FTB 占领周期
 _Avoid_: FTB 所有权、付款交易、有效性结论
 
 **领土维护结算（Territory Maintenance Settlement）**:
-对一个 Nation 在一个 Territory Maintenance Cycle 内全部 Territory Fiscal Assessment 作出的单次财政结论；精确付款证据使其 EFFECTIVE，欠费结论使其 SUSPENDED。
+对一个 Nation 在一个 Territory Maintenance Cycle 内全部 Territory Fiscal Assessment 作出的单次财政结论；结算结果为 FULLY_FUNDED、PARTIALLY_FUNDED 或 UNFUNDED，并将每条评估分别结论为 EFFECTIVE 或 SUSPENDED。
 _Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 
 **领土维护优先级（Territory Maintenance Priority）**:
