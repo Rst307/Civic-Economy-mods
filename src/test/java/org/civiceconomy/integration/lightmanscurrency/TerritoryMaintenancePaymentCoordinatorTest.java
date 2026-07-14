@@ -26,6 +26,8 @@ import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.territory.ChargeTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
+import org.civiceconomy.territory.TerritoryFiscalValidity;
+import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -89,10 +91,77 @@ class TerritoryMaintenancePaymentCoordinatorTest {
 
             assertEquals(MoneyAmount.ofMinorUnits(41L), payment.publicFundAmount());
             assertEquals(MoneyAmount.ofMinorUnits(60L), payment.destroyedAmount());
+            assertEquals(TerritoryFiscalValidity.EFFECTIVE, payment.settlement().validity());
             assertEquals(899L, balances.get(TREASURY));
             assertEquals(41L, balances.get(PUBLIC_FUND));
             assertEquals(940L, database.cumulativeNetIssuanceMinorUnits());
             assertEquals(0L, database.activeReservedMinorUnits(TREASURY.value()));
+        }
+    }
+
+    @Test
+    void zeroRoundedDestructionSettlesEntireMinorUnitIntoPublicFund() {
+        Map<AccountId, Long> balances = new HashMap<>();
+        balances.put(TREASURY, 1L);
+        balances.put(PUBLIC_FUND, 0L);
+        Set<UUID> appliedPayments = new HashSet<>();
+        Set<UUID> appliedDestructions = new HashSet<>();
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    NATION_ID.value(), "maintenance-test", "register-nation", TEAM_ID, NOW.toEpochMilli());
+            database.openTerritoryMaintenanceCycle(
+                    CYCLE_ID,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "open-maintenance-cycle",
+                    NOW.toEpochMilli(),
+                    NOW.plusSeconds(3_600L).toEpochMilli(),
+                    NOW.toEpochMilli());
+            database.assessTerritoryFiscalValidity(
+                    UUID.randomUUID(),
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "assess-maintenance-due",
+                    CYCLE_ID,
+                    NATION_ID.value(),
+                    TEAM_ID,
+                    "minecraft:overworld",
+                    10,
+                    20,
+                    1L,
+                    "One-minor-unit assessment",
+                    NOW.toEpochMilli());
+            database.confirmMonetarySupplyChange(
+                    UUID.randomUUID(),
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "seed-maintenance-issuance",
+                    "ISSUANCE",
+                    1L,
+                    "mint-batch:one-unit-maintenance",
+                    "Seed one-unit issuance",
+                    NOW.toEpochMilli(),
+                    2_000L);
+            TerritoryMaintenancePaymentCoordinator coordinator = coordinator(
+                    database,
+                    balances,
+                    appliedPayments,
+                    appliedDestructions,
+                    new AtomicBoolean(false));
+
+            var payment = coordinator.charge(new ChargeTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "one-unit-maintenance",
+                    CYCLE_ID,
+                    NATION_ID,
+                    TREASURY,
+                    MoneyAmount.ofMinorUnits(1L),
+                    3_000,
+                    "One-unit maintenance"));
+
+            assertEquals(MoneyAmount.ZERO, payment.destroyedAmount());
+            assertEquals(MoneyAmount.ofMinorUnits(1L), payment.publicFundAmount());
+            assertEquals(TerritoryFiscalValidity.EFFECTIVE, payment.settlement().validity());
+            assertEquals(0L, balances.get(TREASURY));
+            assertEquals(1L, balances.get(PUBLIC_FUND));
+            assertEquals(1L, database.cumulativeNetIssuanceMinorUnits());
         }
     }
 
@@ -129,7 +198,6 @@ class TerritoryMaintenancePaymentCoordinatorTest {
                     10,
                     20,
                     101L,
-                    "EFFECTIVE",
                     "Maintenance payment test assessment",
                     NOW.toEpochMilli());
             database.confirmMonetarySupplyChange(
@@ -168,7 +236,12 @@ class TerritoryMaintenancePaymentCoordinatorTest {
                         },
                         session,
                         CLOCK);
-        return new TerritoryMaintenancePaymentCoordinator(database, ledger, payments, destructions);
+        return new TerritoryMaintenancePaymentCoordinator(
+                database,
+                ledger,
+                payments,
+                destructions,
+                new TerritoryMaintenanceRegistry(database, CLOCK));
     }
 
     private static void applyPayment(

@@ -22,7 +22,7 @@ class EffectiveTerritoryQueryTest {
     @TempDir Path temporaryDirectory;
 
     @Test
-    void requiresCurrentFtbOwnershipToMatchThePersistedAssessment() {
+    void pendingAssessmentIsNotEffectiveEvenWhenFtbOwnershipMatches() {
         NationId nationId = NationId.create();
         UUID teamId = UUID.randomUUID();
         try (CivicDatabase database = database()) {
@@ -45,10 +45,9 @@ class EffectiveTerritoryQueryTest {
                     3,
                     5,
                     0L,
-                    TerritoryFiscalValidity.EFFECTIVE,
                     "Inside free allocation"));
 
-            assertTrue(new EffectiveTerritoryQuery(
+            assertFalse(new EffectiveTerritoryQuery(
                             registry, (dimension, chunkX, chunkZ) -> Optional.of(teamId))
                     .isEffective(cycle.cycleId(), nationId, "minecraft:overworld", 3, 5));
             assertFalse(new EffectiveTerritoryQuery(

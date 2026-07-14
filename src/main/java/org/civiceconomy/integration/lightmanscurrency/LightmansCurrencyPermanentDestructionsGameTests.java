@@ -240,7 +240,6 @@ public final class LightmansCurrencyPermanentDestructionsGameTests {
                     20,
                     30,
                     101L,
-                    "EFFECTIVE",
                     "Real maintenance GameTest assessment",
                     System.currentTimeMillis());
             database.confirmMonetarySupplyChange(
@@ -280,6 +279,10 @@ public final class LightmansCurrencyPermanentDestructionsGameTests {
                     60L, maintenance.destroyedAmount().minorUnits(), "destroyed maintenance share");
             helper.assertValueEqual(
                     41L, maintenance.publicFundAmount().minorUnits(), "public-fund maintenance share");
+            helper.assertValueEqual(
+                    org.civiceconomy.territory.TerritoryFiscalValidity.EFFECTIVE,
+                    maintenance.settlement().validity(),
+                    "maintenance settlement validity");
             helper.assertValueEqual(
                     maintenance.publicFundPayment().transactionId(),
                     replay.publicFundPayment().transactionId(),

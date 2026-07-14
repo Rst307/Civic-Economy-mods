@@ -11,4 +11,5 @@ public record TerritoryMaintenancePayment(
         PaymentTransaction publicFundPayment,
         Optional<MonetarySupplyEvent> permanentDestruction,
         MoneyAmount publicFundAmount,
-        MoneyAmount destroyedAmount) {}
+        MoneyAmount destroyedAmount,
+        TerritoryMaintenanceSettlement settlement) {}

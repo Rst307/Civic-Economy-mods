@@ -2,6 +2,7 @@ package org.civiceconomy.territory;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.IdempotencyConflictException;
 import org.civiceconomy.fiscal.MoneyAmount;
@@ -9,6 +10,7 @@ import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTerritoryFiscalAssessment;
 import org.civiceconomy.persistence.StoredTerritoryMaintenanceCycle;
+import org.civiceconomy.persistence.StoredTerritoryMaintenanceSettlement;
 
 public final class TerritoryMaintenanceRegistry {
     private final CivicDatabase database;
@@ -74,7 +76,6 @@ public final class TerritoryMaintenanceRegistry {
                 request.chunkX(),
                 request.chunkZ(),
                 request.maintenanceDueMinorUnits(),
-                request.validity().name(),
                 request.reason(),
                 clock.millis()));
     }
@@ -99,6 +100,65 @@ public final class TerritoryMaintenanceRegistry {
                 && assessment.validity().equals(TerritoryFiscalValidity.EFFECTIVE.name());
     }
 
+    public TerritoryFiscalAssessment assessment(
+            UUID cycleId,
+            NationId nationId,
+            UUID ftbTeamId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ) {
+        StoredTerritoryFiscalAssessment stored = database.territoryFiscalAssessment(
+                cycleId, nationId.value(), ftbTeamId, dimensionId, chunkX, chunkZ);
+        if (stored == null) {
+            throw new IllegalArgumentException("Unknown Territory Fiscal Assessment");
+        }
+        return toAssessment(stored);
+    }
+
+    public TerritoryMaintenanceSettlement confirmSettlement(
+            ConfirmTerritoryMaintenanceSettlement request) {
+        StoredTerritoryMaintenanceSettlement replay = database.territoryMaintenanceSettlement(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            requireSettlementPayload(replay, request);
+            return toSettlement(replay);
+        }
+        return toSettlement(database.confirmTerritoryMaintenanceSettlement(
+                UUID.randomUUID(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.cycleId(),
+                request.nationId().value(),
+                request.reservationId(),
+                request.publicFundPaymentId(),
+                request.destructionOperationId(),
+                request.reason(),
+                clock.millis()));
+    }
+
+    public TerritoryMaintenanceSettlement suspend(SuspendTerritoryMaintenance request) {
+        StoredTerritoryMaintenanceSettlement replay = database.territoryMaintenanceSettlement(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.cycleId().equals(request.cycleId())
+                    || !replay.nationId().equals(request.nationId().value())
+                    || !replay.reason().equals(request.reason())
+                    || !replay.validity().equals(TerritoryFiscalValidity.SUSPENDED.name())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toSettlement(replay);
+        }
+        return toSettlement(database.suspendTerritoryMaintenance(
+                UUID.randomUUID(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.cycleId(),
+                request.nationId().value(),
+                request.reason(),
+                clock.millis()));
+    }
+
     private static void requirePayload(
             StoredTerritoryFiscalAssessment stored,
             AssessTerritoryFiscalValidity request) {
@@ -109,7 +169,21 @@ public final class TerritoryMaintenanceRegistry {
                 || stored.chunkX() != request.chunkX()
                 || stored.chunkZ() != request.chunkZ()
                 || stored.maintenanceDueMinorUnits() != request.maintenanceDueMinorUnits()
-                || !stored.validity().equals(request.validity().name())
+                || !stored.reason().equals(request.reason())) {
+            throw new IdempotencyConflictException(
+                    request.serviceIdentity(), request.requestId());
+        }
+    }
+
+    private static void requireSettlementPayload(
+            StoredTerritoryMaintenanceSettlement stored,
+            ConfirmTerritoryMaintenanceSettlement request) {
+        if (!stored.cycleId().equals(request.cycleId())
+                || !stored.nationId().equals(request.nationId().value())
+                || !stored.reservationId().equals(request.reservationId())
+                || !stored.publicFundPaymentId().equals(request.publicFundPaymentId())
+                || !java.util.Objects.equals(
+                        stored.destructionOperationId(), request.destructionOperationId())
                 || !stored.reason().equals(request.reason())) {
             throw new IdempotencyConflictException(
                     request.serviceIdentity(), request.requestId());
@@ -142,5 +216,21 @@ public final class TerritoryMaintenanceRegistry {
                 TerritoryFiscalValidity.valueOf(stored.validity()),
                 stored.reason(),
                 Instant.ofEpochMilli(stored.assessedAtEpochMillis()));
+    }
+
+    private static TerritoryMaintenanceSettlement toSettlement(
+            StoredTerritoryMaintenanceSettlement stored) {
+        return new TerritoryMaintenanceSettlement(
+                stored.settlementId(),
+                new org.civiceconomy.fiscal.ServiceIdentity(stored.serviceIdentity()),
+                stored.requestId(),
+                stored.cycleId(),
+                new NationId(stored.nationId()),
+                Optional.ofNullable(stored.reservationId()),
+                Optional.ofNullable(stored.publicFundPaymentId()),
+                Optional.ofNullable(stored.destructionOperationId()),
+                TerritoryFiscalValidity.valueOf(stored.validity()),
+                stored.reason(),
+                Instant.ofEpochMilli(stored.settledAtEpochMillis()));
     }
 }

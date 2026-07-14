@@ -17,6 +17,8 @@ import org.civiceconomy.monetary.ConfirmPermanentDestruction;
 import org.civiceconomy.monetary.MonetarySupplyEvent;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.territory.ChargeTerritoryMaintenance;
+import org.civiceconomy.territory.ConfirmTerritoryMaintenanceSettlement;
+import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.territory.TerritoryMaintenancePayment;
 
 public final class TerritoryMaintenancePaymentCoordinator {
@@ -24,19 +26,26 @@ public final class TerritoryMaintenancePaymentCoordinator {
     private final FiscalLedger ledger;
     private final PaymentCoordinator payments;
     private final PermanentDestructionCoordinator destructions;
+    private final TerritoryMaintenanceRegistry maintenance;
 
     TerritoryMaintenancePaymentCoordinator(
             CivicDatabase database,
             FiscalLedger ledger,
             PaymentCoordinator payments,
-            PermanentDestructionCoordinator destructions) {
-        if (database == null || ledger == null || payments == null || destructions == null) {
+            PermanentDestructionCoordinator destructions,
+            TerritoryMaintenanceRegistry maintenance) {
+        if (database == null
+                || ledger == null
+                || payments == null
+                || destructions == null
+                || maintenance == null) {
             throw new IllegalArgumentException("Territory maintenance payment dependencies cannot be null");
         }
         this.database = database;
         this.ledger = ledger;
         this.payments = payments;
         this.destructions = destructions;
+        this.maintenance = maintenance;
     }
 
     public static TerritoryMaintenancePaymentCoordinator live(
@@ -54,7 +63,8 @@ public final class TerritoryMaintenancePaymentCoordinator {
                         database,
                         LightmansCurrencyPayments.live(level),
                         session),
-                PermanentDestructionCoordinator.live(database, session, clock, level));
+                PermanentDestructionCoordinator.live(database, session, clock, level),
+                new TerritoryMaintenanceRegistry(database, clock));
     }
 
     public TerritoryMaintenancePayment charge(ChargeTerritoryMaintenance request) {
@@ -94,17 +104,29 @@ public final class TerritoryMaintenancePaymentCoordinator {
                     split.destroyedAmount(),
                     purpose));
         }
-        ledger.release(new ReleaseReservation(
-                request.serviceIdentity(),
-                request.requestId() + ":release",
-                reservation.reservationId(),
-                "Release externally destroyed maintenance share"));
+        if (!split.destroyedAmount().equals(MoneyAmount.ZERO)) {
+            ledger.release(new ReleaseReservation(
+                    request.serviceIdentity(),
+                    request.requestId() + ":release",
+                    reservation.reservationId(),
+                    "Release externally destroyed maintenance share"));
+        }
+        var settlement = maintenance.confirmSettlement(new ConfirmTerritoryMaintenanceSettlement(
+                        request.serviceIdentity(),
+                        request.requestId() + ":settlement",
+                        request.cycleId(),
+                        request.nationId(),
+                        reservation.reservationId(),
+                        publicFundPayment.transactionId(),
+                        destruction == null ? null : destructionOperationId(destruction),
+                        request.reason()));
         return new TerritoryMaintenancePayment(
                 reservation,
                 publicFundPayment,
                 Optional.ofNullable(destruction),
                 split.publicFundAmount(),
-                split.destroyedAmount());
+                split.destroyedAmount(),
+                settlement);
     }
 
     public void recoverPermanentDestructions() {
@@ -120,6 +142,15 @@ public final class TerritoryMaintenancePaymentCoordinator {
         long destroyed = Math.multiplyExact(totalDue.minorUnits(), destructionBasisPoints) / 10_000L;
         MoneyAmount destroyedAmount = MoneyAmount.ofMinorUnits(destroyed);
         return new Split(totalDue.minus(destroyedAmount), destroyedAmount);
+    }
+
+    private static java.util.UUID destructionOperationId(MonetarySupplyEvent destruction) {
+        String prefix = "permanent-destruction:";
+        if (!destruction.externalReference().startsWith(prefix)) {
+            throw new IllegalStateException(
+                    "Territory maintenance destruction has an invalid external reference");
+        }
+        return java.util.UUID.fromString(destruction.externalReference().substring(prefix.length()));
     }
 
     record Split(MoneyAmount publicFundAmount, MoneyAmount destroyedAmount) {}

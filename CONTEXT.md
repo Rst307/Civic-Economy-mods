@@ -153,8 +153,12 @@ _Avoid_: 所有已占领区块、国界声明
 _Avoid_: 实时时钟计费、单个国家周期、FTB 占领周期
 
 **领土财政评估（Territory Fiscal Assessment）**:
-在一个 Territory Maintenance Cycle 内，对 FTB 当前归属区块作出的有效或暂停结论及其应付维护金额；它不复制或改变 FTB 所有权。
-_Avoid_: FTB 所有权、付款交易、永久领土状态
+在一个 Territory Maintenance Cycle 内，对 FTB 当前归属区块记录的待结算维护金额事实；它在结算前保持 PENDING，不复制或改变 FTB 所有权。
+_Avoid_: FTB 所有权、付款交易、有效性结论
+
+**领土维护结算（Territory Maintenance Settlement）**:
+对一个 Nation 在一个 Territory Maintenance Cycle 内全部 Territory Fiscal Assessment 作出的单次财政结论；精确付款证据使其 EFFECTIVE，欠费结论使其 SUSPENDED。
+_Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 
 **领土维护抵扣额（Territory Maintenance Credit）**:
 主动放弃领土后形成、只能抵扣后续领土维护而不能提取为货币的财政权益。

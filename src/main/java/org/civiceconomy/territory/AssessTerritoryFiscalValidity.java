@@ -14,14 +14,12 @@ public record AssessTerritoryFiscalValidity(
         int chunkX,
         int chunkZ,
         long maintenanceDueMinorUnits,
-        TerritoryFiscalValidity validity,
         String reason) {
     public AssessTerritoryFiscalValidity {
         if (serviceIdentity == null
                 || cycleId == null
                 || nationId == null
-                || ftbTeamId == null
-                || validity == null) {
+                || ftbTeamId == null) {
             throw new IllegalArgumentException(
                     "Territory Fiscal Assessment cannot contain null values");
         }
