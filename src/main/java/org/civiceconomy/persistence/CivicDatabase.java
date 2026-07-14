@@ -11,13 +11,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 9;
+    private static final int SCHEMA_VERSION = 10;
 
     private final Connection connection;
 
@@ -627,7 +628,52 @@ public final class CivicDatabase implements AutoCloseable {
         updateTransactionState(transactionId, "PREPARED", "EXTERNAL_APPLIED");
     }
 
+    public synchronized void markExternalAppliedDuringRecovery(
+            UUID transactionId, long recordedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE payment_transaction SET state = 'EXTERNAL_APPLIED'
+                    WHERE transaction_id = ? AND state = 'PREPARED'
+                    """)) {
+                update.setString(1, transactionId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Payment transaction state changed during recovery " + transactionId);
+                }
+                insertRecoveryAudit(
+                        transactionId,
+                        "RECOVERY_EXTERNAL_APPLIED",
+                        "civiceconomy-recovery",
+                        "Recovery confirmed the external payment",
+                        recordedAtEpochMillis);
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to record recovered external payment " + transactionId, failure);
+        }
+    }
+
     public synchronized void commitPayment(UUID transactionId, UUID reservationId) {
+        commitPayment(transactionId, reservationId, false, 0L);
+    }
+
+    public synchronized void commitPaymentDuringRecovery(
+            UUID transactionId, UUID reservationId, long recordedAtEpochMillis) {
+        commitPayment(transactionId, reservationId, true, recordedAtEpochMillis);
+    }
+
+    private void commitPayment(
+            UUID transactionId,
+            UUID reservationId,
+            boolean recovery,
+            long recordedAtEpochMillis) {
         StoredPaymentTransaction transaction = paymentTransaction(transactionId);
         if (transaction == null) {
             throw new IllegalArgumentException("Unknown payment transaction " + transactionId);
@@ -669,6 +715,14 @@ public final class CivicDatabase implements AutoCloseable {
                     throw new IllegalStateException(
                             "Payment transaction state changed before Civic commit " + transactionId);
                 }
+                if (recovery) {
+                    insertRecoveryAudit(
+                            transactionId,
+                            "RECOVERY_CIVIC_COMMITTED",
+                            "civiceconomy-recovery",
+                            "Recovery completed the Civic payment commit",
+                            recordedAtEpochMillis);
+                }
                 connection.commit();
             } catch (SQLException failure) {
                 connection.rollback();
@@ -682,6 +736,19 @@ public final class CivicDatabase implements AutoCloseable {
     }
 
     public synchronized void commitRefund(UUID transactionId, UUID originalTransactionId) {
+        commitRefund(transactionId, originalTransactionId, false, 0L);
+    }
+
+    public synchronized void commitRefundDuringRecovery(
+            UUID transactionId, UUID originalTransactionId, long recordedAtEpochMillis) {
+        commitRefund(transactionId, originalTransactionId, true, recordedAtEpochMillis);
+    }
+
+    private void commitRefund(
+            UUID transactionId,
+            UUID originalTransactionId,
+            boolean recovery,
+            long recordedAtEpochMillis) {
         StoredPaymentTransaction refund = paymentTransaction(transactionId);
         if (refund == null) {
             throw new IllegalArgumentException("Unknown refund transaction " + transactionId);
@@ -719,6 +786,14 @@ public final class CivicDatabase implements AutoCloseable {
                     throw new IllegalStateException(
                             "Refund transaction state changed before Civic commit " + transactionId);
                 }
+                if (recovery) {
+                    insertRecoveryAudit(
+                            transactionId,
+                            "RECOVERY_CIVIC_COMMITTED",
+                            "civiceconomy-recovery",
+                            "Recovery completed the Civic refund commit",
+                            recordedAtEpochMillis);
+                }
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -728,6 +803,173 @@ public final class CivicDatabase implements AutoCloseable {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to commit refund " + transactionId, failure);
+        }
+    }
+
+    public synchronized StoredPaymentCompensation prepareCompensation(
+            String serviceIdentity,
+            String requestId,
+            UUID transactionId,
+            String reason,
+            long recordedAtEpochMillis) {
+        StoredPaymentCompensation existing = paymentCompensation(serviceIdentity, requestId);
+        if (existing != null) {
+            return existing;
+        }
+        existing = paymentCompensation(transactionId);
+        if (existing != null) {
+            return existing;
+        }
+        StoredPaymentTransaction transaction = paymentTransaction(transactionId);
+        if (transaction == null) {
+            throw new IllegalArgumentException("Unknown payment transaction " + transactionId);
+        }
+        if (!"EXTERNAL_APPLIED".equals(transaction.state())) {
+            throw new IllegalStateException(
+                    "Only an externally applied uncommitted transaction can be compensated: "
+                            + transaction.state());
+        }
+
+        UUID compensationId = UUID.randomUUID();
+        UUID auditId = UUID.randomUUID();
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertCompensation = connection.prepareStatement("""
+                        INSERT INTO payment_compensation (
+                            compensation_id, service_identity, request_id,
+                            transaction_id, reason, state
+                        ) VALUES (?, ?, ?, ?, ?, 'STARTED')
+                        """);
+                    PreparedStatement markCompensating = connection.prepareStatement("""
+                        UPDATE payment_transaction SET state = 'COMPENSATING'
+                        WHERE transaction_id = ? AND state = 'EXTERNAL_APPLIED'
+                        """);
+                    PreparedStatement insertAudit = connection.prepareStatement("""
+                        INSERT INTO payment_recovery_audit (
+                            audit_id, transaction_id, action, service_identity,
+                            detail, recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'COMPENSATION_STARTED', ?, ?, ?)
+                        """)) {
+                insertCompensation.setString(1, compensationId.toString());
+                insertCompensation.setString(2, serviceIdentity);
+                insertCompensation.setString(3, requestId);
+                insertCompensation.setString(4, transactionId.toString());
+                insertCompensation.setString(5, reason);
+                insertCompensation.executeUpdate();
+
+                markCompensating.setString(1, transactionId.toString());
+                if (markCompensating.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Payment transaction state changed before compensation " + transactionId);
+                }
+
+                insertAudit.setString(1, auditId.toString());
+                insertAudit.setString(2, transactionId.toString());
+                insertAudit.setString(3, serviceIdentity);
+                insertAudit.setString(4, reason);
+                insertAudit.setLong(5, recordedAtEpochMillis);
+                insertAudit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return paymentCompensation(transactionId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to prepare payment compensation " + transactionId, failure);
+        }
+    }
+
+    public synchronized void completeCompensation(UUID transactionId, long recordedAtEpochMillis) {
+        StoredPaymentCompensation compensation = paymentCompensation(transactionId);
+        if (compensation == null) {
+            throw new IllegalArgumentException("Unknown payment compensation " + transactionId);
+        }
+        if ("COMPLETED".equals(compensation.state())) {
+            StoredPaymentTransaction completed = paymentTransaction(transactionId);
+            if (completed != null && "COMPENSATED".equals(completed.state())) {
+                return;
+            }
+            throw new IllegalStateException(
+                    "Completed compensation has inconsistent payment state " + transactionId);
+        }
+        StoredPaymentTransaction transaction = paymentTransaction(transactionId);
+        if (transaction == null || !"COMPENSATING".equals(transaction.state())) {
+            throw new IllegalStateException(
+                    "Payment transaction is not ready to complete compensation " + transactionId);
+        }
+
+        UUID auditId = UUID.randomUUID();
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement completeRequest = connection.prepareStatement("""
+                        UPDATE payment_compensation SET state = 'COMPLETED'
+                        WHERE transaction_id = ? AND state = 'STARTED'
+                        """);
+                    PreparedStatement markCompensated = connection.prepareStatement("""
+                        UPDATE payment_transaction SET state = 'COMPENSATED'
+                        WHERE transaction_id = ? AND state = 'COMPENSATING'
+                        """);
+                    PreparedStatement insertAudit = connection.prepareStatement("""
+                        INSERT INTO payment_recovery_audit (
+                            audit_id, transaction_id, action, service_identity,
+                            detail, recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'COMPENSATION_COMPLETED', ?, ?, ?)
+                        """)) {
+                completeRequest.setString(1, transactionId.toString());
+                if (completeRequest.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Compensation request state changed before completion " + transactionId);
+                }
+
+                markCompensated.setString(1, transactionId.toString());
+                if (markCompensated.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Payment transaction state changed before compensation completion " + transactionId);
+                }
+
+                insertAudit.setString(1, auditId.toString());
+                insertAudit.setString(2, transactionId.toString());
+                insertAudit.setString(3, compensation.serviceIdentity());
+                insertAudit.setString(4, compensation.reason());
+                insertAudit.setLong(5, recordedAtEpochMillis);
+                insertAudit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to complete payment compensation " + transactionId, failure);
+        }
+    }
+
+    public synchronized List<StoredRecoveryAuditEntry> recoveryAudit(UUID transactionId) {
+        List<StoredRecoveryAuditEntry> entries = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM payment_recovery_audit
+                WHERE transaction_id = ?
+                ORDER BY recorded_at_epoch_millis, rowid
+                """)) {
+            query.setString(1, transactionId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    entries.add(new StoredRecoveryAuditEntry(
+                            UUID.fromString(result.getString("audit_id")),
+                            UUID.fromString(result.getString("transaction_id")),
+                            result.getString("action"),
+                            result.getString("service_identity"),
+                            result.getString("detail"),
+                            Instant.ofEpochMilli(result.getLong("recorded_at_epoch_millis"))));
+                }
+            }
+            return List.copyOf(entries);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read payment recovery audit " + transactionId, failure);
         }
     }
 
@@ -747,7 +989,7 @@ public final class CivicDatabase implements AutoCloseable {
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery("""
                     SELECT * FROM payment_transaction
-                    WHERE state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                    WHERE state IN ('PREPARED', 'EXTERNAL_APPLIED', 'COMPENSATING')
                     ORDER BY rowid
                     """)) {
             while (result.next()) {
@@ -954,6 +1196,44 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 9");
             }
+            if (version < 10) {
+                statement.execute("DROP INDEX payment_one_incomplete_refund");
+                statement.execute("""
+                        CREATE UNIQUE INDEX payment_one_incomplete_refund
+                        ON payment_transaction (parent_transaction_id)
+                        WHERE kind = 'REFUND'
+                          AND state IN ('PREPARED', 'EXTERNAL_APPLIED', 'COMPENSATING')
+                        """);
+                statement.execute("""
+                        CREATE TABLE payment_compensation (
+                            compensation_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            transaction_id TEXT NOT NULL UNIQUE
+                                REFERENCES payment_transaction(transaction_id),
+                            reason TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN ('STARTED', 'COMPLETED')),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE payment_recovery_audit (
+                            audit_id TEXT PRIMARY KEY,
+                            transaction_id TEXT NOT NULL
+                                REFERENCES payment_transaction(transaction_id),
+                            action TEXT NOT NULL CHECK (action IN (
+                                'COMPENSATION_STARTED', 'COMPENSATION_COMPLETED',
+                                'RECOVERY_EXTERNAL_APPLIED', 'RECOVERY_CIVIC_COMMITTED'
+                            )),
+                            service_identity TEXT NOT NULL,
+                            detail TEXT NOT NULL,
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (transaction_id, action)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 10");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -1036,7 +1316,8 @@ public final class CivicDatabase implements AutoCloseable {
     private boolean hasIncompletePayment(UUID reservationId) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT 1 FROM payment_transaction
-                WHERE reservation_id = ? AND state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                WHERE reservation_id = ?
+                  AND state IN ('PREPARED', 'EXTERNAL_APPLIED', 'COMPENSATING')
                 LIMIT 1
                 """)) {
             query.setString(1, reservationId.toString());
@@ -1051,7 +1332,7 @@ public final class CivicDatabase implements AutoCloseable {
                 SELECT 1 FROM payment_transaction
                 WHERE parent_transaction_id = ?
                   AND kind = 'REFUND'
-                  AND state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                  AND state IN ('PREPARED', 'EXTERNAL_APPLIED', 'COMPENSATING')
                 LIMIT 1
                 """)) {
             query.setString(1, originalTransactionId.toString());
@@ -1084,7 +1365,7 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
-    private StoredPaymentTransaction paymentTransaction(UUID transactionId) {
+    public synchronized StoredPaymentTransaction paymentTransaction(UUID transactionId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM payment_transaction WHERE transaction_id = ?
                 """)) {
@@ -1092,6 +1373,46 @@ public final class CivicDatabase implements AutoCloseable {
             return readPayment(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read payment transaction " + transactionId, failure);
+        }
+    }
+
+    private StoredPaymentCompensation paymentCompensation(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM payment_compensation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readPaymentCompensation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read payment compensation request", failure);
+        }
+    }
+
+    public synchronized StoredPaymentCompensation paymentCompensation(UUID transactionId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM payment_compensation WHERE transaction_id = ?
+                """)) {
+            query.setString(1, transactionId.toString());
+            return readPaymentCompensation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read payment compensation " + transactionId, failure);
+        }
+    }
+
+    private static StoredPaymentCompensation readPaymentCompensation(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredPaymentCompensation(
+                    UUID.fromString(result.getString("compensation_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("transaction_id")),
+                    result.getString("reason"),
+                    result.getString("state"));
         }
     }
 
@@ -1219,6 +1540,28 @@ public final class CivicDatabase implements AutoCloseable {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate Civic backup " + backupFile, failure);
+        }
+    }
+
+    private void insertRecoveryAudit(
+            UUID transactionId,
+            String action,
+            String serviceIdentity,
+            String detail,
+            long recordedAtEpochMillis) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO payment_recovery_audit (
+                    audit_id, transaction_id, action, service_identity,
+                    detail, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, UUID.randomUUID().toString());
+            insert.setString(2, transactionId.toString());
+            insert.setString(3, action);
+            insert.setString(4, serviceIdentity);
+            insert.setString(5, detail);
+            insert.setLong(6, recordedAtEpochMillis);
+            insert.executeUpdate();
         }
     }
 

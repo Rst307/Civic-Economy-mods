@@ -21,6 +21,7 @@ import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.CompensatePayment;
 import org.civiceconomy.fiscal.ExternalPayment;
 import org.civiceconomy.fiscal.FailurePoint;
 import org.civiceconomy.fiscal.FiscalLedger;
@@ -29,6 +30,8 @@ import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PaymentKind;
 import org.civiceconomy.fiscal.PaymentTransaction;
 import org.civiceconomy.fiscal.RefundPayment;
+import org.civiceconomy.fiscal.RecoveryAction;
+import org.civiceconomy.fiscal.ReleaseReservation;
 import org.civiceconomy.fiscal.Reservation;
 import org.civiceconomy.fiscal.ReserveFunds;
 import org.civiceconomy.fiscal.ServiceIdentity;
@@ -234,6 +237,110 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     MoneyAmount.ofMinorUnits(300),
                     coordinator.transaction(original.requestId()).refundedAmount(),
                     "original transaction refunded amount");
+        } finally {
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), treasury, fundingAccount, accounts.balance(treasury)));
+        bankData.deleteAccount(fundingPlayerId);
+        bankData.deleteAccount(recipientPlayerId);
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void externallyAppliedTreasuryPaymentCompensatesThroughRealLcExactlyOnce(
+            GameTestHelper helper) {
+        UUID fundingPlayerId = UUID.randomUUID();
+        UUID recipientPlayerId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        AccountId treasury =
+                new AccountId("nation:2c93ef6b-8f2d-48b6-af3d-55b4ef715c9f:treasury");
+        AccountId fundingAccount = new AccountId("player:" + fundingPlayerId);
+        AccountId recipientAccount = new AccountId("player:" + recipientPlayerId);
+        LightmansCurrencyFiscalAccounts accounts = LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, "Compensation GameTest Treasury");
+        LightmansCurrencyPayments payments = LightmansCurrencyPayments.live(helper.getLevel());
+        clearFiscalAccount(bankData, accounts, payments, treasury);
+        IBankAccount fundingPlayer = reset(bankData, fundingPlayerId, 1_000);
+        IBankAccount recipientPlayer = reset(bankData, recipientPlayerId, 25);
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), fundingAccount, treasury, MoneyAmount.ofMinorUnits(700)));
+
+        Path temporaryDirectory = createTemporaryDirectory();
+        Path databaseFile = temporaryDirectory.resolve("civic.sqlite3");
+        DatabaseIdentity identity = new DatabaseIdentity(
+                UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20");
+        String paymentRequestId = "compensation-payment-" + UUID.randomUUID();
+        String compensationRequestId = "compensation-reversal-" + UUID.randomUUID();
+        UUID transactionId;
+        UUID reservationId;
+        try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
+            FiscalLedger ledger = new FiscalLedger(database, accounts);
+            Reservation reservation = ledger.reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy-gametest"),
+                    "compensation-hold-" + UUID.randomUUID(),
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Real LC compensation GameTest"));
+            reservationId = reservation.reservationId();
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
+            try {
+                coordinator.settle(
+                        new SettleReservation(
+                                new ServiceIdentity("civiceconomy-gametest"),
+                                paymentRequestId,
+                                reservationId,
+                                recipientAccount,
+                                MoneyAmount.ofMinorUnits(300)),
+                        FailurePoint.AFTER_EXTERNAL_APPLIED);
+                helper.fail("Expected the controlled post-external payment crash");
+            } catch (SimulatedCrash expected) {
+                // The recorded external payment is now eligible for controlled compensation.
+            }
+            transactionId = coordinator.transaction(paymentRequestId).transactionId();
+            try {
+                coordinator.compensate(
+                        new CompensatePayment(
+                                new ServiceIdentity("civiceconomy-gametest-admin"),
+                                compensationRequestId,
+                                transactionId,
+                                "Controlled real LC compensation"),
+                        FailurePoint.AFTER_COMPENSATION_BEFORE_RECORD);
+                helper.fail("Expected the controlled post-compensation crash");
+            } catch (SimulatedCrash expected) {
+                // Recovery must replay the persisted reverse-transfer UUID.
+            }
+        }
+
+        try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
+            FiscalLedger ledger = new FiscalLedger(reopened, accounts);
+            PaymentCoordinator recovery = new PaymentCoordinator(reopened, payments);
+            recovery.recoverIncomplete();
+            PaymentTransaction compensated = recovery.compensate(
+                    new CompensatePayment(
+                            new ServiceIdentity("civiceconomy-gametest-admin"),
+                            compensationRequestId,
+                            transactionId,
+                            "Controlled real LC compensation"),
+                    FailurePoint.NONE);
+
+            helper.assertValueEqual(300L, mainChainBalance(fundingPlayer), "funding LC player-bank balance");
+            helper.assertValueEqual(700L, accounts.balance(treasury).minorUnits(), "compensated Treasury balance");
+            helper.assertValueEqual(25L, mainChainBalance(recipientPlayer), "compensated recipient balance");
+            helper.assertValueEqual(TransactionState.COMPENSATED, compensated.state(), "compensated payment state");
+            helper.assertValueEqual(
+                    MoneyAmount.ofMinorUnits(300),
+                    ledger.reservedBalance(treasury),
+                    "Reservation preserved after compensation");
+            helper.assertValueEqual(
+                    List.of(RecoveryAction.COMPENSATION_STARTED, RecoveryAction.COMPENSATION_COMPLETED),
+                    recovery.recoveryAudit(transactionId).stream().map(entry -> entry.action()).toList(),
+                    "durable compensation audit actions");
+            ledger.release(new ReleaseReservation(
+                    new ServiceIdentity("civiceconomy-gametest"),
+                    "compensation-release-" + UUID.randomUUID(),
+                    reservationId,
+                    "Compensated GameTest payment no longer needs its hold"));
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
         }

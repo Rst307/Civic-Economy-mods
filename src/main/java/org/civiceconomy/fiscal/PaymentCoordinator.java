@@ -1,9 +1,12 @@
 package org.civiceconomy.fiscal;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.PendingReservationPaymentException;
 import org.civiceconomy.persistence.ReservationRemainderExceededException;
+import org.civiceconomy.persistence.StoredPaymentCompensation;
 import org.civiceconomy.persistence.StoredPaymentTransaction;
 
 public final class PaymentCoordinator {
@@ -67,6 +70,36 @@ public final class PaymentCoordinator {
         return applyAndCommit(transaction, failurePoint);
     }
 
+    public PaymentTransaction compensate(CompensatePayment request, FailurePoint failurePoint) {
+        StoredPaymentCompensation compensation = database.prepareCompensation(
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.transactionId(),
+                request.reason(),
+                System.currentTimeMillis());
+        if (!compensation.serviceIdentity().equals(request.serviceIdentity().value())
+                || !compensation.requestId().equals(request.requestId())
+                || !compensation.transactionId().equals(request.transactionId())
+                || !compensation.reason().equals(request.reason())) {
+            throw new IdempotencyConflictException(request.serviceIdentity(), request.requestId());
+        }
+
+        PaymentTransaction transaction = toTransaction(database.paymentTransaction(request.transactionId()));
+        if (transaction.state() == TransactionState.COMPENSATING) {
+            externalPayments.apply(compensationPayment(transaction, compensation.compensationId()));
+            if (failurePoint == FailurePoint.AFTER_COMPENSATION_BEFORE_RECORD) {
+                throw new SimulatedCrash(failurePoint);
+            }
+            database.completeCompensation(transaction.transactionId(), System.currentTimeMillis());
+            transaction = toTransaction(database.paymentTransaction(request.transactionId()));
+        }
+        if (transaction.state() != TransactionState.COMPENSATED) {
+            throw new IllegalStateException(
+                    "Payment transaction has inconsistent compensation state " + transaction.transactionId());
+        }
+        return transaction;
+    }
+
     private PaymentTransaction applyAndCommit(PaymentTransaction transaction, FailurePoint failurePoint) {
         if (transaction.state() == TransactionState.PREPARED) {
             externalPayments.apply(externalPayment(transaction));
@@ -80,7 +113,7 @@ public final class PaymentCoordinator {
             }
         }
         if (transaction.state() == TransactionState.EXTERNAL_APPLIED) {
-            commit(transaction);
+            commit(transaction, false);
             transaction = transaction(transaction.requestId());
         }
         return transaction;
@@ -89,13 +122,38 @@ public final class PaymentCoordinator {
     public void recoverIncomplete() {
         for (StoredPaymentTransaction stored : database.incompletePayments()) {
             PaymentTransaction transaction = toTransaction(stored);
+            if (transaction.state() == TransactionState.COMPENSATING) {
+                StoredPaymentCompensation compensation =
+                        database.paymentCompensation(transaction.transactionId());
+                if (compensation == null) {
+                    throw new IllegalStateException(
+                            "Compensating payment has no durable compensation request "
+                                    + transaction.transactionId());
+                }
+                externalPayments.apply(compensationPayment(transaction, compensation.compensationId()));
+                database.completeCompensation(transaction.transactionId(), System.currentTimeMillis());
+                continue;
+            }
             if (transaction.state() == TransactionState.PREPARED) {
                 externalPayments.apply(externalPayment(transaction));
-                database.markExternalApplied(transaction.transactionId());
+                database.markExternalAppliedDuringRecovery(
+                        transaction.transactionId(), System.currentTimeMillis());
                 transaction = transaction(transaction.requestId());
             }
-            commit(transaction);
+            commit(transaction, true);
         }
+    }
+
+    public List<RecoveryAuditEntry> recoveryAudit(UUID transactionId) {
+        return database.recoveryAudit(transactionId).stream()
+                .map(stored -> new RecoveryAuditEntry(
+                        stored.auditId(),
+                        stored.transactionId(),
+                        RecoveryAction.valueOf(stored.action()),
+                        new ServiceIdentity(stored.serviceIdentity()),
+                        stored.detail(),
+                        stored.recordedAt()))
+                .toList();
     }
 
     public PaymentTransaction transaction(String requestId) {
@@ -114,12 +172,35 @@ public final class PaymentCoordinator {
                 transaction.amount());
     }
 
-    private void commit(PaymentTransaction transaction) {
+    private static ExternalPayment compensationPayment(
+            PaymentTransaction transaction, UUID compensationTransactionId) {
+        return new ExternalPayment(
+                compensationTransactionId,
+                transaction.recipientAccount(),
+                transaction.sourceAccount(),
+                transaction.amount());
+    }
+
+    private void commit(PaymentTransaction transaction, boolean recovery) {
         if (transaction.kind() == PaymentKind.PAYMENT) {
-            database.commitPayment(transaction.transactionId(), transaction.reservationId());
+            if (recovery) {
+                database.commitPaymentDuringRecovery(
+                        transaction.transactionId(),
+                        transaction.reservationId(),
+                        System.currentTimeMillis());
+            } else {
+                database.commitPayment(transaction.transactionId(), transaction.reservationId());
+            }
         } else {
-            database.commitRefund(
-                    transaction.transactionId(), transaction.parentTransactionId().orElseThrow());
+            if (recovery) {
+                database.commitRefundDuringRecovery(
+                        transaction.transactionId(),
+                        transaction.parentTransactionId().orElseThrow(),
+                        System.currentTimeMillis());
+            } else {
+                database.commitRefund(
+                        transaction.transactionId(), transaction.parentTransactionId().orElseThrow());
+            }
         }
     }
 

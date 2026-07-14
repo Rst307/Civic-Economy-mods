@@ -58,16 +58,22 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added idempotent full and partial refunds for committed payments. Refunds reverse source/recipient accounts through the same external transaction UUID marker and reject amounts above the remaining refundable value.
 - Refund recovery covers both ambiguous external application and recorded `EXTERNAL_APPLIED` restart windows; replay does not repeat the economic effect.
 - Added online SQLite backups through Xerial's native backup API, so an open WAL database can produce a consistent point-in-time snapshot without copying live database files directly.
-- Added validated restore to a new database path. Restore fails closed before publication unless the backup has schema v9 and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
+- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (v10) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
 - Restore refuses to overwrite an existing destination and publishes through a temporary sibling file, using an atomic move when the filesystem supports it.
+- Raised the SQLite schema to v10 with durable payment-compensation requests and immutable recovery-audit records.
+- Added controlled compensation for a `EXTERNAL_APPLIED` payment or refund that must not complete normally. The transaction enters `COMPENSATING` before the reverse transfer and reaches `COMPENSATED` only after the reverse is confirmed.
+- Compensation persists a dedicated reverse-transfer UUID before calling LC, so a crash after the external reverse but before Civic records completion can replay without a second economic effect.
+- A compensated payment does not consume its Reservation. The hold remains active for release or a later valid settlement, while a `COMPENSATING` transaction blocks unsafe release and overlapping payment/refund work.
+- Recovery advancement and its audit record commit in the same SQLite transaction. Ambiguous `PREPARED` recovery records external confirmation, and recovery from `EXTERNAL_APPLIED` records the Civic commit.
+- Compensation request identity, reason, start, and completion remain queryable through the `PaymentCoordinator` interface across database reopen.
 
 ## In progress
 
-- Add compensation execution and recovery audit records for external failures that cannot complete normally.
+- Add durable Budget and Escrow objects over Reservations, including explicit lifecycle, idempotent writes, partial settlement, release, and expiry semantics.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v9, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow, compensation execution, and recovery audit records.
+- SQLite migrations beyond schema v10, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
 - Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, registration eligibility, fiscal roles, capital, rebinding, liquidation, and Nation lifecycle restrictions.
 - Player-bank balance adapter; budgets, Escrow, withdrawals, approvals, ledger, audit, and service authorization policy.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
@@ -102,13 +108,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - This is compilation/build evidence only, not installability or gameplay evidence.
 - JAR inspection confirmed `META-INF/jarjar/sqlite-jdbc-3.50.3.0.jar` and NeoForge jar-in-jar metadata.
 - After the Civic fiscal-account slice, `gradlew.bat clean test build --no-daemon --console=plain` passed and produced `build/libs/civiceconomy-0.1.0-probe.jar` containing the Mixin config, all GameTests, generated structure fixture, and jar-in-jar SQLite driver.
-- After the online-backup/validated-restore slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,481,421 bytes, SHA-256 `AF0D50B37176C1C3499DE7722B49939F475826F5C4BF9558BC026926546DB033`. This is not yet a release artifact.
+- After the compensation/recovery-audit slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,493,326 bytes, SHA-256 `C5F8F49F6C2F20F816D48A08634BF5BAE37CA23E874344997FE529EED50F2D60`. This is not yet a release artifact.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v9, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, and refund storage, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v10, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, online-time, release, partial-settlement, refund, compensation, and recovery-audit storage, foreign-world rejection, and unknown-schema rejection.
 - `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
@@ -124,18 +130,21 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Release tests verify exact replay across restart, reason-payload conflict rejection, immediate available-balance restoration, and rejection while a payment is ambiguous or already committed.
 - Partial-settlement tests verify `500 -> 300 -> 0` remaining-hold behavior, replay stability, release of only the remaining `300`, over-settlement rejection at `301`, and restart recovery of a committed `200` payment with `300` still reserved.
 - Refund integration tests verify exact-once full refund replay, cumulative `200 + 300` partial refunds, rejection above the refundable ceiling, ambiguous refund retry with one economic effect, and `EXTERNAL_APPLIED` recovery without another external call.
-- The SQLite crash-recovery tests still use a controlled external-payment adapter; real LC payment evidence is recorded separately below and is not yet wired to Civic-owned treasury accounts.
+- Compensation integration tests use a real temporary SQLite database and a controlled idempotent external adapter. They verify `EXTERNAL_APPLIED -> COMPENSATING -> COMPENSATED`, a crash after reverse transfer, three adapter attempts but only two economic effects, unchanged Reservation value, durable request identity/reason, and ordered start/completion audit records.
+- Ambiguous-payment recovery tests verify that external confirmation and Civic commit audit records are durable, ordered, and not duplicated by a second recovery pass.
+- The SQLite crash-recovery tests use a controlled external-payment adapter to force exact failure windows; real LC National Treasury commit, refund, and compensation evidence is recorded separately below.
 
 ### Real Lightman's Currency integration
 
 - `LightmansCurrencyPaymentsTest` verifies the adapter interface with a boundary fake: replay moves money once and an insufficient partial withdrawal is restored without an applied marker.
-- `gradlew.bat runGameTestServer --console=plain` passed nine required GameTests against the real pinned LC/FTB runtime after the refund slice.
+- `gradlew.bat runGameTestServer --no-daemon --console=plain` passed all 10 required GameTests against the real pinned LC/FTB runtime after the compensation slice.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
 - The interest test funded a National Treasury with 500 LC minor units, invoked LC's interest hook with a multiplier that would otherwise double it, and verified the balance remained exactly 500.
 - The treasury settlement test used a real temporary SQLite database and real LC accounts. Funding player `1000 → 300`, National Treasury `0 → 700 → 400`, and recipient `25 → 325`; ambiguous recovery finished `CIVIC_COMMITTED` and cleared the Reservation without a second economic effect.
 - The refund GameTest paid `300` from the real National Treasury to a real LC player account and reversed it exactly once: funding player remained `300`, National Treasury returned to `700`, recipient returned to `25`, replay returned the same committed refund, and the original payment recorded `300` refunded minor units.
+- The compensation GameTest paid `300` from a real National Treasury, entered durable compensation, reversed through real LC, crashed before Civic recorded the reverse, reopened SQLite, and recovered without another economic effect. The National Treasury returned to `700`, the recipient returned to `25`, the `300`-unit Reservation remained active, replay returned `COMPENSATED`, and both audit actions survived reopen.
 - Repeated GameTest runs honor markers persisted by earlier runs; each isolated test therefore uses a fresh transaction UUID while replaying it twice within that run.
 - LC logs `GameProfileCache` errors when its synthetic offline player accounts are generated under the headless GameTest server, whose profile cache is null. The required test still passes and normal dedicated-server startup does not show this condition.
 
@@ -174,6 +183,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the server-runtime slice, the no-Create dedicated server reached `Done (3.361s)!` and then logged world-bound SQLite/online observation active. The Create `6.0.6` server reached `Done (3.374s)!` and logged the same runtime activation immediately afterward.
 - After Reservation release and partial settlement, the no-Create server reached `Done (3.399s)!` and the Create `6.0.6` server reached `Done (3.252s)!`; both then opened the migrated world-bound SQLite runtime successfully.
 - After the refund/schema-v9 slice, the no-Create server reached `Done (3.571s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.400s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully.
+- After the compensation/schema-v10 slice, the no-Create server reached `Done (3.593s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.418s)!` with production scoring enabled; both opened the migrated world-bound SQLite runtime successfully.
 
 ### Environment note
 
@@ -191,11 +201,12 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
 - Founding eligibility is intentionally not wired to raw FTB members. The spec needs either a pending Nation/application state that can accumulate Citizenship time before activation, or an explicit rule for pre-Nation activity evidence; implementation is paused only at that semantic fork.
 - Applied player-transfer UUIDs are retained indefinitely in LC bank data; a safe retention/compaction policy must be designed without reopening replay windows.
-- The treasury GameTest proves real LC/SQLite recovery inside one running server after the ambiguous adapter window. It does not yet prove process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files; durable per-account transfer phase evidence or compensation is still required before release.
+- The treasury GameTests prove real LC/SQLite commit and compensation recovery inside one running server across controlled reopen windows. They do not yet prove actual process-death ordering across Civic fiscal-account `SavedData`, LC `BankDataCache`, and SQLite files.
+- `CompensatePayment` currently trusts the supplied service identity. Gameplay/admin authorization and approval policy are not yet wired, so no player-facing compensation command may be exposed until the service-authorization slice exists.
 - Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
 - Lightman's Currency defaults include issuance and interest mechanisms that must be explicitly disabled or blocked before a playable release can satisfy currency conservation.
 
 ## Next step
 
-Implement controlled compensation and recovery audit records for failed external writes, then continue the fiscal release path with budgets and Escrow while the founding activation semantic fork remains explicitly documented.
+Implement Budget and Escrow lifecycle over the proven Reservation/payment/refund/compensation core while the founding activation semantic fork remains explicitly documented.

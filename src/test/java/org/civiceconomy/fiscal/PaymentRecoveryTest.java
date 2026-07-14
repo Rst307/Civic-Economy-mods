@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -538,6 +539,126 @@ class PaymentRecoveryTest {
             assertEquals(
                     MoneyAmount.ofMinorUnits(300),
                     recovery.transaction("recorded-refund-original").refundedAmount());
+        }
+    }
+
+    @Test
+    void compensationRecoversWithoutReversingTwiceAndLeavesAnAuditTrail() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        AtomicInteger externalAttempts = new AtomicInteger();
+        AtomicInteger recipientNetMinorUnits = new AtomicInteger();
+        Set<UUID> appliedTransactions = new HashSet<>();
+        ExternalPayments idempotentExternal = payment -> {
+            externalAttempts.incrementAndGet();
+            if (appliedTransactions.add(payment.transactionId())) {
+                if (payment.sourceAccount().equals(treasury)) {
+                    recipientNetMinorUnits.addAndGet((int) payment.amount().minorUnits());
+                } else {
+                    recipientNetMinorUnits.addAndGet((int) -payment.amount().minorUnits());
+                }
+            }
+        };
+        UUID transactionId;
+
+        try (CivicDatabase database = database()) {
+            Reservation reservation = ledger(database).reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "compensation-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Compensation fixture"));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, idempotentExternal);
+            assertThrows(SimulatedCrash.class, () -> coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "compensation-original",
+                            reservation.reservationId(),
+                            recipient,
+                            MoneyAmount.ofMinorUnits(300)),
+                    FailurePoint.AFTER_EXTERNAL_APPLIED));
+            transactionId = coordinator.transaction("compensation-original").transactionId();
+
+            assertThrows(SimulatedCrash.class, () -> coordinator.compensate(
+                    new CompensatePayment(
+                            new ServiceIdentity("civiceconomy-admin"),
+                            "compensate-original",
+                            transactionId,
+                            "Civic commit cannot safely complete"),
+                    FailurePoint.AFTER_COMPENSATION_BEFORE_RECORD));
+            assertEquals(0, recipientNetMinorUnits.get());
+            assertEquals(TransactionState.COMPENSATING, coordinator.transaction("compensation-original").state());
+            assertThrows(
+                    ReservationHasPendingPaymentException.class,
+                    () -> ledger(database).release(new ReleaseReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "unsafe-release-during-compensation",
+                            reservation.reservationId(),
+                            "Compensation has not completed")));
+        }
+
+        try (CivicDatabase reopened = database()) {
+            PaymentCoordinator recovery = new PaymentCoordinator(reopened, idempotentExternal);
+
+            recovery.recoverIncomplete();
+
+            assertEquals(3, externalAttempts.get());
+            assertEquals(0, recipientNetMinorUnits.get());
+            assertEquals(TransactionState.COMPENSATED, recovery.transaction("compensation-original").state());
+            assertEquals(MoneyAmount.ofMinorUnits(300), ledger(reopened).reservedBalance(treasury));
+            assertEquals(
+                    List.of(RecoveryAction.COMPENSATION_STARTED, RecoveryAction.COMPENSATION_COMPLETED),
+                    recovery.recoveryAudit(transactionId).stream().map(RecoveryAuditEntry::action).toList());
+            assertEquals(
+                    new ServiceIdentity("civiceconomy-admin"),
+                    recovery.recoveryAudit(transactionId).getFirst().serviceIdentity());
+            assertEquals(
+                    "Civic commit cannot safely complete",
+                    recovery.recoveryAudit(transactionId).getFirst().detail());
+        }
+    }
+
+    @Test
+    void ambiguousPaymentRecoveryIsAuditedExactlyOnce() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        AccountId recipient = new AccountId("player:river");
+        Set<UUID> appliedTransactions = new HashSet<>();
+        ExternalPayments idempotentExternal = payment -> appliedTransactions.add(payment.transactionId());
+        UUID transactionId;
+
+        try (CivicDatabase database = database()) {
+            Reservation reservation = ledger(database).reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "audited-recovery-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Audited recovery fixture"));
+            PaymentCoordinator coordinator = new PaymentCoordinator(database, idempotentExternal);
+            assertThrows(SimulatedCrash.class, () -> coordinator.settle(
+                    new SettleReservation(
+                            new ServiceIdentity("civiceconomy"),
+                            "audited-recovery-payment",
+                            reservation.reservationId(),
+                            recipient,
+                            MoneyAmount.ofMinorUnits(300)),
+                    FailurePoint.AFTER_EXTERNAL_BEFORE_RECORD));
+            transactionId = coordinator.transaction("audited-recovery-payment").transactionId();
+        }
+
+        try (CivicDatabase reopened = database()) {
+            PaymentCoordinator recovery = new PaymentCoordinator(reopened, idempotentExternal);
+
+            recovery.recoverIncomplete();
+            recovery.recoverIncomplete();
+
+            assertEquals(
+                    List.of(
+                            RecoveryAction.RECOVERY_EXTERNAL_APPLIED,
+                            RecoveryAction.RECOVERY_CIVIC_COMMITTED),
+                    recovery.recoveryAudit(transactionId).stream().map(RecoveryAuditEntry::action).toList());
+            assertEquals(
+                    new ServiceIdentity("civiceconomy-recovery"),
+                    recovery.recoveryAudit(transactionId).getFirst().serviceIdentity());
         }
     }
 
