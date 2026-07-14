@@ -1,7 +1,11 @@
 package org.civiceconomy.platform.neoforge;
 
 import com.mojang.brigadier.Command;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.function.Function;
@@ -23,8 +27,14 @@ import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
+import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
+import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
 
 public final class FiscalAdministrationCommands {
+    private static final ServiceIdentity TERRITORY_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-territory-policy");
+
     private FiscalAdministrationCommands() {}
 
     public static void register(RegisterCommandsEvent event) {
@@ -38,7 +48,8 @@ public final class FiscalAdministrationCommands {
                 .then(stateCommand("enable", FiscalServiceState.ENABLED));
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
-                .then(service);
+                .then(service)
+                .then(territoryPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
                         .then(NationApplicationCommands.command())
@@ -52,6 +63,121 @@ public final class FiscalAdministrationCommands {
             civic.then(CivicDebugWorldCommands.command(dedicatedStartupPermit));
         }
         event.getDispatcher().register(civic);
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            territoryPolicyCommand() {
+        return Commands.literal("territory")
+                .then(Commands.literal("policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showTerritoryPolicy(context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "baseChunks", IntegerArgumentType.integer(0))
+                                        .then(Commands.argument(
+                                                        "chunksPerEffectiveCitizen",
+                                                        IntegerArgumentType.integer(0))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType
+                                                                                        .greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleTerritoryPolicy(
+                                                                                        context.getSource(),
+                                                                                        IntegerArgumentType.getInteger(
+                                                                                                context,
+                                                                                                "baseChunks"),
+                                                                                        IntegerArgumentType.getInteger(
+                                                                                                context,
+                                                                                                "chunksPerEffectiveCitizen"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "requestId"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "reason"))))))))));
+    }
+
+    private static int showTerritoryPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new TerritoryFreeAllocationPolicyRegistry(
+                                database,
+                                clock,
+                                TerritoryFreeAllocationPolicyVersion.defaultPolicy(0, 0))
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(formatTerritoryPolicy(policy)), false);
+                    } else {
+                        reportDatabaseFailure(source, "Territory policy query", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleTerritoryPolicy(
+            CommandSourceStack source,
+            int baseChunks,
+            int chunksPerEffectiveCitizen,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new TerritoryFreeAllocationPolicyRegistry(
+                                database,
+                                clock,
+                                TerritoryFreeAllocationPolicyVersion.defaultPolicy(0, 0))
+                        .schedule(new ScheduleTerritoryFreeAllocationPolicy(
+                                TERRITORY_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                baseChunks,
+                                chunksPerEffectiveCitizen,
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatTerritoryPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(source, "Territory policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatTerritoryPolicy(TerritoryFreeAllocationPolicyVersion policy) {
+        return "Territory Free Allocation policy " + policy.policyId()
+                + " baseChunks=" + policy.baseChunks()
+                + " chunksPerEffectiveCitizen=" + policy.chunksPerEffectiveCitizen()
+                + " effectiveAt=" + policy.effectiveAt()
+                + " actor=" + policy.actorIdentity()
+                + (policy.defaultPolicy() ? " [DEFAULT]" : "");
+    }
+
+    private static void reportDatabaseFailure(
+            CommandSourceStack source, String operation, Throwable failure) {
+        Throwable cause = failure instanceof CompletionException
+                && failure.getCause() != null
+                ? failure.getCause()
+                : failure;
+        source.sendFailure(Component.literal(operation + " failed: " + cause.getMessage()));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>

@@ -109,7 +109,11 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin service revoke ...
 /civic economy admin service disable ...
 /civic economy admin service enable ...
+/civic economy admin territory policy show
+/civic economy admin territory policy schedule <baseChunks> <chunksPerEffectiveCitizen> <effectiveAtEpochMillis> <requestId> <reason>
 ```
+
+领土政策命令仅允许 OP/控制台。变更必须安排在未来时刻生效，并持久化操作者、稳定 request ID、参数、理由和生效时间；在管理员安排首个版本前，免费领土额度使用保守的 `0 + 0 × Effective Citizen` 默认值。
 
 单人集成服务器中，拥有作弊权限的世界所有者使用以下二次确认流程永久启用调试世界：
 

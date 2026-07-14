@@ -137,6 +137,23 @@ public final class CivicServerRuntimeGameTests {
     }
 
     @GameTest(template = "empty", timeoutTicks = 200)
+    public static void consoleSchedulesTerritoryPolicyOffThread(GameTestHelper helper) {
+        String requestId = "territory-policy-command-" + UUID.randomUUID();
+        long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
+        var server = helper.getLevel().getServer();
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin territory policy schedule 9 4 " + effectiveAt
+                        + " " + requestId + " GameTest territory policy");
+        Path databaseFile = server.getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+
+        helper.succeedWhen(() -> assertTerritoryPolicyScheduled(
+                helper, databaseFile, requestId, effectiveAt));
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 200)
     public static void ftbTeamHeadCanCreateNationApplicationOffThread(GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(
                 helper.getLevel().getServer(),
@@ -553,6 +570,39 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect Nation fiscal role command result", failure);
+        }
+    }
+
+    private static void assertTerritoryPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, base_chunks,
+                               chunks_per_effective_citizen,
+                               effective_at_epoch_millis, reason
+                        FROM territory_free_allocation_policy
+                        WHERE service_identity = 'civiceconomy-territory-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Territory Free Allocation policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived territory policy administrator");
+                helper.assertValueEqual(9, result.getInt(2), "territory base chunks");
+                helper.assertValueEqual(4, result.getInt(3), "territory chunks per Effective Citizen");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis, result.getLong(4), "territory policy effective time");
+                helper.assertValueEqual(
+                        "GameTest territory policy", result.getString(5), "territory policy reason");
+                helper.assertFalse(result.next(), "duplicate Territory Free Allocation policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect territory policy command result", failure);
         }
     }
 

@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 23;
+    private static final int SCHEMA_VERSION = 24;
 
     private final Connection connection;
 
@@ -1568,6 +1568,70 @@ public final class CivicDatabase implements AutoCloseable {
             return readNationFiscalPermissionGrant(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Nation Fiscal Permission grant", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryFreeAllocationPolicy territoryFreeAllocationPolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_free_allocation_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryFreeAllocationPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Territory Free Allocation policy", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryFreeAllocationPolicy currentTerritoryFreeAllocationPolicy(
+            long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_free_allocation_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readTerritoryFreeAllocationPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read current Territory Free Allocation policy", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryFreeAllocationPolicy scheduleTerritoryFreeAllocationPolicy(
+            UUID policyId,
+            String serviceIdentity,
+            String requestId,
+            String actorIdentity,
+            int baseChunks,
+            int chunksPerEffectiveCitizen,
+            long effectiveAtEpochMillis,
+            String reason,
+            long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_free_allocation_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    base_chunks, chunks_per_effective_citizen,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setInt(5, baseChunks);
+            insert.setInt(6, chunksPerEffectiveCitizen);
+            insert.setLong(7, effectiveAtEpochMillis);
+            insert.setString(8, reason);
+            insert.setLong(9, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return territoryFreeAllocationPolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to schedule Territory Free Allocation policy", failure);
         }
     }
 
@@ -3746,6 +3810,32 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 23");
             }
+            if (version < 24) {
+                statement.execute("""
+                        CREATE TABLE territory_free_allocation_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            base_chunks INTEGER NOT NULL CHECK (base_chunks >= 0),
+                            chunks_per_effective_citizen INTEGER NOT NULL
+                                CHECK (chunks_per_effective_citizen >= 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (effective_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX territory_free_allocation_policy_current
+                        ON territory_free_allocation_policy (effective_at_epoch_millis)
+                        """);
+                statement.execute("PRAGMA user_version = 24");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -3789,6 +3879,25 @@ public final class CivicDatabase implements AutoCloseable {
             PreparedStatement query) throws SQLException {
         try (ResultSet result = query.executeQuery()) {
             return result.next() ? storedNationFiscalPermissionGrant(result) : null;
+        }
+    }
+
+    private StoredTerritoryFreeAllocationPolicy readTerritoryFreeAllocationPolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredTerritoryFreeAllocationPolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getInt("base_chunks"),
+                    result.getInt("chunks_per_effective_citizen"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
         }
     }
 
