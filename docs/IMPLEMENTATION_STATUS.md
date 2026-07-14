@@ -157,6 +157,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
+- The same focused schema-v3 recovery/database suite was re-run on clean commit `4371d2f` in an isolated worktree on 2026-07-14: 22 tests passed (`PaymentRecoveryTest` 14, `CivicDatabaseTest` 4, `CivicDatabaseBackupTest` 4). The shared checkout's unrelated owner-bound authorization RED test was preserved and excluded from this evidence.
 - These are real database integration tests, not mocks. Automatic scheduling/rotation, live replacement of the authoritative database, and a process-death restore drill remain unverified.
 
 ### Fiscal domain and database integration
