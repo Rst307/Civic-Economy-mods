@@ -134,10 +134,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised the SQLite schema to v23 with immutable Nation Fiscal Permission grants and separate immutable revocations. Every grant is scoped to one stable Nation, one Citizen UUID, and one exact permission; service/request replay is unique, changed replay conflicts, active duplicate scope is rejected, and reauthorization after revocation creates new provenance.
 - Added server-authoritative Nation fiscal governance. Grant/revoke requires the real FTB Team owner to also resolve through the formal Citizenship Provider for the same Nation; the target must be an Effective Citizen of that exact Nation, and active grants stop being effective when Provider authority is suspended.
 - Added `/civic economy nation role list|grant|revoke`. Caller identity and Nation are derived from the real command source plus live FTB facts, target scope uses a stable player UUID that is revalidated against the Provider, and all SQLite work runs on `Civic-Economy-SQLite`.
+- Added a pure Territory Free Allocation policy module. It consumes the explainable Nation Effective Citizen population, applies configurable base and per-Effective-Citizen chunk parameters with checked arithmetic, and never reads raw FTB Team membership.
 
 ## In progress
 
-- Use the explainable Nation population result in territory free-allocation policy.
+- Persist configurable Territory Free Allocation parameters and expose the explainable allowance through trusted Nation governance before wiring claim prepayment.
 
 ## Not yet completed
 
@@ -189,7 +190,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After Citizenship Reconciliation/schema-v22, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 122 tests with zero failures.
 - After the Nation Effective Citizen population slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 123 tests with zero failures.
 - After the Nation Fiscal Permission/schema-v23 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 127 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,729,905 bytes, SHA-256 `553F2DBD75C161864BC68E3350CDC80D542F6311FFEB833A1F0F17E22A479AAF`. It remains a development artifact until all v1 completion gates pass.
+- After the pure Territory Free Allocation policy slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 128 tests with zero failures. This is domain/build evidence only; claim-event integration is not yet implemented.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,732,231 bytes, SHA-256 `6E0BAA94BF5ED3F1F6251421FB19C28F5EDCC0959DD8DB3C303CDFCDB6A7E615`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -345,4 +347,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Consume the explainable Effective Citizen population result in configurable territory free-allocation policy without treating FTB membership counts as population.
+Persist configurable Territory Free Allocation parameters with audit and delayed policy effect, expose the current calculation in game, then use it in FTB Chunks claim prepayment without treating FTB membership counts as population.

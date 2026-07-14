@@ -132,6 +132,10 @@ _Avoid_: 转入国库、封存、未知现金丢失
 
 ## 领土与实力
 
+**免费领土额度（Territory Free Allocation）**:
+国家在一个维护周期内无需支付维护费的区块数量，由服务器基础额度与 Effective Citizen 数共同形成；它不是货币、退款或永久领土权。
+_Avoid_: 免费领土所有权、维护退款、FTB 成员额度
+
 **有效领土（Effective Territory）**:
 由 FTB Chunks 归属某国且当前满足 Civic 财政维护条件的区块。
 _Avoid_: 所有已占领区块、国界声明
