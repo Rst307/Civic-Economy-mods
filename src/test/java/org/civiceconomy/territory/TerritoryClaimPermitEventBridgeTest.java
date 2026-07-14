@@ -31,6 +31,7 @@ class TerritoryClaimPermitEventBridgeTest {
         List<TerritoryClaimPermitConsumptionIntent> queued = new ArrayList<>();
         TerritoryClaimPermitEventBridge bridge = new TerritoryClaimPermitEventBridge(
                 mirror,
+                new FreeClaimAuthorizationMirror(),
                 queued::add,
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
@@ -43,6 +44,28 @@ class TerritoryClaimPermitEventBridgeTest {
         assertTrue(queued.size() == 1);
         assertTrue(queued.getFirst().permitId().equals(
                 UUID.fromString("9fb92dd8-9e2e-44d2-8fe0-a9c67806fe64")));
+    }
+
+    @Test
+    void freeClaimAuthorizesOnceWithoutQueuingFiscalConsumption() {
+        TerritoryClaimPermitMirror permits = new TerritoryClaimPermitMirror();
+        FreeClaimAuthorizationMirror freeClaims = new FreeClaimAuthorizationMirror();
+        TerritoryClaimTarget target = new TerritoryClaimTarget(
+                NATION_ID, TEAM_ID, ACTOR_ID, "minecraft:overworld", 44, 55);
+        freeClaims.publish(new FreeClaimAuthorization(
+                UUID.randomUUID(), "free-claim-event", target, NOW.plusSeconds(120L)));
+        List<TerritoryClaimPermitConsumptionIntent> queued = new ArrayList<>();
+        TerritoryClaimPermitEventBridge bridge = new TerritoryClaimPermitEventBridge(
+                permits,
+                freeClaims,
+                queued::add,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertTrue(bridge.beforeClaim(target));
+        assertTrue(bridge.beforeClaim(target));
+        assertTrue(bridge.afterSuccessfulClaim(target));
+        assertFalse(bridge.afterSuccessfulClaim(target));
+        assertTrue(queued.isEmpty());
     }
 
     private TerritoryClaimPermit permit(TerritoryClaimTarget target) {

@@ -48,6 +48,9 @@ import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
 import org.civiceconomy.territory.ConsumeTerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermitEventBridge;
 import org.civiceconomy.territory.TerritoryClaimPermitMirror;
+import org.civiceconomy.territory.FreeClaimAuthorization;
+import org.civiceconomy.territory.FreeClaimAuthorizationMirror;
+import org.civiceconomy.territory.TerritoryClaimTarget;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 import org.civiceconomy.territory.PrepareTerritoryClaimPrepayment;
@@ -86,6 +89,8 @@ public final class CivicServerRuntime {
     private final Clock clock;
     private final TerritoryClaimPermitMirror territoryClaimPermitMirror =
             new TerritoryClaimPermitMirror();
+    private final FreeClaimAuthorizationMirror freeClaimAuthorizationMirror =
+            new FreeClaimAuthorizationMirror();
     private final Map<UUID, org.civiceconomy.nation.NationId> nationByFtbTeam =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicBoolean territoryClaimAuthorizationReady = new AtomicBoolean();
@@ -102,6 +107,7 @@ public final class CivicServerRuntime {
                         this,
                         new TerritoryClaimPermitEventBridge(
                                 territoryClaimPermitMirror,
+                                freeClaimAuthorizationMirror,
                                 this::queueTerritoryClaimPermitConsumption,
                                 clock))
                 .register();
@@ -234,6 +240,7 @@ public final class CivicServerRuntime {
             state = null;
             territoryClaimAuthorizationReady.set(false);
             territoryClaimPermitMirror.replaceAll(List.of());
+            freeClaimAuthorizationMirror.clear();
             nationByFtbTeam.clear();
         }
         LOGGER.info("Civic server runtime closed SQLite after draining buffered online-time intervals");
@@ -253,7 +260,7 @@ public final class CivicServerRuntime {
         return current.writer.submitDatabase(operation);
     }
 
-    CompletableFuture<TerritoryClaimPermit> prepareTerritoryClaim(
+    CompletableFuture<PreparedTerritoryClaim> prepareTerritoryClaim(
             NationTeam team,
             UUID actorPlayerId,
             String requestId,
@@ -269,6 +276,25 @@ public final class CivicServerRuntime {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("Civic server runtime is not active"));
         }
+        var freeReplay = freeClaimAuthorizationMirror.requireActiveReplay(
+                requestId, commandTime);
+        if (freeReplay.isPresent()) {
+            FreeClaimAuthorization authorization = freeReplay.orElseThrow();
+            TerritoryClaimTarget target = authorization.target();
+            if (!target.nationId().equals(nationForFtbTeam(team.teamId()))
+                    || !target.ftbTeamId().equals(team.teamId())
+                    || !target.actorPlayerId().equals(actorPlayerId)
+                    || !target.dimensionId().equals(dimensionId)
+                    || target.chunkX() != chunkX
+                    || target.chunkZ() != chunkZ) {
+                return CompletableFuture.failedFuture(
+                        new org.civiceconomy.fiscal.IdempotencyConflictException(
+                                TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                requestId));
+            }
+            return CompletableFuture.completedFuture(
+                    new PreparedTerritoryClaim(null, authorization));
+        }
         return current.writer.submitDatabase(database -> {
                     NationRegistry nations = new NationRegistry(database, teams);
                     var nation = nations.findByFtbTeam(team.teamId())
@@ -282,6 +308,13 @@ public final class CivicServerRuntime {
                             new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
                                     database, commandClock),
                             teams);
+                    var actorNation = provider.findForCitizen(actorPlayerId)
+                            .orElseThrow(() -> new SecurityException(
+                                    "Free Claim actor has no effective formal Citizenship"));
+                    if (!actorNation.nationId().equals(nation.nationId())) {
+                        throw new SecurityException(
+                                "Free Claim actor does not belong to the exact Nation");
+                    }
                     var population = new org.civiceconomy.nation.NationPopulationCalculator(
                                     citizenships,
                                     new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
@@ -317,11 +350,15 @@ public final class CivicServerRuntime {
                                     TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
                                     requestId);
                         }
-                        return permit;
+                        return new PreparedTerritoryClaim(permit, null);
                     }
                     int pendingClaims = Math.toIntExact(permits.readyPermits().stream()
                             .filter(permit -> permit.nationId().equals(nation.nationId()))
                             .count());
+                    pendingClaims = Math.addExact(
+                            pendingClaims,
+                            freeClaimAuthorizationMirror.pendingCount(
+                                    nation.nationId(), commandTime));
                     int quotedClaimedChunks = Math.addExact(
                             currentClaimedChunks, pendingClaims);
                     var quote = new TerritoryExpansionPricingPolicyRegistry(
@@ -332,8 +369,19 @@ public final class CivicServerRuntime {
                             .policy()
                             .quote(allocation, quotedClaimedChunks, 1, commandTime);
                     if (quote.prepayment().minorUnits() <= 0L) {
-                        throw new IllegalStateException(
-                                "This claim is within Territory Free Allocation and needs no paid Permit");
+                        TerritoryClaimTarget target = new TerritoryClaimTarget(
+                                nation.nationId(),
+                                team.teamId(),
+                                actorPlayerId,
+                                dimensionId,
+                                chunkX,
+                                chunkZ);
+                        FreeClaimAuthorization freeClaim = new FreeClaimAuthorization(
+                                UUID.randomUUID(),
+                                requestId,
+                                target,
+                                commandTime.plus(Duration.ofMinutes(2)));
+                        return new PreparedTerritoryClaim(null, freeClaim);
                     }
                     var authorization = new FiscalAuthorization(database);
                     var treasury = new org.civiceconomy.fiscal.AccountId(
@@ -342,7 +390,7 @@ public final class CivicServerRuntime {
                             .ensureAuthorized(treasury);
                     var session = authorization.openSession(
                             TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
-                    return new TerritoryClaimPrepaymentCoordinator(
+                    TerritoryClaimPermit permit = new TerritoryClaimPrepaymentCoordinator(
                                     nations,
                                     new org.civiceconomy.nation.NationFiscalAuthorityRegistry(
                                             database, provider, commandClock),
@@ -373,13 +421,21 @@ public final class CivicServerRuntime {
                                     allocation.totalFreeChunks(),
                                     quote,
                                     commandTime.plus(Duration.ofMinutes(2))));
+                    return new PreparedTerritoryClaim(permit, null);
                 })
-                .thenApply(permit -> {
-                    if (permit.state()
+                .thenApply(prepared -> {
+                    TerritoryClaimPermit permit = prepared.permit();
+                    if (permit != null && permit.state()
                             == org.civiceconomy.territory.TerritoryClaimPermitState.READY) {
                         publishTerritoryClaimPermit(permit);
                     }
-                    return permit;
+                    if (prepared.freeClaim() != null) {
+                        nationByFtbTeam.put(
+                                prepared.freeClaim().target().ftbTeamId(),
+                                prepared.freeClaim().target().nationId());
+                        freeClaimAuthorizationMirror.publish(prepared.freeClaim());
+                    }
+                    return prepared;
                 });
     }
 
@@ -721,4 +777,14 @@ public final class CivicServerRuntime {
     private record TerritoryPermitMirrorSnapshot(
             List<org.civiceconomy.territory.TerritoryClaimPermit> permits,
             Map<UUID, org.civiceconomy.nation.NationId> nationByFtbTeam) {}
+
+    record PreparedTerritoryClaim(
+            TerritoryClaimPermit permit, FreeClaimAuthorization freeClaim) {
+        PreparedTerritoryClaim {
+            if ((permit == null) == (freeClaim == null)) {
+                throw new IllegalArgumentException(
+                        "Prepared Territory Claim must contain exactly one authorization");
+            }
+        }
+    }
 }

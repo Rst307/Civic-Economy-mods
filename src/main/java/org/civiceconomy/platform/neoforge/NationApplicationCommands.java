@@ -136,15 +136,22 @@ final class NationApplicationCommands {
                         chunk.x,
                         chunk.z,
                         currentClaimedChunks)
-                .whenComplete((permit, failure) -> source.getServer().execute(() -> {
+                .whenComplete((prepared, failure) -> source.getServer().execute(() -> {
                     if (failure != null) {
                         reportFailure(source, "Territory Claim preparation", failure);
-                    } else {
+                    } else if (prepared.permit() != null) {
+                        var permit = prepared.permit();
                         source.sendSuccess(
                                 () -> Component.literal(
                                         "READY Territory Claim Permit " + permit.permitId()
                                                 + " prepayment="
                                                 + permit.prepayment().minorUnits()),
+                                true);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "READY Free Claim Authorization "
+                                                + prepared.freeClaim().authorizationId()),
                                 true);
                     }
                 }));

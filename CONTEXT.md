@@ -140,6 +140,10 @@ _Avoid_: 免费领土所有权、维护退款、FTB 成员额度
 针对一个 Nation、操作者和目标区块的单次占领授权，证明所需财政预付已经确认；它可被占领事件消费，但本身不是 FTB 所有权、余额或 Reservation。
 _Avoid_: 预付余额、永久占领权、通用领土权限
 
+**免费占领授权（Free Claim Authorization）**:
+针对一个 Nation、操作者和目标区块的短时单次授权，证明该次新增领土在服务器计算时仍处于 Territory Free Allocation 内；它不证明付款、不产生可退款金额，也不是 Territory Claim Permit。
+_Avoid_: 零金额 Permit、免费领土所有权、财政预付
+
 **有效领土（Effective Territory）**:
 由 FTB Chunks 归属某国且当前满足 Civic 财政维护条件的区块。
 _Avoid_: 所有已占领区块、国界声明

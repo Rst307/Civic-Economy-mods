@@ -657,6 +657,14 @@ public final class CivicServerRuntimeGameTests {
         var teamData = manager.getOrCreateData(team);
         teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
         ((ChunkTeamDataImpl) teamData).updateLimits();
+        ChunkDimPos seedPosition = paidClaimSeedPosition(position);
+        helper.assertTrue(
+                teamData.claim(
+                                player.createCommandSourceStack().withSuppressedOutput(),
+                                seedPosition,
+                                false)
+                        .isSuccess(),
+                "paid claim pricing seed");
         AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicBoolean commandStarted = new AtomicBoolean();
@@ -808,6 +816,10 @@ public final class CivicServerRuntimeGameTests {
                 if (claimed != null) {
                     claimed.unclaim(player.createCommandSourceStack(), true);
                 }
+                ClaimedChunk seed = manager.getChunk(seedPosition);
+                if (seed != null) {
+                    seed.unclaim(player.createCommandSourceStack(), true);
+                }
                 clearFiscalAccount(
                         helper,
                         org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
@@ -840,6 +852,14 @@ public final class CivicServerRuntimeGameTests {
         var teamData = manager.getOrCreateData(team);
         teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
         ((ChunkTeamDataImpl) teamData).updateLimits();
+        ChunkDimPos seedPosition = paidClaimSeedPosition(position);
+        helper.assertTrue(
+                teamData.claim(
+                                player.createCommandSourceStack().withSuppressedOutput(),
+                                seedPosition,
+                                false)
+                        .isSuccess(),
+                "cancelled claim pricing seed");
         AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicBoolean prepareStarted = new AtomicBoolean();
@@ -940,6 +960,128 @@ public final class CivicServerRuntimeGameTests {
                         false);
                 helper.assertFalse(
                         claim.isSuccess(), "cancelled Permit cannot authorize a real FTB claim");
+                ClaimedChunk seed = manager.getChunk(seedPosition);
+                if (seed != null) {
+                    seed.unclaim(player.createCommandSourceStack(), true);
+                }
+            }
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 400)
+    public static void playerPrepareCommandAuthorizesFreeClaimWithoutFiscalMovement(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-free-claim-test"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(56, 0, 56)).getCenter());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String requestId = "player-free-claim-" + UUID.randomUUID();
+        ChunkDimPos position = new ChunkDimPos(
+                player.level().dimension(), new ChunkPos(player.blockPosition()));
+        var manager = FTBChunksAPI.api().getManager();
+        ClaimedChunk existing = manager.getChunk(position);
+        if (existing != null) {
+            existing.unclaim(player.createCommandSourceStack(), true);
+        }
+        var teamData = manager.getOrCreateData(team);
+        teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
+        ((ChunkTeamDataImpl) teamData).updateLimits();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicBoolean claimed = new AtomicBoolean();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(
+                now, java.time.ZoneOffset.UTC);
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    var registeredNationId = setupPaidClaimNation(
+                            database, teamSnapshot, player.getUUID(), now, setupClock);
+                    database.scheduleTerritoryFreeAllocationPolicy(
+                            UUID.randomUUID(),
+                            "civiceconomy-gametest",
+                            "free-claim-policy-" + UUID.randomUUID(),
+                            "gametest",
+                            1,
+                            0,
+                            now.minusSeconds(1L).toEpochMilli(),
+                            "One free claim for real FTB GameTest",
+                            now.minusSeconds(2L).toEpochMilli());
+                    return registeredNationId;
+                })
+                .whenComplete((registeredNationId, setupFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (setupFailure != null) {
+                                asyncFailure.set(setupFailure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                int result = helper.getLevel()
+                                        .getServer()
+                                        .getCommands()
+                                        .getDispatcher()
+                                        .execute(
+                                                "civic economy nation territory prepare "
+                                                        + requestId,
+                                                player.createCommandSourceStack()
+                                                        .withSuppressedOutput());
+                                helper.assertValueEqual(
+                                        1, result, "Free Claim preparation command result");
+                                commandStarted.set(true);
+                            } catch (Throwable commandFailure) {
+                                asyncFailure.set(commandFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "free claim async state"
+                            : "free claim async failure: " + failure.getMessage());
+            helper.assertTrue(commandStarted.get(), "Free Claim preparation command started");
+            helper.assertTrue(
+                    territoryPermitByRequest(databaseFile, requestId + ":permit") == null,
+                    "Free Claim creates no paid Permit row");
+            helper.assertValueEqual(
+                    0,
+                    territoryFiscalRequestCount(databaseFile, requestId),
+                    "Free Claim creates no fiscal request rows");
+            try {
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel()).balance(
+                        new AccountId("nation:" + nationId.get().value() + ":treasury"));
+                throw new IllegalStateException(
+                        "Free Claim unexpectedly created a National Treasury account");
+            } catch (IllegalArgumentException expectedMissingTreasury) {
+                // Expected: Free Claim preparation has no fiscal-account side effect.
+            }
+            var source = player.createCommandSourceStack().withSuppressedOutput();
+            helper.assertTrue(
+                    teamData.claim(source, position, true).isSuccess(),
+                    "simulated Free Claim authorization");
+            helper.assertTrue(
+                    teamData.claim(source, position, true).isSuccess(),
+                    "repeated simulated Free Claim authorization");
+            if (claimed.compareAndSet(false, true)) {
+                helper.assertTrue(
+                        teamData.claim(source, position, false).isSuccess(),
+                        "real FTB claim through Free Claim Authorization");
+                ClaimedChunk claimedChunk = manager.getChunk(position);
+                helper.assertTrue(claimedChunk != null, "real free FTB ownership");
+                claimedChunk.unclaim(source, true);
             }
         });
     }
@@ -986,6 +1128,38 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect player-prepared Territory Claim Permit", failure);
+        }
+    }
+
+    private static int territoryFiscalRequestCount(Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT
+                          (SELECT COUNT(*) FROM fiscal_reservation
+                           WHERE service_identity = ? AND request_id = ?)
+                          +
+                          (SELECT COUNT(*) FROM payment_transaction
+                           WHERE service_identity = ? AND request_id = ?)
+                        """)) {
+            query.setString(
+                    1,
+                    org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(2, requestId + ":reserve");
+            query.setString(
+                    3,
+                    org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(4, requestId + ":payment");
+            try (var result = query.executeQuery()) {
+                return result.getInt(1);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Free Claim fiscal side effects", failure);
         }
     }
 
@@ -1083,6 +1257,11 @@ public final class CivicServerRuntimeGameTests {
                 new AccountId("player:" + sinkPlayerId),
                 balance));
         bankData.deleteAccount(sinkPlayerId);
+    }
+
+    private static ChunkDimPos paidClaimSeedPosition(ChunkDimPos target) {
+        return new ChunkDimPos(
+                target.dimension(), new ChunkPos(target.x() + 1, target.z()));
     }
 
     private static void assertFiscalServiceRegistered(
