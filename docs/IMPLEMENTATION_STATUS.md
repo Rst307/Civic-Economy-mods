@@ -138,10 +138,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised the SQLite schema to v24 with append-only Territory Free Allocation policy versions. Each version records the trusted actor, service/request identity, base chunks, per-Effective-Citizen chunks, reason, record time, and a unique future effective time; policy reads select the latest version effective at the requested instant.
 - Added OP/console-only `/civic economy admin territory policy show|schedule`. Writes run on `Civic-Economy-SQLite`, reject immediate/past effect, and use a conservative `0 + 0 × Effective Citizen` fallback until the first persisted policy becomes effective.
 - Added `/civic economy nation territory allowance`. It derives the caller's formal Nation server-side, evaluates Citizenship/Correction Grace/online-time population and the policy version at one fixed instant on `Civic-Economy-SQLite`, and reports an explainable formula without reading FTB Team member counts.
+- Added a pure Territory Expansion pricing module. It quotes only requested chunks beyond the current Territory Free Allocation, uses configurable first-overage and additional marginal costs to produce convex total pricing, and uses checked LC-minor-unit arithmetic so count or amount overflow fails closed.
 
 ## In progress
 
-- Wire the explainable Territory Free Allocation into FTB Chunks claim prepayment.
+- Persist Territory Expansion pricing parameters and build the durable prepayment/claim-permit state machine before wiring FTB Chunks events.
 
 ## Not yet completed
 
@@ -196,7 +197,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the pure Territory Free Allocation policy slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 128 tests with zero failures. This is domain/build evidence only; claim-event integration is not yet implemented.
 - After persistent Territory Free Allocation policy/schema-v24 and its OP command, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 129 tests with zero failures.
 - After the Nation-facing Territory Free Allocation command, `gradlew.bat clean build --no-daemon --console=plain` again passed all 129 tests from fresh outputs.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,745,467 bytes, SHA-256 `C940CDEA1EE1674EC8C04A0E176EAA18FE36F6CD4D9B708512B7D7CA9E930732`. It remains a development artifact until all v1 completion gates pass.
+- After the pure Territory Expansion pricing slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 130 tests with zero failures. This is domain/build evidence only; no FTB claim or LC transfer occurs yet.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,748,569 bytes, SHA-256 `8EE0C4C77B328FC4120B35DC8098939C564ED24EE8D751BC0EE79D2A6E84FCED`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -356,4 +358,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Use the same policy-plus-population Territory Free Allocation in FTB Chunks `BEFORE_CLAIM` prepayment without treating FTB membership counts as population.
+Persist configurable convex Territory Expansion pricing, then create a durable prepayment permit that can be consumed by FTB Chunks `BEFORE_CLAIM` without blocking the server thread or treating FTB membership counts as population.
