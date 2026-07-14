@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 28;
+    private static final int SCHEMA_VERSION = 29;
 
     private final Connection connection;
 
@@ -1748,6 +1748,131 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryClaimPermit(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Claim Permit", failure);
+        }
+    }
+
+    public synchronized StoredMonetarySupplyEvent monetarySupplyEvent(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM monetary_supply_event
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readMonetarySupplyEvent(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Monetary Supply event", failure);
+        }
+    }
+
+    public synchronized List<StoredMonetarySupplyEvent> monetarySupplyEvents() {
+        List<StoredMonetarySupplyEvent> events = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM monetary_supply_event
+                ORDER BY confirmed_at_epoch_millis, event_id
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    events.add(storedMonetarySupplyEvent(result));
+                }
+            }
+            return List.copyOf(events);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list Monetary Supply events", failure);
+        }
+    }
+
+    public synchronized long cumulativeNetIssuanceMinorUnits() {
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("""
+                        SELECT cumulative_net_issuance_minor_units
+                        FROM monetary_supply_summary WHERE singleton = 1
+                        """)) {
+            if (!result.next()) {
+                throw new IllegalStateException("Monetary Supply summary is missing");
+            }
+            return result.getLong(1);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Cumulative Net Issuance", failure);
+        }
+    }
+
+    public synchronized StoredMonetarySupplyEvent confirmMonetarySupplyChange(
+            UUID eventId,
+            String serviceIdentity,
+            String requestId,
+            String changeKind,
+            long amountMinorUnits,
+            String externalReference,
+            String reason,
+            long confirmedAtEpochMillis,
+            long hardCapMinorUnits) {
+        StoredMonetarySupplyEvent replay = monetarySupplyEvent(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            long current = cumulativeNetIssuanceMinorUnits();
+            long next = changeKind.equals("ISSUANCE")
+                    ? Math.addExact(current, amountMinorUnits)
+                    : Math.subtractExact(current, amountMinorUnits);
+            if (next > hardCapMinorUnits) {
+                throw new org.civiceconomy.monetary.IssuanceHardCapExceededException();
+            }
+            if (next < 0L) {
+                throw new org.civiceconomy.monetary.DestructionExceedsNetIssuanceException();
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO monetary_supply_event (
+                        event_id, service_identity, request_id, change_kind,
+                        amount_minor_units, external_reference, reason,
+                        confirmed_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, eventId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, changeKind);
+                insert.setLong(5, amountMinorUnits);
+                insert.setString(6, externalReference);
+                insert.setString(7, reason);
+                insert.setLong(8, confirmedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE monetary_supply_summary
+                    SET cumulative_net_issuance_minor_units = ?
+                    WHERE singleton = 1
+                    """)) {
+                update.setLong(1, next);
+                update.executeUpdate();
+            }
+            connection.commit();
+            return monetarySupplyEvent(serviceIdentity, requestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException("Unable to confirm Monetary Supply change", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                if (primaryFailure != null) {
+                    primaryFailure.addSuppressed(failure);
+                } else {
+                    throw new IllegalStateException(
+                            "Unable to restore Monetary Supply transaction mode", failure);
+                }
+            }
         }
     }
 
@@ -4734,6 +4859,39 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 28");
             }
+            if (version < 29) {
+                statement.execute("""
+                        CREATE TABLE monetary_supply_event (
+                            event_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            change_kind TEXT NOT NULL
+                                CHECK (change_kind IN ('ISSUANCE', 'PERMANENT_DESTRUCTION')),
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            external_reference TEXT NOT NULL
+                                CHECK (length(trim(external_reference)) > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            confirmed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (confirmed_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (change_kind, external_reference)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE monetary_supply_summary (
+                            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                            cumulative_net_issuance_minor_units INTEGER NOT NULL
+                                CHECK (cumulative_net_issuance_minor_units >= 0)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO monetary_supply_summary (
+                            singleton, cumulative_net_issuance_minor_units
+                        ) VALUES (1, 0)
+                        """);
+                statement.execute("PRAGMA user_version = 29");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -4855,6 +5013,26 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("reason"),
                     result.getLong("assessed_at_epoch_millis"));
         }
+    }
+
+    private StoredMonetarySupplyEvent readMonetarySupplyEvent(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedMonetarySupplyEvent(result) : null;
+        }
+    }
+
+    private static StoredMonetarySupplyEvent storedMonetarySupplyEvent(ResultSet result)
+            throws SQLException {
+        return new StoredMonetarySupplyEvent(
+                UUID.fromString(result.getString("event_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                result.getString("change_kind"),
+                result.getLong("amount_minor_units"),
+                result.getString("external_reference"),
+                result.getString("reason"),
+                result.getLong("confirmed_at_epoch_millis"));
     }
 
     private StoredTerritoryClaimPermit readTerritoryClaimPermit(PreparedStatement query)
