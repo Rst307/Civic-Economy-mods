@@ -52,6 +52,7 @@ import org.civiceconomy.fiscal.SettleReservation;
 import org.civiceconomy.fiscal.SimulatedCrash;
 import org.civiceconomy.fiscal.TransactionState;
 import org.civiceconomy.integration.lightmanscurrency.FiscalAccountKind;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBalances;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -393,18 +394,26 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
         LightmansCurrencyPayments payments = LightmansCurrencyPayments.live(helper.getLevel());
         clearFiscalAccount(bankData, accounts, payments, treasury);
         IBankAccount payer = reset(bankData, payerPlayerId, 500);
+        LightmansCurrencyAccountBalances accountBalances =
+                LightmansCurrencyAccountBalances.live(helper.getLevel());
+
+        helper.assertValueEqual(
+                500L,
+                accountBalances.balance(payerAccount).minorUnits(),
+                "production LC player balance adapter");
+        try {
+            accountBalances.balance(new AccountId("player:" + UUID.randomUUID()));
+            helper.fail("Expected an unknown LC player account to fail closed");
+        } catch (IllegalArgumentException expected) {
+            // Expected: the balance adapter must not create unknown LC player accounts.
+        }
 
         Path temporaryDirectory = createTemporaryDirectory();
         try (CivicDatabase database = CivicDatabase.open(
                 temporaryDirectory.resolve("civic.sqlite3"),
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
-            FiscalLedger ledger = new FiscalLedger(database, account -> {
-                if (account.equals(payerAccount)) {
-                    return MoneyAmount.ofMinorUnits(mainChainBalance(payer));
-                }
-                return accounts.balance(account);
-            });
+            FiscalLedger ledger = new FiscalLedger(database, accountBalances);
             IssueFiscalBill issue = new IssueFiscalBill(
                     new ServiceIdentity("civiceconomy-gametest-revenue"),
                     "issue-real-lc-fee-" + UUID.randomUUID(),
