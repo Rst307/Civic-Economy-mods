@@ -44,6 +44,10 @@ import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.JoinCitizenship;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.RegisterNation;
+import org.civiceconomy.territory.IssueTerritoryClaimPermit;
+import org.civiceconomy.territory.TerritoryClaimPermit;
+import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
+import org.civiceconomy.territory.TerritoryClaimPermitState;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -493,6 +497,117 @@ public final class CivicServerRuntimeGameTests {
                     "activated real LC National Treasury balance");
             if (claimCleaned.compareAndSet(false, true)) {
                 unclaimCapital(helper, player);
+            }
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 300)
+    public static void realFtbClaimConsumesPermitOnlyAfterSuccessfulMutation(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-permit-claim-test"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(8, 0, 8)).getCenter());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        ChunkDimPos position = new ChunkDimPos(
+                player.level().dimension(), new ChunkPos(player.blockPosition()));
+        var manager = FTBChunksAPI.api().getManager();
+        ClaimedChunk existing = manager.getChunk(position);
+        if (existing != null) {
+            existing.unclaim(player.createCommandSourceStack(), true);
+        }
+        var teamData = manager.getOrCreateData(team);
+        teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
+        ((ChunkTeamDataImpl) teamData).updateLimits();
+        AtomicReference<TerritoryClaimPermitState> observedState = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean cleanupNeeded = new AtomicBoolean();
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationTeam nationTeam = new NationTeam(
+                            team.getId(), team.getOwner(), team.getMembers());
+                    var nation = new NationRegistry(database, snapshot(nationTeam)).register(
+                            new RegisterNation(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "permit-event-nation-" + UUID.randomUUID(),
+                                    team.getId()));
+                    return new TerritoryClaimPermitRegistry(
+                                    database,
+                                    (transactionId, nationId, amount) -> true,
+                                    java.time.Clock.systemUTC())
+                            .issue(new IssueTerritoryClaimPermit(
+                                    new ServiceIdentity("civiceconomy-territory"),
+                                    "permit-event-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    team.getId(),
+                                    player.getUUID(),
+                                    position.dimension().location().toString(),
+                                    position.x(),
+                                    position.z(),
+                                    17,
+                                    17,
+                                    250L,
+                                    UUID.randomUUID(),
+                                    java.time.Instant.now().plusSeconds(120L)));
+                })
+                .whenComplete((permit, setupFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (setupFailure != null) {
+                                asyncFailure.set(setupFailure);
+                                return;
+                            }
+                            try {
+                                CivicServerRuntime.current().publishTerritoryClaimPermit(permit);
+                                var source = player.createCommandSourceStack().withSuppressedOutput();
+                                helper.assertTrue(
+                                        teamData.claim(source, position, true).isSuccess(),
+                                        "first simulated FTB claim");
+                                helper.assertTrue(
+                                        teamData.claim(source, position, true).isSuccess(),
+                                        "repeated simulated FTB claim");
+                                helper.assertTrue(
+                                        teamData.claim(source, position, false).isSuccess(),
+                                        "real FTB claim authorized by READY Permit");
+                                cleanupNeeded.set(true);
+                                CivicServerRuntime.current()
+                                        .submitDatabase(database -> new TerritoryClaimPermitRegistry(
+                                                        database,
+                                                        (transactionId, nationId, amount) -> false,
+                                                        java.time.Clock.systemUTC())
+                                                .find(permit.permitId())
+                                                .orElseThrow()
+                                                .state())
+                                        .whenComplete((state, inspectionFailure) -> {
+                                            if (inspectionFailure != null) {
+                                                asyncFailure.set(inspectionFailure);
+                                            } else {
+                                                observedState.set(state);
+                                            }
+                                        });
+                            } catch (Throwable claimFailure) {
+                                asyncFailure.set(claimFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "Permit event async state"
+                            : "Permit event async failure: " + failure.getMessage());
+            helper.assertValueEqual(
+                    TerritoryClaimPermitState.CONSUMED,
+                    observedState.get(),
+                    "durably consumed Territory Claim Permit");
+            if (cleanupNeeded.compareAndSet(true, false)) {
+                ClaimedChunk claimed = manager.getChunk(position);
+                if (claimed != null) {
+                    claimed.unclaim(player.createCommandSourceStack(), true);
+                }
             }
         });
     }

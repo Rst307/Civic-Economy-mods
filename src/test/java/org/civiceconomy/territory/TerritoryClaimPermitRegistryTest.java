@@ -140,6 +140,32 @@ class TerritoryClaimPermitRegistryTest {
         }
     }
 
+    @Test
+    void rejectsPermitWhenFtbTeamIsNotTheNationBinding() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryClaimPermitRegistry permits = registry(database);
+            IssueTerritoryClaimPermit request = new IssueTerritoryClaimPermit(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "permit-wrong-team-overworld-4-7",
+                    NATION_ID,
+                    UUID.randomUUID(),
+                    ACTOR_ID,
+                    "minecraft:overworld",
+                    4,
+                    7,
+                    16,
+                    17,
+                    250L,
+                    PAYMENT_ID,
+                    NOW.plusSeconds(120L));
+
+            assertThrows(SecurityException.class, () -> permits.issue(request));
+            assertNull(database.territoryClaimPermit(
+                    request.serviceIdentity().value(), request.requestId()));
+        }
+    }
+
     private TerritoryClaimPermitRegistry registry(CivicDatabase database) {
         TerritoryPrepaymentVerifier verifier = (transactionId, nationId, amount) ->
                 transactionId.equals(PAYMENT_ID)

@@ -1682,6 +1682,32 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredTerritoryClaimPermit> readyTerritoryClaimPermits(
+            long asOfEpochMillis) {
+        List<StoredTerritoryClaimPermit> permits = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT permit.* FROM territory_claim_permit permit
+                WHERE permit.state = 'READY'
+                  AND permit.expires_at_epoch_millis > ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM territory_claim_permit_compensation compensation
+                      WHERE compensation.permit_id = permit.permit_id
+                  )
+                ORDER BY permit.issued_at_epoch_millis, permit.permit_id
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    permits.add(storedTerritoryClaimPermit(result));
+                }
+            }
+            return List.copyOf(permits);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list READY Territory Claim Permits", failure);
+        }
+    }
+
     public synchronized StoredTerritoryClaimPermitConsumption territoryClaimPermitConsumption(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""

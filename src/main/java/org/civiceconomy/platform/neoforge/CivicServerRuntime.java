@@ -42,6 +42,9 @@ import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
 import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
+import org.civiceconomy.territory.ConsumeTerritoryClaimPermit;
+import org.civiceconomy.territory.TerritoryClaimPermitEventBridge;
+import org.civiceconomy.territory.TerritoryClaimPermitMirror;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 import org.slf4j.Logger;
@@ -69,6 +72,11 @@ public final class CivicServerRuntime {
     private static volatile CivicServerRuntime current;
 
     private final Clock clock;
+    private final TerritoryClaimPermitMirror territoryClaimPermitMirror =
+            new TerritoryClaimPermitMirror();
+    private final Map<UUID, org.civiceconomy.nation.NationId> nationByFtbTeam =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final AtomicBoolean territoryClaimAuthorizationReady = new AtomicBoolean();
     private RuntimeState state;
 
     public CivicServerRuntime() {
@@ -78,6 +86,13 @@ public final class CivicServerRuntime {
     CivicServerRuntime(Clock clock) {
         this.clock = clock;
         current = this;
+        new FtbTerritoryClaimPermitEvents(
+                        this,
+                        new TerritoryClaimPermitEventBridge(
+                                territoryClaimPermitMirror,
+                                this::queueTerritoryClaimPermitConsumption,
+                                clock))
+                .register();
     }
 
     static CivicServerRuntime current() {
@@ -115,6 +130,7 @@ public final class CivicServerRuntime {
             sessions.login(player.getUUID(), now);
         }
         state = new RuntimeState(server, sessions, writer);
+        scheduleTerritoryPermitMirrorRefresh(state);
         scheduleNationApplicationExpiry(state);
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
@@ -204,6 +220,9 @@ public final class CivicServerRuntime {
             current.writer.close();
         } finally {
             state = null;
+            territoryClaimAuthorizationReady.set(false);
+            territoryClaimPermitMirror.replaceAll(List.of());
+            nationByFtbTeam.clear();
         }
         LOGGER.info("Civic server runtime closed SQLite after draining buffered online-time intervals");
     }
@@ -220,6 +239,101 @@ public final class CivicServerRuntime {
                     new IllegalStateException("Civic server runtime is not active"));
         }
         return current.writer.submitDatabase(operation);
+    }
+
+    org.civiceconomy.nation.NationId nationForFtbTeam(UUID ftbTeamId) {
+        return nationByFtbTeam.get(ftbTeamId);
+    }
+
+    boolean territoryClaimAuthorizationReady() {
+        return territoryClaimAuthorizationReady.get();
+    }
+
+    private void scheduleTerritoryPermitMirrorRefresh(RuntimeState current) {
+        Clock refreshClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> {
+                    TerritoryClaimPermitRegistry permits = new TerritoryClaimPermitRegistry(
+                            database,
+                            new CommittedTerritoryPrepaymentVerifier(
+                                    database,
+                                    TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID),
+                            refreshClock);
+                    Map<UUID, org.civiceconomy.nation.NationId> bindings =
+                            new HashMap<>();
+                    for (RegisteredNation nation
+                            : new NationRegistry(database, NO_TEAM_LOOKUPS).registeredNations()) {
+                        bindings.put(nation.ftbTeamId(), nation.nationId());
+                    }
+                    return new TerritoryPermitMirrorSnapshot(
+                            permits.readyPermits(), Map.copyOf(bindings));
+                })
+                .whenComplete((snapshot, failure) -> {
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Territory Claim Permit mirror refresh failed closed", failure);
+                        territoryClaimPermitMirror.replaceAll(List.of());
+                        nationByFtbTeam.clear();
+                        territoryClaimAuthorizationReady.set(false);
+                        return;
+                    }
+                    territoryClaimPermitMirror.replaceAll(snapshot.permits());
+                    nationByFtbTeam.clear();
+                    nationByFtbTeam.putAll(snapshot.nationByFtbTeam());
+                    territoryClaimAuthorizationReady.set(true);
+                });
+    }
+
+    void publishTerritoryClaimPermit(
+            org.civiceconomy.territory.TerritoryClaimPermit permit) {
+        nationByFtbTeam.compute(permit.ftbTeamId(), (ignored, existing) -> {
+            if (existing != null && !existing.equals(permit.nationId())) {
+                throw new IllegalStateException(
+                        "FTB Team is already mirrored for a different Nation");
+            }
+            return permit.nationId();
+        });
+        territoryClaimPermitMirror.publish(permit);
+    }
+
+    void removeTerritoryClaimPermit(
+            org.civiceconomy.territory.TerritoryClaimPermit permit) {
+        territoryClaimPermitMirror.remove(permit);
+    }
+
+    private void queueTerritoryClaimPermitConsumption(
+            org.civiceconomy.territory.TerritoryClaimPermitConsumptionIntent intent) {
+        RuntimeState current = state;
+        if (current == null) {
+            LOGGER.error(
+                    "Territory Claim Permit consumption was acquired without an active runtime: {}",
+                    intent.permitId());
+            return;
+        }
+        current.writer.submitDatabase(database -> {
+                    TerritoryClaimPermitRegistry permits = new TerritoryClaimPermitRegistry(
+                            database,
+                            new CommittedTerritoryPrepaymentVerifier(
+                                    database,
+                                    TerritoryFiscalServiceProvisioner.CLEARING_ACCOUNT_ID),
+                            Clock.fixed(intent.claimedAt(), ZoneOffset.UTC));
+                    return permits.consume(new ConsumeTerritoryClaimPermit(
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                            "ftb-after-claim:" + intent.permitId(),
+                            intent.permitId(),
+                            intent.target().nationId(),
+                            intent.target().ftbTeamId(),
+                            intent.target().actorPlayerId(),
+                            intent.target().dimensionId(),
+                            intent.target().chunkX(),
+                            intent.target().chunkZ()));
+                })
+                .whenComplete((consumed, failure) -> {
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Territory Claim Permit durable consumption failed closed after FTB claim",
+                                failure);
+                    }
+                });
     }
 
     private void scheduleNationApplicationExpiry(RuntimeState current) {
@@ -392,6 +506,7 @@ public final class CivicServerRuntime {
                                 "Recovered {} and expired {} Territory Claim Permit compensation(s)",
                                 result.recovered(),
                                 result.expired());
+                        scheduleTerritoryPermitMirrorRefresh(current);
                     }
                 });
     }
@@ -423,4 +538,8 @@ public final class CivicServerRuntime {
     }
 
     private record TerritoryPermitCompensationResult(int recovered, int expired) {}
+
+    private record TerritoryPermitMirrorSnapshot(
+            List<org.civiceconomy.territory.TerritoryClaimPermit> permits,
+            Map<UUID, org.civiceconomy.nation.NationId> nationByFtbTeam) {}
 }

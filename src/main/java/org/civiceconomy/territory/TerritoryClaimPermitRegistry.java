@@ -37,6 +37,11 @@ public final class TerritoryClaimPermitRegistry {
         if (request.expiresAt().toEpochMilli() <= issuedAt) {
             throw new IllegalArgumentException("Territory Claim Permit expiry must be in the future");
         }
+        var nation = database.nation(request.nationId().value());
+        if (nation == null || !nation.ftbTeamId().equals(request.ftbTeamId())) {
+            throw new SecurityException(
+                    "Territory Claim Permit FTB Team must match the registered Nation binding");
+        }
         MoneyAmount prepayment = MoneyAmount.ofMinorUnits(request.prepaymentMinorUnits());
         if (!prepayments.isCommitted(
                 request.prepaymentTransactionId(), request.nationId(), prepayment)) {
@@ -92,6 +97,12 @@ public final class TerritoryClaimPermitRegistry {
         return Optional.ofNullable(database.territoryClaimPermitByTarget(
                         nationId.value(), dimensionId, chunkX, chunkZ))
                 .map(TerritoryClaimPermitRegistry::toPermit);
+    }
+
+    public java.util.List<TerritoryClaimPermit> readyPermits() {
+        return database.readyTerritoryClaimPermits(clock.millis()).stream()
+                .map(TerritoryClaimPermitRegistry::toPermit)
+                .toList();
     }
 
     public TerritoryClaimPermit consume(ConsumeTerritoryClaimPermit request) {
