@@ -35,6 +35,11 @@ import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.RecordOnlineTime;
+import org.civiceconomy.nation.CreateNationApplication;
+import org.civiceconomy.nation.NationApplicationId;
+import org.civiceconomy.nation.NationApplicationRegistry;
+import org.civiceconomy.nation.NationTeam;
+import org.civiceconomy.nation.NationTeamDirectory;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -189,6 +194,49 @@ public final class CivicServerRuntimeGameTests {
             }
             assertNationApplicationCancelled(
                     helper, databaseFile, application.applicationId(), player.getUUID());
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 1800)
+    public static void runtimeExpiresDueNationApplicationOffThread(GameTestHelper helper) {
+        UUID teamId = UUID.randomUUID();
+        UUID headId = UUID.randomUUID();
+        NationTeam team = new NationTeam(teamId, headId, Set.of(headId));
+        NationTeamDirectory teams = snapshot(team);
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        AtomicReference<NationApplicationId> applicationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        java.time.Instant appliedAt = java.time.Instant.now();
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationApplicationRegistry(
+                                database,
+                                teams,
+                                java.time.Clock.fixed(appliedAt, java.time.ZoneOffset.UTC))
+                        .create(new CreateNationApplication(
+                                new ServiceIdentity("civiceconomy-gametest"),
+                                "runtime-expiry-" + UUID.randomUUID(),
+                                teamId,
+                                headId,
+                                appliedAt.plusMillis(250))))
+                .whenComplete((application, failure) -> {
+                    if (failure == null) {
+                        applicationId.set(application.applicationId());
+                    } else {
+                        asyncFailure.set(failure);
+                    }
+                });
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(asyncFailure.get() == null, "automatic expiry setup");
+            NationApplicationId observed = applicationId.get();
+            helper.assertTrue(observed != null, "scheduled-expiry Nation Application");
+            assertNationApplicationAutomaticallyExpired(
+                    helper, databaseFile, observed, headId);
         });
     }
 
@@ -421,6 +469,49 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static void assertNationApplicationAutomaticallyExpired(
+            GameTestHelper helper,
+            Path databaseFile,
+            NationApplicationId applicationId,
+            UUID candidatePlayerId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT application.state,
+                               candidate.ended_at_epoch_millis,
+                               transition.service_identity,
+                               transition.request_id,
+                               transition.actor_player_id,
+                               transition.to_state
+                        FROM nation_application application
+                        JOIN nation_application_candidate candidate
+                          ON candidate.application_id = application.application_id
+                         AND candidate.player_id = ?
+                        JOIN nation_application_transition transition
+                          ON transition.application_id = application.application_id
+                        WHERE application.application_id = ?
+                        """)) {
+            query.setString(1, candidatePlayerId.toString());
+            query.setString(2, applicationId.value().toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "automatic Nation Application expiry transition");
+                helper.assertValueEqual("EXPIRED", result.getString(1), "automatic expiry state");
+                helper.assertTrue(result.getObject(2) != null, "ended automatic-expiry Candidate affiliation");
+                helper.assertValueEqual(
+                        "civiceconomy-nation-application-expiry",
+                        result.getString(3),
+                        "automatic expiry service");
+                helper.assertValueEqual(
+                        "automatic-expiry:" + applicationId.value(),
+                        result.getString(4),
+                        "automatic expiry request identity");
+                helper.assertTrue(result.getString(5) == null, "automatic expiry has no player actor");
+                helper.assertValueEqual("EXPIRED", result.getString(6), "automatic expiry transition state");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect automatic Nation Application expiry", failure);
+        }
+    }
+
     private static AccountId activatedTreasury(
             GameTestHelper helper,
             Path databaseFile,
@@ -511,6 +602,24 @@ public final class CivicServerRuntimeGameTests {
             throw new IllegalStateException(
                     "Unable to create exact-version FTB founding GameTest fixture", failure);
         }
+    }
+
+    private static NationTeamDirectory snapshot(NationTeam team) {
+        return new NationTeamDirectory() {
+            @Override
+            public java.util.Optional<NationTeam> find(UUID teamId) {
+                return team.teamId().equals(teamId)
+                        ? java.util.Optional.of(team)
+                        : java.util.Optional.empty();
+            }
+
+            @Override
+            public java.util.Optional<NationTeam> findEffectiveTeamForPlayer(UUID playerId) {
+                return team.citizens().contains(playerId)
+                        ? java.util.Optional.of(team)
+                        : java.util.Optional.empty();
+            }
+        };
     }
 
     private record PendingApplicationRow(UUID applicationId, long createdAtEpochMillis) {}

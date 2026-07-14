@@ -82,6 +82,15 @@ public final class NationApplicationRegistry {
                 .map(NationApplicationRegistry::toApplication);
     }
 
+    public List<NationApplication> pendingExpiringAtOrBefore(Instant deadline) {
+        if (deadline == null) {
+            throw new IllegalArgumentException("Nation Application expiry deadline cannot be null");
+        }
+        return database.pendingNationApplicationsExpiringAtOrBefore(deadline.toEpochMilli()).stream()
+                .map(NationApplicationRegistry::toApplication)
+                .toList();
+    }
+
     public java.util.List<NationApplicationCandidate> candidates(
             NationApplicationId applicationId) {
         return database.nationApplicationCandidates(applicationId.value()).stream()
@@ -131,8 +140,11 @@ public final class NationApplicationRegistry {
         StoredNationApplicationTransition replay = database.nationApplicationTransitionRegistration(
                 request.serviceIdentity().value(), request.requestId());
         if (replay != null) {
+            long observationWindowMillis = request.observationWindow().toMillis();
             if (!replay.applicationId().equals(request.applicationId().value())
                     || !replay.actorPlayerId().equals(request.applicantPlayerId())
+                    || !Long.valueOf(observationWindowMillis)
+                            .equals(replay.observationWindowMillis())
                     || !"CANCELLED".equals(replay.toState())
                     || !replay.reason().equals(request.reason())) {
                 throw new IdempotencyConflictException(
@@ -149,13 +161,14 @@ public final class NationApplicationRegistry {
             throw new NationApplicationHeadRequiredException(
                     application.ftbTeamId(), request.applicantPlayerId());
         }
+        claimCandidateEvidence(request.applicationId(), request.observationWindow());
         database.transitionNationApplication(
                 UUID.randomUUID(),
                 request.applicationId().value(),
                 request.serviceIdentity().value(),
                 request.requestId(),
                 request.applicantPlayerId(),
-                null,
+                request.observationWindow().toMillis(),
                 "CANCELLED",
                 request.reason(),
                 clock.millis(),

@@ -87,6 +87,8 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 
 激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。
 
+`nation status` 会领取并显示当前申请可归属的 Candidate Online Evidence，报告有效候选人数、当前门槛、FORMAL/DEBUG WORLD 模式和到期时间。到期申请由后台 SQLite 处理器自动转换为 `EXPIRED`；常规服务器 tick 不执行数据库查询。
+
 受信任 OP/控制台服务管理入口位于：
 
 ```text

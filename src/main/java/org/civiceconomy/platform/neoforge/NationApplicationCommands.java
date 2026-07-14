@@ -115,24 +115,49 @@ final class NationApplicationCommands {
         ServerPlayer player = source.getPlayerOrException();
         NationTeam team = ownedTeam(player);
         Clock commandClock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
+        boolean debugWorld = CivicDebugWorldData.get(source.getServer()).enabled();
+        int requiredEffectiveCandidates = debugWorld ? 1 : 2;
         CivicServerRuntime.current()
-                .submitDatabase(database -> new NationApplicationRegistry(
-                                database, snapshot(team), commandClock)
-                        .findPendingByFtbTeam(team.teamId()))
-                .whenComplete((application, failure) -> source.getServer().execute(() -> {
+                .submitDatabase(database -> {
+                    NationApplicationRegistry registry = new NationApplicationRegistry(
+                            database, snapshot(team), commandClock);
+                    Optional<NationApplication> application =
+                            registry.findPendingByFtbTeam(team.teamId());
+                    if (application.isEmpty()) {
+                        return Optional.<NationApplicationStatus>empty();
+                    }
+                    NationApplication pending = application.orElseThrow();
+                    int effectiveCandidates = (int) registry.claimCandidateEvidence(
+                                    pending.applicationId(), EVIDENCE_WINDOW)
+                            .stream()
+                            .filter(evidence -> evidence.attributedMillis() > 0L)
+                            .count();
+                    return Optional.of(new NationApplicationStatus(
+                            pending,
+                            effectiveCandidates,
+                            requiredEffectiveCandidates,
+                            debugWorld));
+                })
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
                     if (failure != null) {
                         reportFailure(source, "Nation Application status", failure);
-                    } else if (application.isEmpty()) {
+                    } else if (status.isEmpty()) {
                         source.sendSuccess(
                                 () -> Component.literal(
                                         "Your FTB Team has no PENDING Nation Application"),
                                 false);
                     } else {
-                        NationApplication pending = application.orElseThrow();
+                        NationApplicationStatus current = status.orElseThrow();
+                        NationApplication pending = current.application();
                         source.sendSuccess(
                                 () -> Component.literal(
                                         "Nation Application " + pending.applicationId().value()
                                                 + " state=" + pending.state()
+                                                + " effectiveCandidates="
+                                                + current.effectiveCandidates() + "/"
+                                                + current.requiredEffectiveCandidates()
+                                                + " mode="
+                                                + (current.debugWorld() ? "DEBUG WORLD" : "FORMAL")
                                                 + " expires=" + pending.expiresAt()),
                                 false);
                     }
@@ -158,6 +183,7 @@ final class NationApplicationCommands {
                             "player-cancel:" + UUID.randomUUID(),
                             application.applicationId(),
                             player.getUUID(),
+                            EVIDENCE_WINDOW,
                             reason));
                 })
                 .whenComplete((application, failure) -> source.getServer().execute(() -> {
@@ -294,4 +320,10 @@ final class NationApplicationCommands {
             }
         };
     }
+
+    private record NationApplicationStatus(
+            NationApplication application,
+            int effectiveCandidates,
+            int requiredEffectiveCandidates,
+            boolean debugWorld) {}
 }

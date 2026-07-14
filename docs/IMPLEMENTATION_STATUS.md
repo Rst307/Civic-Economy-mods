@@ -120,15 +120,18 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Activation requires the player's current chunk to be a real FTB Chunks claim owned by the same real FTB Team. SQLite activation remains on `Civic-Economy-SQLite`, while real LC National Treasury `SavedData` provisioning is marshalled back to the Minecraft server thread without making the server thread wait for SQLite.
 - Added the persistent world-scoped `DEBUG WORLD` marker and `/civic debug status`, `/civic debug enable`, and `/civic debug enable confirm`. Integrated servers require the cheating single-player world owner and explicit confirmation.
 - Dedicated servers omit DEBUG WORLD writes by default. The command is registered only when the JVM starts with `-Dciviceconomy.allowDedicatedDebugWorld=true`, and still requires a player OP. Enabling is permanent for the Civic dataset and emits a server-wide red warning plus persistent startup log warnings.
+- Added deterministic automatic Nation Application expiry. Startup and one-minute lifecycle scans only enqueue work; due-application queries, evidence claiming, candidate cleanup, and immutable `EXPIRED` transitions run on `Civic-Economy-SQLite` with request ID `automatic-expiry:<applicationId>`.
+- Player cancellation now claims all eligible Candidate Online Evidence through the configured 60-day window before closing Candidate affiliations. This makes cancellation replay-safe and prevents the same completed online interval from supporting a later application even when the player never ran `nation status` first.
+- `/civic economy nation status` now claims current eligible evidence idempotently and reports Effective Candidate count versus the formal/debug threshold, founding mode, state, and expiry.
 
 ## In progress
 
-- Add off-thread scheduled Nation Application expiry and richer eligibility/status reporting, then reconcile formal Citizenship with live FTB membership changes.
+- Reconcile formal Citizenship with live FTB membership changes without treating raw Team membership as Citizenship or blocking the server thread.
 
 ## Not yet completed
 
 - SQLite migrations beyond schema v20, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
-- Nation-level Effective Citizen aggregation, scheduled application expiry, FTB membership reconciliation and correction grace, fiscal roles, capital rebinding, liquidation, and Nation lifecycle restrictions.
+- Nation-level Effective Citizen aggregation, FTB membership reconciliation and correction grace, fiscal roles, capital rebinding, liquidation, and Nation lifecycle restrictions.
 - Withdrawals, configurable multi-person approval policy, and broader audit.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
@@ -171,7 +174,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the Nation Application/activation/schema-v20 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 113 tests with zero failures.
 - After the player Nation Application command slice, `gradlew.bat clean build --no-daemon --console=plain` again passed all 113 JUnit/SQLite tests.
 - After the command-driven Nation activation/cancellation and DEBUG WORLD authority slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 116 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,663,126 bytes, SHA-256 `7F5466F1D0245E10EF68377E3712B2E78F1544855B795D4C6747D083634531C8`. It remains a development artifact until all v1 completion gates pass.
+- After automatic Nation Application expiry and cancellation evidence hardening, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 117 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,672,269 bytes, SHA-256 `1D7B5AB69B090F424EF2894BA4B22B6E46FDDA58511C093BD25060DCA38244D8`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -214,6 +218,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the player Nation Application command slice, the same command passed all 15 required GameTests. The added test creates an exact-version real FTB head-owned Party Team fixture, executes the real player command twice, and observes exactly one seven-day PENDING application in the world-bound SQLite database. Reflection is confined to constructing the headless FTB fixture; production lookup uses only public FTB APIs.
 - After the command-driven activation/cancellation slice, the default dedicated GameTest run passed all 17 required tests. One test creates a real head-owned FTB Party Team, records candidate evidence off-thread, claims the proposed Capital through real FTB Chunks, enables the persistent DEBUG WORLD fixture, executes the real activation command, and verifies the permanent Nation, founder Citizenship, Capital, and exact-zero real LC National Treasury. A second test executes the real cancellation command and verifies immutable actor/reason audit plus closure of every Candidate affiliation.
 - A second 17/17 GameTest run with `-Dciviceconomy.allowDedicatedDebugWorld=true` proved the startup-level permission registers the dedicated `debug status` and `debug enable` command tree. The default run proved the same write command tree is absent without that startup permission.
+- After lifecycle expiry wiring, the default GameTest run passed all 18 required tests. The added test creates a short-lived PENDING application through the authoritative background database executor, waits for the real server tick scheduler to enqueue expiry, and verifies deterministic service/request audit, `EXPIRED` state, and closed Candidate affiliation in the world-bound SQLite database. The log records the processor on `Civic-Economy-SQLite`, not the server thread.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
@@ -275,6 +280,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the owner-bound-session/trusted-administration/schema-v19 slice, the no-Create server reached `Done (4.229s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (4.160s)!` with production scoring enabled; both migrated/opened the world-bound SQLite runtime successfully.
 - After the Nation Application/activation/schema-v20 slice, the no-Create server reached `Done (3.751s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.751s)!` with production scoring enabled; both opened the schema-v20 world-bound SQLite runtime and enabled buffered online-time observation.
 - After the command-driven activation/cancellation and DEBUG WORLD authority slice, the no-Create server reached `Done (3.873s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.540s)!` with production scoring enabled. Both opened the world-bound schema-v20 SQLite runtime; task-owned process trees were stopped after startup confirmation.
+- After automatic application expiry wiring, the no-Create server reached `Done (3.814s)!` with production scoring disabled, and the Create `6.0.6` server reached `Done (3.415s)!` with production scoring enabled. Both opened the world-bound SQLite runtime without an expiry failure; task-owned process trees were stopped after startup confirmation.
 
 ### Environment note
 
@@ -287,6 +293,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - FTB claim/team event subscriptions are not yet wired; current adapters are conservative server-side queries only. In particular, future `BEFORE_CLAIM` handling must remain side-effect-free because FTB fires it for simulations.
 - Temporary provider citizens are still current FTB Team members, while formal Citizenship now lives in the persistent registry. The provider and FTB membership events are not yet reconciled to that registry, and neither raw membership nor Citizenship alone is an Effective Citizen without rolling online-time evidence.
 - Online sessions checkpoint every minute, so an ungraceful process death can conservatively lose at most the unflushed tail of each active session. It cannot credit offline time. The interval is currently an implementation constant and still needs configuration/documentation.
+- Nation Application expiry scans run at startup and every minute, with all SQLite work off-thread. The scan interval and 60-day evidence window are still implementation constants pending server policy configuration.
 - Graceful `ServerStoppedEvent` waits up to ten seconds for queued SQLite writes and close. This is bounded shutdown lifecycle work, not regular tick work, but timeout behavior still needs a controlled fault GameTest.
 - `NationRegistry.register` remains a low-level legacy registration primitive used by earlier adapter tests. New player founding uses Nation Application commands, but legacy registration must be removed or restricted before release so it cannot become a second gameplay path.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
@@ -314,4 +321,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Add off-thread scheduled Nation Application expiry with deterministic replay identities and lifecycle tests, expose effective-candidate eligibility in `nation status`, then begin FTB membership-to-Citizenship reconciliation without treating raw Team membership as Citizenship.
+Add FTB membership-to-Citizenship reconciliation with an explicit correction grace and durable leave requests, then aggregate Nation-level Effective Citizen population from formal Citizenship plus rolling online evidence.

@@ -191,14 +191,13 @@ class NationApplicationRegistryTest {
                     database,
                     teamDirectory(teamId, headId, memberId),
                     Clock.fixed(NOW.plus(Duration.ofHours(3)), ZoneOffset.UTC));
-            assertEquals(1, afterEvidence.claimCandidateEvidence(
-                    first.applicationId(), Duration.ofDays(60)).size());
 
             NationApplication cancelled = afterEvidence.cancel(new CancelNationApplication(
                     new ServiceIdentity("civiceconomy-founding"),
                     "cancel-first-application",
                     first.applicationId(),
                     headId,
+                    Duration.ofDays(60),
                     "Team withdrew its founding application"));
             assertEquals(NationApplicationState.CANCELLED, cancelled.state());
             assertEquals(cancelled, afterEvidence.cancel(new CancelNationApplication(
@@ -206,6 +205,7 @@ class NationApplicationRegistryTest {
                     "cancel-first-application",
                     first.applicationId(),
                     headId,
+                    Duration.ofDays(60),
                     "Team withdrew its founding application")));
             assertEquals(
                     Set.of(memberId),

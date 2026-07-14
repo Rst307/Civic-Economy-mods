@@ -626,6 +626,28 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredNationApplication> pendingNationApplicationsExpiringAtOrBefore(
+            long expiresAtEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application
+                WHERE state = 'PENDING' AND expires_at_epoch_millis <= ?
+                ORDER BY expires_at_epoch_millis, application_id
+                """)) {
+            query.setLong(1, expiresAtEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                List<StoredNationApplication> applications = new ArrayList<>();
+                while (result.next()) {
+                    applications.add(storedNationApplication(result));
+                }
+                return List.copyOf(applications);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read due Nation Applications at " + expiresAtEpochMillis,
+                    failure);
+        }
+    }
+
     public synchronized List<StoredNationApplicationCandidate> nationApplicationCandidates(
             UUID applicationId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -3216,16 +3238,21 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            return new StoredNationApplication(
-                    UUID.fromString(result.getString("application_id")),
-                    result.getString("service_identity"),
-                    result.getString("request_id"),
-                    UUID.fromString(result.getString("ftb_team_id")),
-                    UUID.fromString(result.getString("applicant_player_id")),
-                    result.getLong("created_at_epoch_millis"),
-                    result.getLong("expires_at_epoch_millis"),
-                    result.getString("state"));
+            return storedNationApplication(result);
         }
+    }
+
+    private static StoredNationApplication storedNationApplication(ResultSet result)
+            throws SQLException {
+        return new StoredNationApplication(
+                UUID.fromString(result.getString("application_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("ftb_team_id")),
+                UUID.fromString(result.getString("applicant_player_id")),
+                result.getLong("created_at_epoch_millis"),
+                result.getLong("expires_at_epoch_millis"),
+                result.getString("state"));
     }
 
     private StoredNationApplicationTransition readNationApplicationTransition(

@@ -5,8 +5,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -21,6 +24,7 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
+import org.civiceconomy.nation.NationApplicationExpiryProcessor;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.slf4j.Logger;
@@ -28,6 +32,8 @@ import org.slf4j.Logger;
 public final class CivicServerRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int CHECKPOINT_INTERVAL_TICKS = 20 * 60;
+    private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
+    private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
     private static volatile CivicServerRuntime current;
 
     private final Clock clock;
@@ -77,6 +83,7 @@ public final class CivicServerRuntime {
             sessions.login(player.getUUID(), now);
         }
         state = new RuntimeState(server, sessions, writer);
+        scheduleNationApplicationExpiry(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
             LOGGER.warn(
@@ -121,6 +128,12 @@ public final class CivicServerRuntime {
             current.ticksSinceCheckpoint = 0;
             current.writer.submit(current.sessions.checkpoint(clock.millis()));
         }
+        current.ticksSinceNationApplicationExpiry++;
+        if (current.ticksSinceNationApplicationExpiry
+                >= NATION_APPLICATION_EXPIRY_INTERVAL_TICKS) {
+            current.ticksSinceNationApplicationExpiry = 0;
+            scheduleNationApplicationExpiry(current);
+        }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
             current.failureLogged = true;
@@ -163,6 +176,24 @@ public final class CivicServerRuntime {
         return current.writer.submitDatabase(operation);
     }
 
+    private void scheduleNationApplicationExpiry(RuntimeState current) {
+        if (!current.nationApplicationExpiryQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> new NationApplicationExpiryProcessor(
+                        database, scanClock, NATION_APPLICATION_EVIDENCE_WINDOW)
+                .expireDue())
+                .whenComplete((expired, failure) -> {
+                    current.nationApplicationExpiryQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error("Automatic Nation Application expiry failed closed", failure);
+                    } else if (!expired.isEmpty()) {
+                        LOGGER.info("Automatically expired {} Nation Application(s)", expired.size());
+                    }
+                });
+    }
+
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
         return mods.version(modId)
                 .orElseThrow(() -> new IllegalStateException("Loaded mod version is unavailable: " + modId));
@@ -172,7 +203,9 @@ public final class CivicServerRuntime {
         private final MinecraftServer server;
         private final OnlineSessionAccumulator sessions;
         private final AsyncOnlineTimeWriter writer;
+        private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
+        private int ticksSinceNationApplicationExpiry;
         private boolean failureLogged;
 
         private RuntimeState(
