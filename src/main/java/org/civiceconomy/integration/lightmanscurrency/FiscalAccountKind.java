@@ -5,7 +5,8 @@ import org.civiceconomy.fiscal.AccountId;
 public enum FiscalAccountKind {
     NATIONAL_TREASURY("nation:", ":treasury"),
     ORGANIZATION_FISCAL_ACCOUNT("organization:", ":fiscal"),
-    TERRITORY_PREPAYMENT_CLEARING("system:territory:prepayment-clearing");
+    TERRITORY_PREPAYMENT_CLEARING("system:territory:prepayment-clearing"),
+    PUBLIC_MAINTENANCE_FUND("system:territory:public-maintenance-fund");
 
     private final String prefix;
     private final String suffix;

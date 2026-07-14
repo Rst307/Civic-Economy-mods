@@ -31,6 +31,8 @@ import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBalances;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyTerritoryClearingAccountProvisioner;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPublicMaintenanceFundProvisioner;
+import org.civiceconomy.integration.lightmanscurrency.PermanentDestructionCoordinator;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
@@ -70,6 +72,7 @@ public final class CivicServerRuntime {
     private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
+    private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
@@ -140,6 +143,8 @@ public final class CivicServerRuntime {
                 requireVersion(mods, "ftbteams"),
                 requireVersion(mods, "ftbchunks"));
         CivicDatabase database = CivicDatabase.open(databaseDirectory.resolve("civic.sqlite3"), identity);
+        LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
+                .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
         OnlineSessionAccumulator sessions =
                 new OnlineSessionAccumulator(new ServiceIdentity("civiceconomy-server"));
@@ -152,6 +157,7 @@ public final class CivicServerRuntime {
         scheduleNationApplicationExpiry(state);
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
+        schedulePermanentDestructionRecovery(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
             LOGGER.warn(
@@ -213,6 +219,12 @@ public final class CivicServerRuntime {
                 >= TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS) {
             current.ticksSinceTerritoryPermitCompensation = 0;
             scheduleTerritoryPermitCompensation(current);
+        }
+        current.ticksSincePermanentDestructionRecovery++;
+        if (current.ticksSincePermanentDestructionRecovery
+                >= PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS) {
+            current.ticksSincePermanentDestructionRecovery = 0;
+            schedulePermanentDestructionRecovery(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -746,6 +758,36 @@ public final class CivicServerRuntime {
                 });
     }
 
+    private void schedulePermanentDestructionRecovery(RuntimeState current) {
+        if (!current.permanentDestructionRecoveryQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> {
+                    int operationCount = database.permanentDestructionOperations().size();
+                    if (operationCount == 0) {
+                        return 0;
+                    }
+                    var session = new FiscalAuthorization(database)
+                            .openSession(TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    PermanentDestructionCoordinator.live(
+                                    database,
+                                    session,
+                                    recoveryClock,
+                                    current.server.overworld())
+                            .recoverAll();
+                    return operationCount;
+                })
+                .whenComplete((recovered, failure) -> {
+                    current.permanentDestructionRecoveryQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error("Automatic Permanent Destruction recovery failed closed", failure);
+                    } else if (recovered != null && recovered > 0) {
+                        LOGGER.info("Replayed {} Permanent Destruction operation(s)", recovered);
+                    }
+                });
+    }
+
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
         return mods.version(modId)
                 .orElseThrow(() -> new IllegalStateException("Loaded mod version is unavailable: " + modId));
@@ -758,10 +800,12 @@ public final class CivicServerRuntime {
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
+        private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
         private int ticksSinceTerritoryPermitCompensation;
+        private int ticksSincePermanentDestructionRecovery;
         private boolean failureLogged;
 
         private RuntimeState(

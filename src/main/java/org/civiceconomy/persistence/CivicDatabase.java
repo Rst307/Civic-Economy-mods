@@ -1737,6 +1737,22 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized long territoryMaintenanceDueMinorUnits(UUID cycleId, UUID nationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT COALESCE(SUM(maintenance_due_minor_units), 0)
+                FROM territory_fiscal_assessment
+                WHERE cycle_id = ? AND nation_id = ?
+                """)) {
+            query.setString(1, cycleId.toString());
+            query.setString(2, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0L;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to total Territory maintenance due", failure);
+        }
+    }
+
     public synchronized StoredTerritoryClaimPermit territoryClaimPermit(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""

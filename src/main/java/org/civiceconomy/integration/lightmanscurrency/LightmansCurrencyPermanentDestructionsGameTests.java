@@ -32,6 +32,9 @@ import org.civiceconomy.monetary.ExternalPermanentDestruction;
 import org.civiceconomy.monetary.MonetarySupplyChange;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
+import org.civiceconomy.nation.NationId;
+import org.civiceconomy.territory.ChargeTerritoryMaintenance;
+import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -176,6 +179,135 @@ public final class LightmansCurrencyPermanentDestructionsGameTests {
         } finally {
             payments.apply(new ExternalPayment(
                     UUID.randomUUID(), treasury, cleanupAccount, MoneyAmount.ofMinorUnits(400L)));
+            bankData.deleteAccount(fundingPlayerId);
+            bankData.deleteAccount(cleanupPlayerId);
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void realTerritoryMaintenanceSplitsTreasuryIntoDestructionAndPublicFund(
+            GameTestHelper helper) {
+        UUID fundingPlayerId = UUID.randomUUID();
+        UUID cleanupPlayerId = UUID.randomUUID();
+        NationId nationId = NationId.create();
+        UUID cycleId = UUID.randomUUID();
+        UUID teamId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        AccountId fundingAccount = new AccountId("player:" + fundingPlayerId);
+        AccountId cleanupAccount = new AccountId("player:" + cleanupPlayerId);
+        AccountId treasury = new AccountId("nation:" + nationId.value() + ":treasury");
+        AccountId publicFund = LightmansCurrencyPublicMaintenanceFundProvisioner.ACCOUNT_ID;
+        LightmansCurrencyFiscalAccounts accounts =
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, "Maintenance GameTest Treasury");
+        new LightmansCurrencyPublicMaintenanceFundProvisioner(accounts).ensureExists();
+        long publicFundBefore = accounts.balance(publicFund).minorUnits();
+        reset(bankData, fundingPlayerId, 1_000L);
+        reset(bankData, cleanupPlayerId, 0L);
+        LightmansCurrencyPayments payments = LightmansCurrencyPayments.live(helper.getLevel());
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), fundingAccount, treasury, MoneyAmount.ofMinorUnits(1_000L)));
+        Path temporaryDirectory = createTemporaryDirectory();
+        Path databaseFile = temporaryDirectory.resolve("maintenance-payment.sqlite3");
+        DatabaseIdentity identity = new DatabaseIdentity(
+                UUID.randomUUID(),
+                "0.1.0-probe",
+                "1.21-2.3.0.5",
+                "2101.1.10",
+                "2101.1.20");
+        try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            new TerritoryFiscalServiceProvisioner(authorization).ensureAuthorized(treasury);
+            database.registerNation(
+                    nationId.value(), "maintenance-gametest", "register-nation", teamId, System.currentTimeMillis());
+            database.openTerritoryMaintenanceCycle(
+                    cycleId,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "open-real-maintenance-cycle",
+                    System.currentTimeMillis(),
+                    System.currentTimeMillis() + 3_600_000L,
+                    System.currentTimeMillis());
+            database.assessTerritoryFiscalValidity(
+                    UUID.randomUUID(),
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "assess-real-maintenance",
+                    cycleId,
+                    nationId.value(),
+                    teamId,
+                    "minecraft:overworld",
+                    20,
+                    30,
+                    101L,
+                    "EFFECTIVE",
+                    "Real maintenance GameTest assessment",
+                    System.currentTimeMillis());
+            database.confirmMonetarySupplyChange(
+                    cycleId,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "seed-real-maintenance-issuance",
+                    MonetarySupplyChange.ISSUANCE.name(),
+                    1_000L,
+                    "mint-batch:real-maintenance",
+                    "Seed real maintenance issuance",
+                    System.currentTimeMillis(),
+                    2_000L);
+            var session = authorization.openSession(TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+            TerritoryMaintenancePaymentCoordinator coordinator =
+                    TerritoryMaintenancePaymentCoordinator.live(
+                            database, session, Clock.systemUTC(), helper.getLevel());
+            var maintenance = coordinator.charge(new ChargeTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "real-maintenance-cycle",
+                    cycleId,
+                    nationId,
+                    treasury,
+                    MoneyAmount.ofMinorUnits(101L),
+                    6_000,
+                    "Real maintenance GameTest"));
+            var replay = coordinator.charge(new ChargeTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "real-maintenance-cycle",
+                    cycleId,
+                    nationId,
+                    treasury,
+                    MoneyAmount.ofMinorUnits(101L),
+                    6_000,
+                    "Real maintenance GameTest"));
+
+            helper.assertValueEqual(
+                    60L, maintenance.destroyedAmount().minorUnits(), "destroyed maintenance share");
+            helper.assertValueEqual(
+                    41L, maintenance.publicFundAmount().minorUnits(), "public-fund maintenance share");
+            helper.assertValueEqual(
+                    maintenance.publicFundPayment().transactionId(),
+                    replay.publicFundPayment().transactionId(),
+                    "maintenance payment replay transaction");
+            helper.assertValueEqual(
+                    899L, accounts.balance(treasury).minorUnits(), "real Treasury after maintenance");
+            helper.assertValueEqual(
+                    publicFundBefore + 41L,
+                    accounts.balance(publicFund).minorUnits(),
+                    "real Public Maintenance Fund after maintenance");
+            helper.assertValueEqual(
+                    940L, database.cumulativeNetIssuanceMinorUnits(), "net issuance after maintenance");
+            helper.assertValueEqual(
+                    0L,
+                    database.activeReservedMinorUnits(treasury.value()),
+                    "released maintenance reservation");
+        } finally {
+            MoneyAmount treasuryBalance = accounts.balance(treasury);
+            if (!treasuryBalance.equals(MoneyAmount.ZERO)) {
+                payments.apply(new ExternalPayment(
+                        UUID.randomUUID(), treasury, cleanupAccount, treasuryBalance));
+            }
+            MoneyAmount publicFundDelta = MoneyAmount.ofMinorUnits(
+                    accounts.balance(publicFund).minorUnits() - publicFundBefore);
+            if (!publicFundDelta.equals(MoneyAmount.ZERO)) {
+                payments.apply(new ExternalPayment(
+                        UUID.randomUUID(), publicFund, cleanupAccount, publicFundDelta));
+            }
             bankData.deleteAccount(fundingPlayerId);
             bankData.deleteAccount(cleanupPlayerId);
             deleteTemporaryDirectory(temporaryDirectory);

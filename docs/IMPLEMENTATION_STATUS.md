@@ -1,6 +1,6 @@
 # Civic Economy implementation status
 
-Last updated: 2026-07-14 (Asia/Shanghai)
+Last updated: 2026-07-15 (Asia/Shanghai)
 
 This file distinguishes unit fixtures, artifact/source inspection, compilation, GameTest, client runtime, and dedicated-server runtime evidence. One form of evidence must not be presented as another.
 
@@ -165,10 +165,14 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised SQLite to schema v30 with durable `PREPARED` / `COMMITTED` Permanent Destruction operations and the exact-account `PERMANENT_DESTRUCTION` fiscal capability. Existing capability grants and revocations survive the v29-to-v30 constraint-table rebuild.
 - The production coordinator can only be constructed with the real LC adapter and an owner-bound fiscal session. It prepares and reserves destruction capacity in SQLite, applies the same stable operation UUID to LC, then atomically appends the Monetary Supply event, reduces Cumulative Net Issuance, and commits the operation.
 - Recovery replays every prepared or committed operation through the same LC UUID. This covers both cross-store crash directions: LC applied before SQLite commit, and SQLite committed before the matching LC `SavedData` snapshot reached disk. Pending operations reserve net-issuance capacity so another destruction cannot strand their recovery.
+- Added the real LC-backed Public Maintenance Fund at `system:territory:public-maintenance-fund` and a Territory maintenance-payment coordinator. The coordinator verifies the requested total against the exact cycle/Nation assessment sum, reserves the National Treasury total, pays the public-fund remainder, permanently destroys the configured share, and releases only the externally destroyed Reservation remainder.
+- Maintenance allocation uses conservative integer rounding: `floor(total due * destruction basis points / 10000)` is permanently destroyed and every remaining minor unit enters the Public Maintenance Fund. The accepted destruction range remains 30%-80%; a `101`-unit charge at 60% therefore destroys exactly `60` and transfers exactly `41`.
+- The internal Territory Service Identity now receives only the additional exact-account `PERMANENT_DESTRUCTION` capability needed for each National Treasury. Startup provisions the Public Maintenance Fund and schedules idempotent Permanent Destruction recovery on `Civic-Economy-SQLite` immediately and every minute; regular server ticks do not execute SQLite or LC recovery work.
+- Real LC/SQLite GameTest evidence observes a National Treasury `1000 -> 899`, Public Maintenance Fund `+41`, and Cumulative Net Issuance `1000 -> 940`, with request replay producing no second movement. The four GameTests that share the canonical Territory clearing account now use separate NeoForge batches so their real external account mutations cannot race.
 
 ## In progress
 
-- Implement Territory maintenance-cycle charging, allocation, and validity state.
+- Raise schema v31 so new Territory Fiscal Assessments begin `PENDING` and transition to `EFFECTIVE` only after successful maintenance settlement, or `SUSPENDED` when unpaid, while preserving the external FTB ownership record.
 
 ## Not yet completed
 
@@ -176,7 +180,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Delegated/custom fiscal-role policy, capital rebinding, liquidation, and Nation lifecycle restrictions.
 - Withdrawals, configurable multi-person approval policy, and broader audit.
 - National Issuance Quota, Registered Mint, material custody, issuance/correction flows, and gameplay callers for the durable Permanent Destruction coordinator.
-- FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
+- FTB Chunks automatic maintenance-cycle assessment/charging, insufficient-payment prioritization, restoration, continuity, transfer, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
 - Remaining gameplay commands, menus, public reports, recovery tools, DEBUG adjustment/cycle/fault-injection tools, and persistent HUD/report warning surfaces.
 - Client runtime, playable single-player loop, and multiplayer core loop.
@@ -235,7 +239,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the Monetary Supply/schema-v29 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 153 tests with zero failures.
 - After the real LC Permanent Destruction adapter, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 155 tests with zero failures.
 - After the durable Permanent Destruction coordinator/schema-v30 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 158 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,892,645 bytes, SHA-256 `64B0038CD5FED0467C64638D2C999A928E2C310C0FFDC2A2F1EC9070F6736470`. It remains a development artifact until all v1 completion gates pass.
+- After the Territory maintenance-payment slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 159 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,904,292 bytes, SHA-256 `72AD354565DA3D332BF16318ACF2699C0C243EDD0E410B53907247AFAD922809`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -245,6 +250,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `TerritoryMaintenanceRegistryTest` uses real temporary on-disk schema-v28 SQLite databases and verifies cycle/assessment replay across reopen, overlap rejection, changed-payload conflict, exact Nation/Team/claim scope, and fail-closed target mismatches. `EffectiveTerritoryQueryTest` adds an ownership seam and proves missing or transferred FTB ownership cannot count as Effective Territory. These tests do not claim LC maintenance payment integration.
 - `MonetarySupplyLedgerTest` uses a real temporary on-disk schema-v29 SQLite database and verifies exact-once issuance/destruction across reopen, changed replay rejection, hard-cap rejection, destruction-underflow rejection, and no event on rejected changes. It does not claim a real LC mint or destruction operation.
 - `PermanentDestructionCoordinatorTest` uses real schema-v30 SQLite and an idempotent external-effect seam to verify both crash directions, exact account/session authorization before any external call, changed replay rejection, pending-capacity reservation, and one Monetary Supply event. `CivicDatabaseV30MigrationTest` proves existing grants/revocations survive migration and the new capability can be granted.
+- `TerritoryMaintenancePaymentCoordinatorTest` uses real schema-v30 SQLite plus idempotent LC payment/destruction seams. It crashes after the `60`-unit destruction external effect, reopens the database, recovers the same operation UUID, and proves exact final balances (`899` Treasury, `41` Public Maintenance Fund), Cumulative Net Issuance `940`, and no active Reservation remainder.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
 - The same focused schema-v3 recovery/database suite was re-run on clean commit `4371d2f` in an isolated worktree on 2026-07-14: 22 tests passed (`PaymentRecoveryTest` 14, `CivicDatabaseTest` 4, `CivicDatabaseBackupTest` 4). The shared checkout's unrelated owner-bound authorization RED test was preserved and excluded from this evidence.
@@ -298,6 +304,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After schema v29, the same 27/27 required GameTests passed against real LC/FTB dependencies and the migrated world-bound runtime in 11.72 seconds. No new GameTest claims a real mint or Permanent Destruction path.
 - After the real LC Permanent Destruction adapter, all 28/28 required GameTests passed after `clean`. The added test funds a real National Treasury to `1000`, destroys `600` without a recipient, replays the same UUID at balance `400`, and reloads both the `400` LC balance and destruction marker from the same serialized Civic fiscal-account `SavedData`. It does not yet claim maintenance charging or SQLite Monetary Supply coordination.
 - After schema v30, all 29/29 required GameTests passed after `clean`. The added cross-store test uses a real National Treasury, real LC withdrawal, real owner-bound Civic session, and real SQLite reopen: it crashes after LC `1000 -> 400` but before SQLite confirmation, then recovers to Cumulative Net Issuance `400` with one destruction event and no second LC withdrawal.
+- After the maintenance-payment slice, `gradlew.bat clean runGameTestServer --no-daemon --console=plain` passed all 30/30 required GameTests. The added real LC/SQLite test charged `101`, observed Treasury `1000 -> 899`, Public Maintenance Fund `+41`, Cumulative Net Issuance `1000 -> 940`, zero Reservation remainder, and idempotent replay. The default batch ran 26 tests and four canonical-clearing-account tests ran in separate one-test batches, eliminating shared-account races without changing production accounting.
 - `CitizenshipReconciliationTest` uses real temporary SQLite databases to verify immediate Provider suspension, restoration of the same Citizenship, deadline-effective Citizenship leave, no automatic Citizenship for new FTB members, and restart recovery after the Citizenship leave committed but before the Correction Grace resolved.
 - `EffectiveCitizenCalculatorTest` verifies online time during Correction Grace is excluded immediately while eligible time before the grace remains attributed.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
@@ -378,6 +385,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After schema v29, the no-Create server disabled Create production scoring, reached `Done (9.220s)!`, and opened the world-bound runtime. The Create `6.0.6` server enabled production scoring, reached `Done (11.146s)!`, and opened the world-bound runtime; all task-owned PID chains were stopped and port `25565` was confirmed free.
 - After the real LC Permanent Destruction adapter, the no-Create server reached `Done (11.549s)!` with production scoring disabled and the Create `6.0.6` server reached `Done (11.160s)!` with production scoring enabled. Both opened the world-bound runtime; all task-owned process trees were stopped and port `25565` was confirmed free.
 - After schema v30, the no-Create server reached `Done (12.711s)!` with production scoring disabled and the Create `6.0.6` server reached `Done (11.388s)!` with production scoring enabled. Both opened the world-bound runtime; all task-owned process trees were stopped and port `25565` was confirmed free.
+- After the maintenance-payment slice, the no-Create server reached `Done (4.313s)!` with production scoring disabled and opened the world-bound SQLite runtime. The Create `6.0.6` server reached `Done (4.090s)!` with production scoring enabled and opened the same runtime; an initial Create attempt was rejected at port binding because the verified no-Create child JVM still owned `25565`, then succeeded after that exact task-owned PID was stopped.
 
 ### Environment note
 
@@ -415,12 +423,12 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Nation Fiscal Permissions are persistently grantable/revocable and immediately fail closed when formal Provider authority is unavailable. The current governance command intentionally reserves grant/revoke to the live Nation head; delegated `MANAGE_FISCAL_ROLES`, configurable role bundles, approval-policy thresholds, and human-facing fiscal operations still need wiring.
 - Territory Free Allocation and Territory Expansion pricing versions are persistent and delayed, but both conservative fallbacks are zero until an OP schedules versions. Charged READY Permits, player prepare/cancel, and uncharged Free Claim Authorization are wired. Free authorizations intentionally do not survive restart; players must prepare again after a restart.
 - The authorized coordinator, cancellation compensation, player commands, and FTB event bridge move and refund real LC in GameTest. There is no GUI yet. The focused event-only GameTest uses a committed-prepayment verifier fixture; the command GameTests provide the combined real LC/FTB/SQLite evidence.
-- Fiscal general-ledger entry kinds still cover only committed `PAYMENT` and `REFUND` transfers. Schema v30 keeps confirmed issuance/destruction facts in the separate Monetary Supply event ledger and provides a real coordinated destruction path; issuance, withdrawal, public-fund allocation, and administrator/debug adjustments still require explicit paths and must not be forced into payment semantics.
-- `PermanentDestructionCoordinator.recoverAll()` is verified but not yet scheduled by the server runtime. Maintenance-cycle wiring must invoke it off-thread at startup and before new destruction work; no current gameplay path can create these operations yet.
+- Fiscal general-ledger entry kinds still cover only committed `PAYMENT` and `REFUND` transfers. Schema v30 keeps confirmed issuance/destruction facts in the separate Monetary Supply event ledger; the maintenance Public Maintenance Fund share is a formal payment, while its destroyed share is a Monetary Supply event. Issuance, withdrawal, and administrator/debug adjustments still require explicit paths and must not be forced into payment semantics.
+- Permanent Destruction recovery is scheduled off-thread at startup and every minute. Maintenance payment is callable and recovery-safe, but no automatic cycle-closing scheduler yet creates charges or transitions assessment validity after settlement.
 - Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
 - Lightman's Currency defaults include issuance and interest mechanisms that must be explicitly disabled or blocked before a playable release can satisfy currency conservation.
 
 ## Next step
 
-Wire off-thread Permanent Destruction recovery and Territory maintenance charging with exact public-fund/destruction allocation.
+Implement schema v31 assessment settlement: `PENDING -> EFFECTIVE/SUSPENDED`, with validity becoming effective only after successful exact-cycle maintenance payment.

@@ -19,7 +19,8 @@ public final class TerritoryFiscalServiceProvisioner {
     private static final EnumSet<FiscalCapability> REQUIRED_CAPABILITIES = EnumSet.of(
             FiscalCapability.RESERVE_FUNDS,
             FiscalCapability.SETTLE_PAYMENT,
-            FiscalCapability.COMPENSATE_PAYMENT);
+            FiscalCapability.COMPENSATE_PAYMENT,
+            FiscalCapability.PERMANENT_DESTRUCTION);
 
     private final FiscalAuthorization authorization;
 

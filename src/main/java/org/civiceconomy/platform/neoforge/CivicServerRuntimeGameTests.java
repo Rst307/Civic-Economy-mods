@@ -634,7 +634,10 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
-    @GameTest(template = "empty", timeoutTicks = 500)
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 500,
+            batch = "territory-player-paid-claim")
     public static void playerPrepareCommandPaysRealLcAndAuthorizesRealFtbClaim(
             GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(
@@ -828,7 +831,10 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
-    @GameTest(template = "empty", timeoutTicks = 500)
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 500,
+            batch = "territory-player-cancelled-claim")
     public static void playerCancelCommandRefundsRealLcAndRemovesClaimAuthorization(
             GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(

@@ -103,7 +103,10 @@ import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 public final class LightmansCurrencyFiscalAccountsGameTests {
     private LightmansCurrencyFiscalAccountsGameTests() {}
 
-    @GameTest(template = "empty", timeoutTicks = 100)
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 100,
+            batch = "territory-clearing-provision")
     public static void territoryPrepaymentClearingUsesRealLcFiscalAccount(GameTestHelper helper) {
         AccountId clearing = new AccountId("system:territory:prepayment-clearing");
         LightmansCurrencyFiscalAccounts accounts =
@@ -122,7 +125,10 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
         helper.succeed();
     }
 
-    @GameTest(template = "empty", timeoutTicks = 100)
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 100,
+            batch = "territory-prepayment-lifecycle")
     public static void authorizedTerritoryPrepaymentMovesRealLcBeforeReadyPermit(
             GameTestHelper helper) {
         Instant now = Instant.parse("2026-07-14T13:30:00Z");
