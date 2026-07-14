@@ -6,7 +6,7 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 
 ## 当前状态
 
-项目处于**规格完成、实现尚未开始**阶段。不要直接从完整业务功能开工，第一开发阶段是依赖技术探针和工程骨架。
+项目处于 **v0.1 可玩版持续实现阶段**。工程骨架、精确依赖探针、SQLite 财政事务、服务身份授权和建国申请/激活纵向切片已经落地；完整第一版仍在开发。实际完成范围、验证证据和剩余风险以 [`docs/IMPLEMENTATION_STATUS.md`](./docs/IMPLEMENTATION_STATUS.md) 为准。
 
 ## 必读文档
 
@@ -28,7 +28,7 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 
 精确依赖版本必须通过技术探针验证，并由运行时白名单控制。不要仅凭版本范围假设兼容。
 
-## 第一开发里程碑
+## 第一开发里程碑（已完成）
 
 首个实现只应完成：
 
@@ -42,6 +42,8 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 - 实际验证版本、运行命令和失败边界记录。
 
 这一阶段不实现国库、铸币、领土扣费或生产评分。
+
+后续开发已按用户授权继续推进完整 v1；上面的限制仅描述历史首个里程碑，不再限制当前分支。
 
 ## 单人测试
 
@@ -71,6 +73,41 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 ```
 
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
+
+## 当前游戏内命令
+
+玩家建国流程由服务端从真实玩家、FTB Team 和当前位置推导身份，不接受调用者提交 Team UUID、所有者或首都坐标：
+
+```text
+/civic economy nation apply
+/civic economy nation status
+/civic economy nation cancel <reason>
+/civic economy nation activate
+```
+
+激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。
+
+受信任 OP/控制台服务管理入口位于：
+
+```text
+/civic economy admin service list
+/civic economy admin service show <service>
+/civic economy admin service register ...
+/civic economy admin service grant ...
+/civic economy admin service revoke ...
+/civic economy admin service disable ...
+/civic economy admin service enable ...
+```
+
+单人集成服务器中，拥有作弊权限的世界所有者使用以下二次确认流程永久启用调试世界：
+
+```text
+/civic debug status
+/civic debug enable
+/civic debug enable confirm
+```
+
+专用服务器默认不注册调试写命令。只有在 JVM 启动参数显式加入 `-Dciviceconomy.allowDedicatedDebugWorld=true` 时才注册，并且仍只允许玩家 OP 操作；普通配置文件不能启用该权限。`DEBUG WORLD` 数据不得转成正式经济数据。
 
 ## 给另一个 AI 的起始提示
 

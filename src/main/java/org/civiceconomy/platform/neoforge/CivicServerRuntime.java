@@ -78,6 +78,11 @@ public final class CivicServerRuntime {
         }
         state = new RuntimeState(server, sessions, writer);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
+        if (CivicDebugWorldData.get(server).enabled()) {
+            LOGGER.warn(
+                    "DEBUG WORLD is active for {}; Civic debug data must not be represented as formal economy data",
+                    server.getWorldData().getLevelName());
+        }
     }
 
     public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {

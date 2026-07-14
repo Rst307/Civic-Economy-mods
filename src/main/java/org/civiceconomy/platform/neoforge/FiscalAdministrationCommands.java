@@ -39,10 +39,19 @@ public final class FiscalAdministrationCommands {
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service);
-        event.getDispatcher().register(Commands.literal("civic")
+        var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
                         .then(NationApplicationCommands.command())
-                        .then(admin)));
+                        .then(admin));
+        boolean dedicatedStartupPermit =
+                CivicDebugWorldCommands.dedicatedStartupPermit();
+        boolean integratedServer = event.getCommandSelection()
+                == Commands.CommandSelection.INTEGRATED;
+        if (DebugWorldCommandRegistrationPolicy.shouldRegister(
+                integratedServer, dedicatedStartupPermit)) {
+            civic.then(CivicDebugWorldCommands.command(dedicatedStartupPermit));
+        }
+        event.getDispatcher().register(civic);
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
