@@ -160,6 +160,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised SQLite to schema v29 with immutable Monetary Supply events and a singleton Cumulative Net Issuance summary. Confirmed `ISSUANCE` adds to the summary, confirmed `PERMANENT_DESTRUCTION` subtracts from it, and both are service/request idempotent with changed-payload rejection and unique external references.
 - `MonetarySupplyLedger` enforces the configured Issuance Hard Cap and rejects Permanent Destruction above Cumulative Net Issuance in the same SQLite transaction that appends the event and advances the summary. Reopen preserves the exact result and failed changes append no event.
 - Recording a Monetary Supply event does not itself change an LC balance. Callers must provide an external reference only after the real mint credit or real destruction path is durably confirmed; a sink-account transfer is still not Permanent Destruction.
+- Added a real LC Permanent Destruction adapter for Civic National Treasury and Organization Fiscal Accounts. It withdraws exact LC main-chain minor units without a recipient account, rejects and restores any insufficient partial withdrawal, and replays the same destruction UUID without a second economic effect.
+- Permanent Destruction UUIDs are stored alongside the affected Civic fiscal-account balances in the same world `SavedData` save unit. The adapter does not accept arbitrary player-bank sources and does not record Cumulative Net Issuance by itself; the durable cross-store coordinator remains the next boundary.
 
 ## In progress
 
@@ -170,7 +172,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - SQLite migrations beyond schema v29, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
 - Delegated/custom fiscal-role policy, capital rebinding, liquidation, and Nation lifecycle restrictions.
 - Withdrawals, configurable multi-person approval policy, and broader audit.
-- National Issuance Quota, Registered Mint, material custody, and real issuance/destruction/correction flows. The schema-v29 Cumulative Net Issuance ledger and Issuance Hard Cap guard exist, but are not yet wired to real LC mint or destruction adapters.
+- National Issuance Quota, Registered Mint, material custody, and coordinated issuance/destruction/correction flows. The schema-v29 Cumulative Net Issuance ledger and Issuance Hard Cap guard plus a real idempotent LC fiscal-account destruction adapter exist, but are not yet joined by the durable cross-store coordinator.
 - FTB Chunks territory prepayment, maintenance, validity, continuity, transfer, restoration, and force-load charging.
 - National Strength, Registered Facility, Create production accounting, Global Reference Price, and conservative scoring adapters.
 - Remaining gameplay commands, menus, public reports, recovery tools, DEBUG adjustment/cycle/fault-injection tools, and persistent HUD/report warning surfaces.
@@ -228,7 +230,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After Free Claim Authorization, `gradlew.bat clean build` passed from fresh outputs; the full JUnit/SQLite suite executed 147 tests with zero failures.
 - After Territory maintenance/schema-v28 state modeling, `gradlew.bat clean build` passed from fresh outputs; the full JUnit/SQLite suite executed 151 tests with zero failures.
 - After the Monetary Supply/schema-v29 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 153 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,870,791 bytes, SHA-256 `669BFD0ECE0F812296D6CA07971DF612CC9C0551AF20E33DE18AA25C8C20153D`. It remains a development artifact until all v1 completion gates pass.
+- After the real LC Permanent Destruction adapter, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 155 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,880,634 bytes, SHA-256 `A1DF51BBA6224551AE1047932F20A433F6D43161731716B5E41F508E85208E13`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
@@ -288,6 +291,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After Free Claim Authorization, all 27 required GameTests passed and passed again after `clean`. The added test creates a real formal Nation/Citizenship and active base-one Free Allocation, executes the real player `prepare` command, proves no National Treasury, Permit, Reservation, or payment is created, repeats real FTB `checkOnly=true` simulations without consumption, then performs and cleans up one real FTB claim. Paid-command tests use an existing real seed claim so their charged classification remains isolated from the global free policy.
 - After schema v28, the same 27/27 GameTests passed against the migrated world-bound runtime. The canonical clearing-account provisioning assertion was hardened to verify idempotency relative to its starting balance, avoiding an invalid zero-balance assumption while paid tests legitimately hold clearing funds in parallel.
 - After schema v29, the same 27/27 required GameTests passed against real LC/FTB dependencies and the migrated world-bound runtime in 11.72 seconds. No new GameTest claims a real mint or Permanent Destruction path.
+- After the real LC Permanent Destruction adapter, all 28/28 required GameTests passed after `clean`. The added test funds a real National Treasury to `1000`, destroys `600` without a recipient, replays the same UUID at balance `400`, and reloads both the `400` LC balance and destruction marker from the same serialized Civic fiscal-account `SavedData`. It does not yet claim maintenance charging or SQLite Monetary Supply coordination.
 - `CitizenshipReconciliationTest` uses real temporary SQLite databases to verify immediate Provider suspension, restoration of the same Citizenship, deadline-effective Citizenship leave, no automatic Citizenship for new FTB members, and restart recovery after the Citizenship leave committed but before the Correction Grace resolved.
 - `EffectiveCitizenCalculatorTest` verifies online time during Correction Grace is excluded immediately while eligible time before the grace remains attributed.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
@@ -366,6 +370,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After Free Claim Authorization, the no-Create server disabled Create production scoring and reached `Done (12.359s)!`. The isolated Create `6.0.6` server enabled production scoring and reached `Done (12.044s)!`; both exact task-owned PID chains were stopped after startup confirmation.
 - After schema v28, the no-Create server migrated/opened the world-bound database, disabled Create production scoring, and reached `Done (12.141s)!`. The Create `6.0.6` server enabled production scoring, opened the world-bound runtime, and reached `Done (11.489s)!`; both exact task-owned PID chains were stopped after startup confirmation.
 - After schema v29, the no-Create server disabled Create production scoring, reached `Done (9.220s)!`, and opened the world-bound runtime. The Create `6.0.6` server enabled production scoring, reached `Done (11.146s)!`, and opened the world-bound runtime; all task-owned PID chains were stopped and port `25565` was confirmed free.
+- After the real LC Permanent Destruction adapter, the no-Create server reached `Done (11.549s)!` with production scoring disabled and the Create `6.0.6` server reached `Done (11.160s)!` with production scoring enabled. Both opened the world-bound runtime; all task-owned process trees were stopped and port `25565` was confirmed free.
 
 ### Environment note
 
@@ -410,4 +415,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Implement a real, idempotent LC Permanent Destruction adapter, then charge each Nation off-thread with conservative failure handling and exact public-fund/destruction allocation.
+Implement the durable LC Permanent Destruction/Monetary Supply coordinator, then charge each Nation off-thread with conservative failure handling and exact public-fund/destruction allocation.

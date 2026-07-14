@@ -6,6 +6,7 @@ import io.github.lightman314.lightmanscurrency.api.money.value.MoneyValue;
 import io.github.lightman314.lightmanscurrency.api.money.value.builtin.CoinValue;
 import io.github.lightman314.lightmanscurrency.api.money.coins.CoinAPI;
 import java.util.List;
+import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.server.ServerLifecycleHooks;
@@ -91,5 +92,17 @@ public final class LightmansCurrencyFiscalAccounts implements AccountBalances {
 
     List<AccountId> accountIds() {
         return data.accountIds();
+    }
+
+    CivicFiscalAccountData data() {
+        return data;
+    }
+
+    boolean wasPermanentDestructionApplied(UUID destructionId) {
+        return data.wasPermanentDestructionApplied(destructionId);
+    }
+
+    void recordPermanentDestructionApplied(UUID destructionId) {
+        data.recordPermanentDestructionApplied(destructionId);
     }
 }

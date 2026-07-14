@@ -10,6 +10,7 @@ import org.civiceconomy.compat.CompatibilityReport;
 import org.civiceconomy.compat.CompatibilityScanner;
 import org.civiceconomy.gametest.FtbIntegrationGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyFiscalAccountsGameTests;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPermanentDestructionsGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyPlayerPaymentsGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
@@ -71,6 +72,7 @@ public final class CivicEconomy {
         event.register(FtbIntegrationGameTests.class);
         event.register(CivicServerRuntimeGameTests.class);
         event.register(LightmansCurrencyFiscalAccountsGameTests.class);
+        event.register(LightmansCurrencyPermanentDestructionsGameTests.class);
         event.register(LightmansCurrencyPlayerPaymentsGameTests.class);
     }
 }

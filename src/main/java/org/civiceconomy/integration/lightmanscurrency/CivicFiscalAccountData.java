@@ -1,9 +1,12 @@
 package org.civiceconomy.integration.lightmanscurrency;
 
 import io.github.lightman314.lightmanscurrency.api.money.bank.IBankAccount;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -17,10 +20,11 @@ final class CivicFiscalAccountData extends SavedData {
             new Factory<>(CivicFiscalAccountData::new, CivicFiscalAccountData::load);
 
     private final Map<AccountId, StoredAccount> accounts = new LinkedHashMap<>();
+    private final Set<UUID> appliedPermanentDestructions = new HashSet<>();
 
     private CivicFiscalAccountData() {}
 
-    private static CivicFiscalAccountData load(CompoundTag root, HolderLookup.Provider registries) {
+    static CivicFiscalAccountData load(CompoundTag root, HolderLookup.Provider registries) {
         CivicFiscalAccountData data = new CivicFiscalAccountData();
         ListTag savedAccounts = root.getList("Accounts", Tag.TAG_COMPOUND);
         for (int index = 0; index < savedAccounts.size(); index++) {
@@ -33,6 +37,11 @@ final class CivicFiscalAccountData extends SavedData {
             if (data.accounts.putIfAbsent(accountId, new StoredAccount(kind, account)) != null) {
                 throw new IllegalStateException("Duplicate Civic fiscal account " + accountId.value());
             }
+        }
+        ListTag savedDestructions = root.getList("AppliedPermanentDestructions", Tag.TAG_STRING);
+        for (int index = 0; index < savedDestructions.size(); index++) {
+            data.appliedPermanentDestructions.add(
+                    UUID.fromString(savedDestructions.getString(index)));
         }
         return data;
     }
@@ -61,6 +70,16 @@ final class CivicFiscalAccountData extends SavedData {
         return List.copyOf(accounts.keySet());
     }
 
+    boolean wasPermanentDestructionApplied(UUID destructionId) {
+        return appliedPermanentDestructions.contains(destructionId);
+    }
+
+    void recordPermanentDestructionApplied(UUID destructionId) {
+        if (appliedPermanentDestructions.add(destructionId)) {
+            setDirty();
+        }
+    }
+
     @Override
     public CompoundTag save(CompoundTag root, HolderLookup.Provider registries) {
         ListTag savedAccounts = new ListTag();
@@ -72,6 +91,13 @@ final class CivicFiscalAccountData extends SavedData {
             savedAccounts.add(saved);
         });
         root.put("Accounts", savedAccounts);
+        ListTag savedDestructions = new ListTag();
+        appliedPermanentDestructions.stream()
+                .map(UUID::toString)
+                .sorted()
+                .map(net.minecraft.nbt.StringTag::valueOf)
+                .forEach(savedDestructions::add);
+        root.put("AppliedPermanentDestructions", savedDestructions);
         return root;
     }
 
