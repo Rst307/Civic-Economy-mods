@@ -1,6 +1,8 @@
 package org.civiceconomy.fiscal;
 
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.persistence.PendingReservationPaymentException;
+import org.civiceconomy.persistence.ReservationRemainderExceededException;
 import org.civiceconomy.persistence.StoredPaymentTransaction;
 
 public final class PaymentCoordinator {
@@ -13,12 +15,22 @@ public final class PaymentCoordinator {
     }
 
     public PaymentTransaction settle(SettleReservation request, FailurePoint failurePoint) {
-        StoredPaymentTransaction stored = database.preparePayment(
-                request.serviceIdentity().value(),
-                request.requestId(),
-                request.reservationId(),
-                request.recipientAccount().value(),
-                request.amount().minorUnits());
+        StoredPaymentTransaction stored;
+        try {
+            stored = database.preparePayment(
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.reservationId(),
+                    request.recipientAccount().value(),
+                    request.amount().minorUnits());
+        } catch (ReservationRemainderExceededException exceeded) {
+            throw new InsufficientReservationRemainderException(
+                    exceeded.reservationId(),
+                    MoneyAmount.ofMinorUnits(exceeded.requestedMinorUnits()),
+                    MoneyAmount.ofMinorUnits(exceeded.remainingMinorUnits()));
+        } catch (PendingReservationPaymentException pending) {
+            throw new ReservationHasPendingPaymentException(pending.reservationId());
+        }
         PaymentTransaction transaction = toTransaction(stored);
         if (transaction.state() == TransactionState.PREPARED) {
             externalPayments.apply(externalPayment(transaction));

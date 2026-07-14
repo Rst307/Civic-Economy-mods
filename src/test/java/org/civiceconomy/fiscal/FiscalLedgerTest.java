@@ -133,6 +133,68 @@ class FiscalLedgerTest {
         }
     }
 
+    @Test
+    void releasingAReservationIsDurableAndIdempotentAcrossRestart() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+        ReleaseReservation releaseRequest;
+        ReservationRelease released;
+
+        try (CivicDatabase database = database()) {
+            FiscalLedger ledger = new FiscalLedger(database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+            Reservation reservation = ledger.reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "release-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Cancelled public works"));
+            releaseRequest = new ReleaseReservation(
+                    new ServiceIdentity("civiceconomy"),
+                    "release-request",
+                    reservation.reservationId(),
+                    "Project cancelled before payment");
+
+            released = ledger.release(releaseRequest);
+
+            assertEquals(released, ledger.release(releaseRequest));
+            assertEquals(MoneyAmount.ZERO, ledger.reservedBalance(treasury));
+            assertEquals(MoneyAmount.ofMinorUnits(1_000), ledger.availableBalance(treasury));
+        }
+
+        try (CivicDatabase reopened = database()) {
+            FiscalLedger ledger = new FiscalLedger(reopened, ignored -> MoneyAmount.ofMinorUnits(1_000));
+
+            assertEquals(released, ledger.release(releaseRequest));
+            assertEquals(MoneyAmount.ZERO, ledger.reservedBalance(treasury));
+        }
+    }
+
+    @Test
+    void releaseRequestCannotBeReusedWithAnotherReason() {
+        AccountId treasury = new AccountId("nation:aurora:treasury");
+
+        try (CivicDatabase database = database()) {
+            FiscalLedger ledger = new FiscalLedger(database, ignored -> MoneyAmount.ofMinorUnits(1_000));
+            Reservation reservation = ledger.reserve(new ReserveFunds(
+                    new ServiceIdentity("civiceconomy"),
+                    "release-conflict-hold",
+                    treasury,
+                    MoneyAmount.ofMinorUnits(300),
+                    "Cancelled contract"));
+            ServiceIdentity identity = new ServiceIdentity("civiceconomy");
+            ledger.release(new ReleaseReservation(
+                    identity, "release-conflict", reservation.reservationId(), "Original reason"));
+
+            assertThrows(
+                    IdempotencyConflictException.class,
+                    () -> ledger.release(new ReleaseReservation(
+                            identity,
+                            "release-conflict",
+                            reservation.reservationId(),
+                            "Changed reason")));
+            assertEquals(MoneyAmount.ZERO, ledger.reservedBalance(treasury));
+        }
+    }
+
     private static int reserveResult(FiscalLedger ledger, String requestId, AccountId treasury) {
         try {
             ledger.reserve(new ReserveFunds(

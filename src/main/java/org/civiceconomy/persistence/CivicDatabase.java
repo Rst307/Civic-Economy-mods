@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 6;
+    private static final int SCHEMA_VERSION = 8;
 
     private final Connection connection;
 
@@ -361,7 +361,14 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setString(6, purpose);
             insert.executeUpdate();
             return new StoredReservation(
-                    reservationId, serviceIdentity, requestId, sourceAccount, amountMinorUnits, purpose);
+                    reservationId,
+                    serviceIdentity,
+                    requestId,
+                    sourceAccount,
+                    amountMinorUnits,
+                    0L,
+                    purpose,
+                    "ACTIVE");
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to create Reservation", failure);
         }
@@ -371,9 +378,77 @@ public final class CivicDatabase implements AutoCloseable {
         return findReservation(serviceIdentity, requestId);
     }
 
+    public synchronized StoredReservationRelease releaseReservation(
+            UUID releaseId,
+            String serviceIdentity,
+            String requestId,
+            UUID reservationId,
+            String reason,
+            long releasedAtEpochMillis) {
+        StoredReservationRelease replay = reservationRelease(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO reservation_release (
+                            release_id, service_identity, request_id, reservation_id,
+                            reason, released_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement release = connection.prepareStatement("""
+                        UPDATE fiscal_reservation SET state = 'RELEASED'
+                        WHERE reservation_id = ? AND state = 'ACTIVE'
+                        """)) {
+                String state = reservationState(reservationId);
+                if (!"ACTIVE".equals(state)) {
+                    throw new InactiveReservationException(
+                            reservationId, state == null ? "UNKNOWN" : state);
+                }
+                if (hasIncompletePayment(reservationId)) {
+                    throw new PendingReservationPaymentException(reservationId);
+                }
+                insert.setString(1, releaseId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, reservationId.toString());
+                insert.setString(5, reason);
+                insert.setLong(6, releasedAtEpochMillis);
+                insert.executeUpdate();
+                release.setString(1, reservationId.toString());
+                if (release.executeUpdate() != 1) {
+                    throw new InactiveReservationException(reservationId, "CHANGED_CONCURRENTLY");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return reservationRelease(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to release Reservation " + reservationId, failure);
+        }
+    }
+
+    public synchronized StoredReservationRelease reservationRelease(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM reservation_release
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readReservationRelease(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Reservation release request", failure);
+        }
+    }
+
     public synchronized long activeReservedMinorUnits(String sourceAccount) {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT COALESCE(SUM(amount_minor_units), 0)
+                SELECT COALESCE(SUM(amount_minor_units - settled_minor_units), 0)
                 FROM fiscal_reservation
                 WHERE source_account = ? AND state = 'ACTIVE'
                 """)) {
@@ -400,8 +475,18 @@ public final class CivicDatabase implements AutoCloseable {
         if (reservation == null) {
             throw new IllegalArgumentException("Unknown Reservation " + reservationId);
         }
-        if (reservation.amountMinorUnits() != amountMinorUnits) {
-            throw new IllegalArgumentException("This settlement must consume the full Reservation");
+        long remainingMinorUnits = Math.subtractExact(
+                reservation.amountMinorUnits(), reservation.settledMinorUnits());
+        if (amountMinorUnits > remainingMinorUnits) {
+            throw new ReservationRemainderExceededException(
+                    reservationId, amountMinorUnits, remainingMinorUnits);
+        }
+        try {
+            if (hasIncompletePayment(reservationId)) {
+                throw new PendingReservationPaymentException(reservationId);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect pending Reservation payments", failure);
         }
         UUID transactionId = UUID.randomUUID();
         try (PreparedStatement insert = connection.prepareStatement("""
@@ -429,20 +514,47 @@ public final class CivicDatabase implements AutoCloseable {
     }
 
     public synchronized void commitPayment(UUID transactionId, UUID reservationId) {
+        StoredPaymentTransaction transaction = paymentTransaction(transactionId);
+        if (transaction == null) {
+            throw new IllegalArgumentException("Unknown payment transaction " + transactionId);
+        }
+        if ("CIVIC_COMMITTED".equals(transaction.state())) {
+            return;
+        }
+        if (!"EXTERNAL_APPLIED".equals(transaction.state())) {
+            throw new IllegalStateException(
+                    "Payment transaction is not ready for Civic commit: " + transaction.state());
+        }
         try {
             connection.setAutoCommit(false);
             try (PreparedStatement settle = connection.prepareStatement("""
-                        UPDATE fiscal_reservation SET state = 'SETTLED'
-                        WHERE reservation_id = ? AND state = 'ACTIVE'
+                        UPDATE fiscal_reservation
+                        SET settled_minor_units = settled_minor_units + ?,
+                            state = CASE
+                                WHEN settled_minor_units + ? = amount_minor_units THEN 'SETTLED'
+                                ELSE 'ACTIVE'
+                            END
+                        WHERE reservation_id = ?
+                          AND state = 'ACTIVE'
+                          AND amount_minor_units - settled_minor_units >= ?
                         """);
                     PreparedStatement commit = connection.prepareStatement("""
                         UPDATE payment_transaction SET state = 'CIVIC_COMMITTED'
                         WHERE transaction_id = ? AND state = 'EXTERNAL_APPLIED'
                         """)) {
-                settle.setString(1, reservationId.toString());
-                settle.executeUpdate();
+                settle.setLong(1, transaction.amountMinorUnits());
+                settle.setLong(2, transaction.amountMinorUnits());
+                settle.setString(3, reservationId.toString());
+                settle.setLong(4, transaction.amountMinorUnits());
+                if (settle.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Reservation remainder changed before payment commit " + reservationId);
+                }
                 commit.setString(1, transactionId.toString());
-                commit.executeUpdate();
+                if (commit.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Payment transaction state changed before Civic commit " + transactionId);
+                }
                 connection.commit();
             } catch (SQLException failure) {
                 connection.rollback();
@@ -633,6 +745,28 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 6");
             }
+            if (version < 7) {
+                statement.execute("""
+                        CREATE TABLE reservation_release (
+                            release_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reservation_id TEXT NOT NULL UNIQUE REFERENCES fiscal_reservation(reservation_id),
+                            reason TEXT NOT NULL,
+                            released_at_epoch_millis INTEGER NOT NULL CHECK (released_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 7");
+            }
+            if (version < 8) {
+                statement.execute("""
+                        ALTER TABLE fiscal_reservation
+                        ADD COLUMN settled_minor_units INTEGER NOT NULL DEFAULT 0
+                        CHECK (settled_minor_units >= 0 AND settled_minor_units <= amount_minor_units)
+                        """);
+                statement.execute("PRAGMA user_version = 8");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -644,7 +778,8 @@ public final class CivicDatabase implements AutoCloseable {
 
     private StoredReservation findReservation(String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT reservation_id, service_identity, request_id, source_account, amount_minor_units, purpose
+                SELECT reservation_id, service_identity, request_id, source_account,
+                       amount_minor_units, settled_minor_units, purpose, state
                 FROM fiscal_reservation
                 WHERE service_identity = ? AND request_id = ?
                 """)) {
@@ -660,16 +795,34 @@ public final class CivicDatabase implements AutoCloseable {
                         result.getString("request_id"),
                         result.getString("source_account"),
                         result.getLong("amount_minor_units"),
-                        result.getString("purpose"));
+                        result.getLong("settled_minor_units"),
+                        result.getString("purpose"),
+                        result.getString("state"));
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Reservation", failure);
         }
     }
 
+    private StoredReservationRelease readReservationRelease(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredReservationRelease(
+                    UUID.fromString(result.getString("release_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("reservation_id")),
+                    result.getString("reason"),
+                    result.getLong("released_at_epoch_millis"));
+        }
+    }
+
     private StoredReservation reservation(UUID reservationId) {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT reservation_id, service_identity, request_id, source_account, amount_minor_units, purpose
+                SELECT reservation_id, service_identity, request_id, source_account,
+                       amount_minor_units, settled_minor_units, purpose, state
                 FROM fiscal_reservation
                 WHERE reservation_id = ? AND state = 'ACTIVE'
                 """)) {
@@ -684,10 +837,36 @@ public final class CivicDatabase implements AutoCloseable {
                         result.getString("request_id"),
                         result.getString("source_account"),
                         result.getLong("amount_minor_units"),
-                        result.getString("purpose"));
+                        result.getLong("settled_minor_units"),
+                        result.getString("purpose"),
+                        result.getString("state"));
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Reservation", failure);
+        }
+    }
+
+    private boolean hasIncompletePayment(UUID reservationId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM payment_transaction
+                WHERE reservation_id = ? AND state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                LIMIT 1
+                """)) {
+            query.setString(1, reservationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+    private String reservationState(UUID reservationId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT state FROM fiscal_reservation WHERE reservation_id = ?
+                """)) {
+            query.setString(1, reservationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getString(1) : null;
+            }
         }
     }
 
@@ -700,6 +879,17 @@ public final class CivicDatabase implements AutoCloseable {
             return readPayment(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read payment", failure);
+        }
+    }
+
+    private StoredPaymentTransaction paymentTransaction(UUID transactionId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM payment_transaction WHERE transaction_id = ?
+                """)) {
+            query.setString(1, transactionId.toString());
+            return readPayment(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read payment transaction " + transactionId, failure);
         }
     }
 

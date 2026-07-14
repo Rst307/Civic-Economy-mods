@@ -1,17 +1,28 @@
 package org.civiceconomy.fiscal;
 
+import java.time.Clock;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.persistence.InactiveReservationException;
+import org.civiceconomy.persistence.PendingReservationPaymentException;
 import org.civiceconomy.persistence.StoredReservation;
+import org.civiceconomy.persistence.StoredReservationRelease;
 
 public final class FiscalLedger {
     private final CivicDatabase database;
     private final AccountBalances accountBalances;
+    private final Clock clock;
     private final ConcurrentHashMap<AccountId, Object> accountLocks = new ConcurrentHashMap<>();
 
     public FiscalLedger(CivicDatabase database, AccountBalances accountBalances) {
+        this(database, accountBalances, Clock.systemUTC());
+    }
+
+    FiscalLedger(CivicDatabase database, AccountBalances accountBalances, Clock clock) {
         this.database = database;
         this.accountBalances = accountBalances;
+        this.clock = clock;
     }
 
     public Reservation reserve(ReserveFunds request) {
@@ -43,6 +54,31 @@ public final class FiscalLedger {
         return MoneyAmount.ofMinorUnits(database.activeReservedMinorUnits(accountId.value()));
     }
 
+    public ReservationRelease release(ReleaseReservation request) {
+        StoredReservationRelease replay = database.reservationRelease(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.reservationId().equals(request.reservationId())
+                    || !replay.reason().equals(request.reason())) {
+                throw new IdempotencyConflictException(request.serviceIdentity(), request.requestId());
+            }
+            return toReservationRelease(replay);
+        }
+        try {
+            return toReservationRelease(database.releaseReservation(
+                    UUID.randomUUID(),
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.reservationId(),
+                    request.reason(),
+                    clock.millis()));
+        } catch (PendingReservationPaymentException blocked) {
+            throw new ReservationHasPendingPaymentException(blocked.reservationId());
+        } catch (InactiveReservationException inactive) {
+            throw new ReservationNotActiveException(inactive.reservationId(), inactive.state());
+        }
+    }
+
     public MoneyAmount availableBalance(AccountId accountId) {
         return accountBalances.balance(accountId).minus(reservedBalance(accountId));
     }
@@ -54,6 +90,18 @@ public final class FiscalLedger {
                 stored.requestId(),
                 new AccountId(stored.sourceAccount()),
                 MoneyAmount.ofMinorUnits(stored.amountMinorUnits()),
-                stored.purpose());
+                MoneyAmount.ofMinorUnits(stored.settledMinorUnits()),
+                stored.purpose(),
+                ReservationState.valueOf(stored.state()));
+    }
+
+    private static ReservationRelease toReservationRelease(StoredReservationRelease stored) {
+        return new ReservationRelease(
+                stored.releaseId(),
+                new ServiceIdentity(stored.serviceIdentity()),
+                stored.requestId(),
+                stored.reservationId(),
+                stored.reason(),
+                stored.releasedAtEpochMillis());
     }
 }

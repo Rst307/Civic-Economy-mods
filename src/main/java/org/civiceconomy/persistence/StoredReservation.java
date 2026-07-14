@@ -8,4 +8,6 @@ public record StoredReservation(
         String requestId,
         String sourceAccount,
         long amountMinorUnits,
-        String purpose) {}
+        long settledMinorUnits,
+        String purpose,
+        String state) {}

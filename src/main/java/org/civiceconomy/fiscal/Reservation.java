@@ -8,4 +8,10 @@ public record Reservation(
         String requestId,
         AccountId sourceAccount,
         MoneyAmount amount,
-        String purpose) {}
+        MoneyAmount settledAmount,
+        String purpose,
+        ReservationState state) {
+    public MoneyAmount remainingAmount() {
+        return amount.minus(settledAmount);
+    }
+}
