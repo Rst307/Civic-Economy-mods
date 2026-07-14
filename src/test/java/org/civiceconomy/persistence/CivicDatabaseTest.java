@@ -26,13 +26,13 @@ class CivicDatabaseTest {
 
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", database.journalMode());
-            assertEquals(10, database.schemaVersion());
+            assertEquals(11, database.schemaVersion());
             assertEquals(identity, database.identity());
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", reopened.journalMode());
-            assertEquals(10, reopened.schemaVersion());
+            assertEquals(11, reopened.schemaVersion());
             assertEquals(identity, reopened.identity());
         }
     }
@@ -68,6 +68,8 @@ class CivicDatabaseTest {
         try (CivicDatabase ignored = CivicDatabase.open(databaseFile, identity)) {}
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE escrow_expiry");
+            statement.execute("DROP TABLE fiscal_escrow");
             statement.execute("DROP TABLE payment_recovery_audit");
             statement.execute("DROP TABLE payment_compensation");
             statement.execute("DROP TABLE reservation_release");
@@ -87,7 +89,7 @@ class CivicDatabaseTest {
             UUID nationId = UUID.fromString("39ca55f7-740d-4521-a1de-f9e5f8302a4c");
             UUID teamId = UUID.fromString("3fa1dc7d-76d0-4e61-b10f-bf7d1ad99776");
 
-            assertEquals(10, migrated.schemaVersion());
+            assertEquals(11, migrated.schemaVersion());
             assertEquals(identity, migrated.identity());
             assertEquals(
                     nationId,

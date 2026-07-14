@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 10;
+    private static final int SCHEMA_VERSION = 11;
 
     private final Connection connection;
 
@@ -439,6 +439,174 @@ public final class CivicDatabase implements AutoCloseable {
         return findReservation(serviceIdentity, requestId);
     }
 
+    public synchronized StoredEscrow openEscrow(
+            UUID escrowId,
+            UUID reservationId,
+            String serviceIdentity,
+            String requestId,
+            String sourceAccount,
+            long amountMinorUnits,
+            String externalObjectId,
+            String purpose,
+            long expiresAtEpochMillis) {
+        StoredEscrow existing = escrow(serviceIdentity, requestId);
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertReservation = connection.prepareStatement("""
+                        INSERT INTO fiscal_reservation (
+                            reservation_id, service_identity, request_id, source_account,
+                            amount_minor_units, purpose, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                        """);
+                    PreparedStatement insertEscrow = connection.prepareStatement("""
+                        INSERT INTO fiscal_escrow (
+                            escrow_id, service_identity, request_id, reservation_id,
+                            external_object_id, purpose, expires_at_epoch_millis, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'RESERVED')
+                        """)) {
+                insertReservation.setString(1, reservationId.toString());
+                insertReservation.setString(2, serviceIdentity);
+                insertReservation.setString(3, requestId);
+                insertReservation.setString(4, sourceAccount);
+                insertReservation.setLong(5, amountMinorUnits);
+                insertReservation.setString(6, purpose);
+                insertReservation.executeUpdate();
+
+                insertEscrow.setString(1, escrowId.toString());
+                insertEscrow.setString(2, serviceIdentity);
+                insertEscrow.setString(3, requestId);
+                insertEscrow.setString(4, reservationId.toString());
+                insertEscrow.setString(5, externalObjectId);
+                insertEscrow.setString(6, purpose);
+                insertEscrow.setLong(7, expiresAtEpochMillis);
+                insertEscrow.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return escrow(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to open Escrow " + externalObjectId, failure);
+        }
+    }
+
+    public synchronized StoredEscrow escrow(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT e.*, r.source_account, r.amount_minor_units, r.settled_minor_units
+                FROM fiscal_escrow e
+                JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE e.service_identity = ? AND e.request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readEscrow(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Escrow request", failure);
+        }
+    }
+
+    public synchronized StoredEscrow escrow(UUID escrowId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT e.*, r.source_account, r.amount_minor_units, r.settled_minor_units
+                FROM fiscal_escrow e
+                JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE e.escrow_id = ?
+                """)) {
+            query.setString(1, escrowId.toString());
+            return readEscrow(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Escrow " + escrowId, failure);
+        }
+    }
+
+    public synchronized StoredEscrowExpiry escrowExpiry(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM escrow_expiry
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readEscrowExpiry(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Escrow expiry request", failure);
+        }
+    }
+
+    public synchronized StoredEscrow expireEscrow(
+            UUID expiryId,
+            String serviceIdentity,
+            String requestId,
+            UUID escrowId,
+            long expiredAtEpochMillis) {
+        StoredEscrowExpiry replay = escrowExpiry(serviceIdentity, requestId);
+        if (replay != null) {
+            return escrow(replay.escrowId());
+        }
+        StoredEscrow escrow = escrow(escrowId);
+        if (escrow == null) {
+            throw new IllegalArgumentException("Unknown Escrow " + escrowId);
+        }
+        if (expiredAtEpochMillis < escrow.expiresAtEpochMillis()) {
+            throw new IllegalStateException("Escrow has not reached its expiry " + escrowId);
+        }
+        if (!"RESERVED".equals(escrow.state()) && !"PARTIALLY_SETTLED".equals(escrow.state())) {
+            throw new IllegalStateException("Escrow is not active: " + escrow.state());
+        }
+
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertExpiry = connection.prepareStatement("""
+                        INSERT INTO escrow_expiry (
+                            expiry_id, service_identity, request_id, escrow_id,
+                            expired_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement releaseReservation = connection.prepareStatement("""
+                        UPDATE fiscal_reservation SET state = 'RELEASED'
+                        WHERE reservation_id = ? AND state = 'ACTIVE'
+                        """);
+                    PreparedStatement expire = connection.prepareStatement("""
+                        UPDATE fiscal_escrow SET state = 'EXPIRED'
+                        WHERE escrow_id = ? AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
+                        """)) {
+                if (hasIncompletePayment(escrow.reservationId())) {
+                    throw new PendingReservationPaymentException(escrow.reservationId());
+                }
+                insertExpiry.setString(1, expiryId.toString());
+                insertExpiry.setString(2, serviceIdentity);
+                insertExpiry.setString(3, requestId);
+                insertExpiry.setString(4, escrowId.toString());
+                insertExpiry.setLong(5, expiredAtEpochMillis);
+                insertExpiry.executeUpdate();
+
+                releaseReservation.setString(1, escrow.reservationId().toString());
+                if (releaseReservation.executeUpdate() != 1) {
+                    throw new InactiveReservationException(escrow.reservationId(), "CHANGED_CONCURRENTLY");
+                }
+
+                expire.setString(1, escrowId.toString());
+                if (expire.executeUpdate() != 1) {
+                    throw new IllegalStateException("Escrow state changed during expiry " + escrowId);
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return escrow(escrowId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to expire Escrow " + escrowId, failure);
+        }
+    }
+
     public synchronized StoredReservationRelease releaseReservation(
             UUID releaseId,
             String serviceIdentity,
@@ -461,6 +629,11 @@ public final class CivicDatabase implements AutoCloseable {
                     PreparedStatement release = connection.prepareStatement("""
                         UPDATE fiscal_reservation SET state = 'RELEASED'
                         WHERE reservation_id = ? AND state = 'ACTIVE'
+                        """);
+                    PreparedStatement releaseEscrow = connection.prepareStatement("""
+                        UPDATE fiscal_escrow SET state = 'RELEASED'
+                        WHERE reservation_id = ?
+                          AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
                         """)) {
                 String state = reservationState(reservationId);
                 if (!"ACTIVE".equals(state)) {
@@ -481,6 +654,8 @@ public final class CivicDatabase implements AutoCloseable {
                 if (release.executeUpdate() != 1) {
                     throw new InactiveReservationException(reservationId, "CHANGED_CONCURRENTLY");
                 }
+                releaseEscrow.setString(1, reservationId.toString());
+                releaseEscrow.executeUpdate();
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -701,6 +876,19 @@ public final class CivicDatabase implements AutoCloseable {
                     PreparedStatement commit = connection.prepareStatement("""
                         UPDATE payment_transaction SET state = 'CIVIC_COMMITTED'
                         WHERE transaction_id = ? AND state = 'EXTERNAL_APPLIED'
+                        """);
+                    PreparedStatement updateEscrow = connection.prepareStatement("""
+                        UPDATE fiscal_escrow
+                        SET state = CASE
+                            WHEN (SELECT settled_minor_units FROM fiscal_reservation
+                                  WHERE reservation_id = fiscal_escrow.reservation_id)
+                               = (SELECT amount_minor_units FROM fiscal_reservation
+                                  WHERE reservation_id = fiscal_escrow.reservation_id)
+                            THEN 'SETTLED'
+                            ELSE 'PARTIALLY_SETTLED'
+                        END
+                        WHERE reservation_id = ?
+                          AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
                         """)) {
                 settle.setLong(1, transaction.amountMinorUnits());
                 settle.setLong(2, transaction.amountMinorUnits());
@@ -715,6 +903,8 @@ public final class CivicDatabase implements AutoCloseable {
                     throw new IllegalStateException(
                             "Payment transaction state changed before Civic commit " + transactionId);
                 }
+                updateEscrow.setString(1, reservationId.toString());
+                updateEscrow.executeUpdate();
                 if (recovery) {
                     insertRecoveryAudit(
                             transactionId,
@@ -1234,6 +1424,39 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 10");
             }
+            if (version < 11) {
+                statement.execute("""
+                        CREATE TABLE fiscal_escrow (
+                            escrow_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reservation_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_reservation(reservation_id),
+                            external_object_id TEXT NOT NULL,
+                            purpose TEXT NOT NULL,
+                            expires_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expires_at_epoch_millis >= 0),
+                            state TEXT NOT NULL CHECK (state IN (
+                                'RESERVED', 'PARTIALLY_SETTLED', 'SETTLED',
+                                'RELEASED', 'EXPIRED', 'RECOVERING'
+                            )),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (service_identity, external_object_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE escrow_expiry (
+                            expiry_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            escrow_id TEXT NOT NULL UNIQUE REFERENCES fiscal_escrow(escrow_id),
+                            expired_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expired_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 11");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -1493,6 +1716,40 @@ public final class CivicDatabase implements AutoCloseable {
                 UUID.fromString(result.getString("player_id")),
                 result.getLong("started_at_epoch_millis"),
                 result.getLong("ended_at_epoch_millis"));
+    }
+
+    private static StoredEscrow readEscrow(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredEscrow(
+                    UUID.fromString(result.getString("escrow_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("reservation_id")),
+                    result.getString("source_account"),
+                    result.getLong("amount_minor_units"),
+                    result.getLong("settled_minor_units"),
+                    result.getString("external_object_id"),
+                    result.getString("purpose"),
+                    result.getLong("expires_at_epoch_millis"),
+                    result.getString("state"));
+        }
+    }
+
+    private static StoredEscrowExpiry readEscrowExpiry(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredEscrowExpiry(
+                    UUID.fromString(result.getString("expiry_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("escrow_id")),
+                    result.getLong("expired_at_epoch_millis"));
+        }
     }
 
     private static StoredPaymentTransaction readPayment(ResultSet result) throws SQLException {

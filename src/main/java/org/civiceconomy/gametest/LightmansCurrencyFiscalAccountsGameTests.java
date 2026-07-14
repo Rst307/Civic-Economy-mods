@@ -11,6 +11,7 @@ import io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -23,9 +24,12 @@ import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.CompensatePayment;
 import org.civiceconomy.fiscal.ExternalPayment;
+import org.civiceconomy.fiscal.Escrow;
+import org.civiceconomy.fiscal.EscrowState;
 import org.civiceconomy.fiscal.FailurePoint;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.MoneyAmount;
+import org.civiceconomy.fiscal.OpenEscrow;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PaymentKind;
 import org.civiceconomy.fiscal.PaymentTransaction;
@@ -131,12 +135,15 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                 new DatabaseIdentity(
                         UUID.randomUUID(), "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20"))) {
             FiscalLedger ledger = new FiscalLedger(database, accounts);
-            Reservation reservation = ledger.reserve(new ReserveFunds(
+            OpenEscrow escrowRequest = new OpenEscrow(
                     new ServiceIdentity("civiceconomy-gametest"),
-                    "treasury-hold-" + UUID.randomUUID(),
+                    "treasury-escrow-" + UUID.randomUUID(),
                     treasury,
                     MoneyAmount.ofMinorUnits(300),
-                    "Real LC treasury settlement GameTest"));
+                    "gametest:treasury-settlement",
+                    "Real LC treasury settlement GameTest",
+                    Instant.now().plusSeconds(3_600));
+            Escrow escrow = ledger.openEscrow(escrowRequest);
             String paymentRequestId = "treasury-payment-" + UUID.randomUUID();
             PaymentCoordinator coordinator = new PaymentCoordinator(database, payments);
             try {
@@ -144,7 +151,7 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                         new SettleReservation(
                                 new ServiceIdentity("civiceconomy-gametest"),
                                 paymentRequestId,
-                                reservation.reservationId(),
+                                escrow.reservationId(),
                                 recipientAccount,
                                 MoneyAmount.ofMinorUnits(300)),
                         FailurePoint.AFTER_EXTERNAL_BEFORE_RECORD);
@@ -164,6 +171,10 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     "recovered Civic payment state");
             helper.assertValueEqual(
                     MoneyAmount.ZERO, ledger.reservedBalance(treasury), "remaining National Treasury Reservation");
+            helper.assertValueEqual(
+                    EscrowState.SETTLED,
+                    ledger.openEscrow(escrowRequest).state(),
+                    "settled National Treasury Escrow state");
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
         }

@@ -6,6 +6,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.InactiveReservationException;
 import org.civiceconomy.persistence.PendingReservationPaymentException;
+import org.civiceconomy.persistence.StoredEscrow;
+import org.civiceconomy.persistence.StoredEscrowExpiry;
 import org.civiceconomy.persistence.StoredReservation;
 import org.civiceconomy.persistence.StoredReservationRelease;
 
@@ -52,6 +54,64 @@ public final class FiscalLedger {
 
     public MoneyAmount reservedBalance(AccountId accountId) {
         return MoneyAmount.ofMinorUnits(database.activeReservedMinorUnits(accountId.value()));
+    }
+
+    public Escrow openEscrow(OpenEscrow request) {
+        synchronized (accountLocks.computeIfAbsent(request.sourceAccount(), ignored -> new Object())) {
+            StoredEscrow existing = database.escrow(
+                    request.serviceIdentity().value(), request.requestId());
+            if (existing != null) {
+                if (!existing.sourceAccount().equals(request.sourceAccount().value())
+                        || existing.amountMinorUnits() != request.amount().minorUnits()
+                        || !existing.externalObjectId().equals(request.externalObjectId())
+                        || !existing.purpose().equals(request.purpose())
+                        || existing.expiresAtEpochMillis() != request.expiresAt().toEpochMilli()) {
+                    throw new IdempotencyConflictException(
+                            request.serviceIdentity(), request.requestId());
+                }
+                return toEscrow(existing);
+            }
+            if (!request.expiresAt().isAfter(clock.instant())) {
+                throw new IllegalArgumentException("Escrow expiry must be in the future");
+            }
+            MoneyAmount available = availableBalance(request.sourceAccount());
+            if (available.compareTo(request.amount()) < 0) {
+                throw new InsufficientAvailableBalanceException(
+                        request.sourceAccount(), request.amount(), available);
+            }
+            return toEscrow(database.openEscrow(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.sourceAccount().value(),
+                    request.amount().minorUnits(),
+                    request.externalObjectId(),
+                    request.purpose(),
+                    request.expiresAt().toEpochMilli()));
+        }
+    }
+
+    public Escrow expireEscrow(ExpireEscrow request) {
+        StoredEscrowExpiry replay = database.escrowExpiry(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.escrowId().equals(request.escrowId())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toEscrow(database.escrow(replay.escrowId()));
+        }
+        try {
+            return toEscrow(database.expireEscrow(
+                    UUID.randomUUID(),
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.escrowId(),
+                    clock.millis()));
+        } catch (PendingReservationPaymentException blocked) {
+            throw new ReservationHasPendingPaymentException(blocked.reservationId());
+        }
     }
 
     public ReservationRelease release(ReleaseReservation request) {
@@ -103,5 +163,20 @@ public final class FiscalLedger {
                 stored.reservationId(),
                 stored.reason(),
                 stored.releasedAtEpochMillis());
+    }
+
+    private static Escrow toEscrow(StoredEscrow stored) {
+        return new Escrow(
+                stored.escrowId(),
+                new ServiceIdentity(stored.serviceIdentity()),
+                stored.requestId(),
+                stored.reservationId(),
+                new AccountId(stored.sourceAccount()),
+                MoneyAmount.ofMinorUnits(stored.amountMinorUnits()),
+                MoneyAmount.ofMinorUnits(stored.settledMinorUnits()),
+                stored.externalObjectId(),
+                stored.purpose(),
+                java.time.Instant.ofEpochMilli(stored.expiresAtEpochMillis()),
+                EscrowState.valueOf(stored.state()));
     }
 }
