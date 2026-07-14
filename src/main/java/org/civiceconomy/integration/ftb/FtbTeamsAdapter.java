@@ -4,6 +4,7 @@ import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
 import dev.ftb.mods.ftbteams.api.Team;
 import dev.ftb.mods.ftbteams.api.TeamManager;
 import java.util.Optional;
+import java.util.List;
 import java.util.UUID;
 
 public final class FtbTeamsAdapter {
@@ -31,6 +32,20 @@ public final class FtbTeamsAdapter {
 
     public Optional<FtbTeamFacts> findPersonalTeamForPlayer(UUID playerId) {
         return manager.getPlayerTeamForPlayerID(playerId).filter(Team::isValid).map(FtbTeamsAdapter::facts);
+    }
+
+    public Optional<FtbTeamFacts> findOwnedNonPlayerTeam(UUID playerId) {
+        List<FtbTeamFacts> owned = manager.getTeams().stream()
+                .filter(Team::isValid)
+                .filter(team -> !team.isPlayerTeam())
+                .filter(team -> playerId.equals(team.getOwner()))
+                .map(FtbTeamsAdapter::facts)
+                .toList();
+        if (owned.size() > 1) {
+            throw new FtbIntegrationUnavailableException(
+                    "Player owns multiple non-player FTB Teams: " + playerId);
+        }
+        return owned.stream().findFirst();
     }
 
     private static FtbTeamFacts facts(Team team) {

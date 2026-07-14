@@ -26,6 +26,10 @@ public final class FtbNationTeamDirectory implements NationTeamDirectory {
         return teams.findEffectiveTeamForPlayer(playerId).map(FtbNationTeamDirectory::toNationTeam);
     }
 
+    public Optional<NationTeam> findOwnedTeamForPlayer(UUID playerId) {
+        return teams.findOwnedNonPlayerTeam(playerId).map(FtbNationTeamDirectory::toNationTeam);
+    }
+
     private static NationTeam toNationTeam(FtbTeamFacts facts) {
         return new NationTeam(facts.teamId(), facts.ownerId(), facts.members());
     }

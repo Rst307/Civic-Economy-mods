@@ -146,13 +146,16 @@ public final class CivicServerRuntime {
 
     <T> CompletableFuture<T> submitAdministration(
             Function<FiscalAuthorization, T> operation) {
+        return submitDatabase(database -> operation.apply(new FiscalAuthorization(database)));
+    }
+
+    <T> CompletableFuture<T> submitDatabase(Function<CivicDatabase, T> operation) {
         RuntimeState current = state;
         if (current == null) {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("Civic server runtime is not active"));
         }
-        return current.writer.submitDatabase(
-                database -> operation.apply(new FiscalAuthorization(database)));
+        return current.writer.submitDatabase(operation);
     }
 
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {

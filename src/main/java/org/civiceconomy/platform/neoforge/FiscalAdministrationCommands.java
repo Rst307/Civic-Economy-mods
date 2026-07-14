@@ -40,7 +40,9 @@ public final class FiscalAdministrationCommands {
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service);
         event.getDispatcher().register(Commands.literal("civic")
-                .then(Commands.literal("economy").then(admin)));
+                .then(Commands.literal("economy")
+                        .then(NationApplicationCommands.command())
+                        .then(admin)));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>

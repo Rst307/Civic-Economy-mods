@@ -1,6 +1,9 @@
 package org.civiceconomy.platform.neoforge;
 
 import com.mojang.authlib.GameProfile;
+import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
+import dev.ftb.mods.ftbteams.api.Team;
+import dev.ftb.mods.ftbteams.data.TeamManagerImpl;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
@@ -88,6 +91,33 @@ public final class CivicServerRuntimeGameTests {
                 requestId));
     }
 
+    @GameTest(template = "empty", timeoutTicks = 200)
+    public static void ftbTeamHeadCanCreateNationApplicationOffThread(GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-founding-test"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        UUID teamId = team.getId();
+        helper.assertValueEqual(player.getUUID(), team.getOwner(), "FTB founding team head");
+        helper.assertValueEqual(teamId, team.getId(), "FTB founding team ID");
+        helper.getLevel().getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy nation apply");
+        helper.getLevel().getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy nation apply");
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+
+        helper.succeedWhen(() -> assertNationApplicationCreated(
+                helper, databaseFile, teamId, player.getUUID()));
+    }
+
     private static void assertPersistedInterval(GameTestHelper helper, Path databaseFile, ServerPlayer player) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var query = connection.prepareStatement("""
@@ -134,6 +164,52 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect fiscal service command result", failure);
+        }
+    }
+
+    private static void assertNationApplicationCreated(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID ftbTeamId,
+            UUID applicantPlayerId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT applicant_player_id, state,
+                               expires_at_epoch_millis - created_at_epoch_millis
+                        FROM nation_application
+                        WHERE ftb_team_id = ?
+                        ORDER BY created_at_epoch_millis DESC
+                        """)) {
+            query.setString(1, ftbTeamId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Nation Application row");
+                helper.assertValueEqual(
+                        applicantPlayerId.toString(), result.getString(1), "application team head");
+                helper.assertValueEqual("PENDING", result.getString(2), "application state");
+                helper.assertValueEqual(
+                        java.time.Duration.ofDays(7).toMillis(),
+                        result.getLong(3),
+                        "application lifetime");
+                helper.assertFalse(result.next(), "duplicate pending Nation Application");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Nation Application command result", failure);
+        }
+    }
+
+    private static Team createHeadOwnedFtbTeamFixture(ServerPlayer player) {
+        try {
+            var method = TeamManagerImpl.class.getDeclaredMethod(
+                    "createPartyTeamInternal", UUID.class, ServerPlayer.class, String.class);
+            method.setAccessible(true);
+            return (Team) method.invoke(
+                    FTBTeamsAPI.api().getManager(),
+                    player.getUUID(),
+                    null,
+                    "Civic Founding " + UUID.randomUUID());
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(
+                    "Unable to create exact-version FTB founding GameTest fixture", failure);
         }
     }
 }

@@ -114,10 +114,12 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added a durable Nation activation state machine. Formal activation requires the configured Effective Candidate count; only a server-composed `DEBUG WORLD` policy can reduce that requirement to one, and the request contains no caller-controlled debug flag.
 - Activation persists `PREPARED`, idempotently provisions the real LC National Treasury, records `TREASURY_PROVISIONED`, then atomically commits the permanent NationId, all Candidate Member Citizenship periods, Capital, application `ACTIVATED` state, transition audit, and activation completion.
 - A crash after external Treasury creation but before Civic records it replays the same deterministic account identity. Until Civic commit, the application remains PENDING and no Nation or Citizenship is visible.
+- Added `/civic economy nation apply` for ordinary players. The server derives the applicant UUID and the single owned non-player FTB Team from the live FTB manager, snapshots immutable team facts on the server thread, and queues all SQLite work on `Civic-Economy-SQLite`.
+- Repeating the apply command while the same team already has a PENDING application returns that application instead of creating a second row. Players cannot submit a team UUID or owner string through the command.
 
 ## In progress
 
-- Wire Nation Application creation, cancellation, expiry, and activation into server-authoritative asynchronous gameplay commands, including the persistent `DEBUG WORLD` marker and real FTB Team/Capital checks.
+- Add server-authoritative cancellation, status, and activation commands, then wire expiry scheduling, real Capital claim checks, and the persistent `DEBUG WORLD` marker.
 
 ## Not yet completed
 
@@ -163,7 +165,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the authorization-lifecycle/schema-v18 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs.
 - After the owner-bound-session/trusted-administration/schema-v19 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 105 tests with zero failures.
 - After the Nation Application/activation/schema-v20 slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 113 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,638,413 bytes, SHA-256 `C216F9043AA7FF92FB7601CF2969D67A1672B68ECF2B9B55DECFBED424030E2C`. This is not yet a release artifact.
+- After the player Nation Application command slice, `gradlew.bat clean build --no-daemon --console=plain` again passed all 113 JUnit/SQLite tests.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,645,479 bytes, SHA-256 `5906C65CD578A349D7EF14336BB42467CEF2EA78546542C724123C69ADE66EFC`. This is not yet a release artifact.
 
 ### SQLite integration
 
@@ -203,6 +206,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - `gradlew.bat runGameTestServer --no-daemon --console=plain` passed all 11 required GameTests against the real pinned LC/FTB runtime after the service-authorization/schema-v16 slice.
 - After the owner-bound-session/trusted-administration/schema-v19 slice, the same command passed all 13 required GameTests. The added tests inspect the real server dispatcher and execute a real console registration command, then verify its owner, derived administrator identity, request ID, and reason in the world-bound SQLite database.
 - After the Nation Application/activation/schema-v20 slice, the same command passed all 14 required GameTests. The added test runs the activation coordinator against real SQLite and the real LC `SavedData` National Treasury adapter, then reads the new Treasury's exact zero balance through the production LC account interface. Its FTB Team input is an in-memory boundary fixture, not a real FTB founding flow.
+- After the player Nation Application command slice, the same command passed all 15 required GameTests. The added test creates an exact-version real FTB head-owned Party Team fixture, executes the real player command twice, and observes exactly one seven-day PENDING application in the world-bound SQLite database. Reflection is confined to constructing the headless FTB fixture; production lookup uses only public FTB APIs.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
 - It verified source `1000 → 700`, recipient `25 → 325`, replay with the same transaction UUID caused no second movement, and the marker survived LC NBT save/reload.
 - The fiscal-account access test created both a National Treasury and Organization Fiscal Account through the registered LC account source, resolved both references, and verified native player access, salary targeting, salary permission, and persistence were denied.
@@ -276,7 +280,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Temporary provider citizens are still current FTB Team members, while formal Citizenship now lives in the persistent registry. The provider and FTB membership events are not yet reconciled to that registry, and neither raw membership nor Citizenship alone is an Effective Citizen without rolling online-time evidence.
 - Online sessions checkpoint every minute, so an ungraceful process death can conservatively lose at most the unflushed tail of each active session. It cannot credit offline time. The interval is currently an implementation constant and still needs configuration/documentation.
 - Graceful `ServerStoppedEvent` waits up to ten seconds for queued SQLite writes and close. This is bounded shutdown lifecycle work, not regular tick work, but timeout behavior still needs a controlled fault GameTest.
-- `NationRegistry.register` remains a low-level legacy registration primitive used by earlier adapter tests. New founding must route through Nation Application activation; gameplay commands and runtime composition are not wired yet.
+- `NationRegistry.register` remains a low-level legacy registration primitive used by earlier adapter tests. New player founding starts through Nation Application, but cancellation/status/activation commands and full runtime composition are not wired yet.
 - Nation writes are serialized through the single authoritative `CivicDatabase` instance and protected by SQLite unique constraints. If multiple database instances were incorrectly used as concurrent writers, a constraint race could surface as a generic persistence failure rather than the corresponding domain conflict; the server composition must keep one instance, and explicit race mapping remains future hardening.
 - Nation Application unit tests use an in-memory adapter at the FTB Team seam, and the new GameTest proves real LC Treasury provisioning but not a real player/FTB founding command. Full real FTB head authorization and Capital claim validation remain to be wired.
 - The DEBUG WORLD minimum-candidate bypass is available only as a trusted coordinator policy and is absent from the request payload, but the persistent world marker, integrated-server enable command, dedicated-server startup permit, and visible warning surfaces are not implemented yet.
@@ -302,4 +306,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Add server-authoritative asynchronous Nation Application commands and lifecycle scheduling, backed by the real FTB Team adapter, Capital claim validation, and the persistent DEBUG WORLD authority marker; then exercise a real command-driven founding path in GameTest.
+Add server-authoritative Nation Application status/cancellation and activation commands, validate the proposed Capital against the real FTB Chunks claim, and exercise the command-driven activation path before adding scheduled expiry and persistent DEBUG WORLD authority.
