@@ -57,7 +57,7 @@ class CivicDatabaseBackupTest {
 
         try (CivicDatabase backup = CivicDatabase.open(backupFile, identity)) {
             assertEquals(identity, backup.identity());
-            assertEquals(25, backup.schemaVersion());
+            assertEquals(26, backup.schemaVersion());
             assertEquals(
                     MoneyAmount.ofMinorUnits(300),
                     ledger(backup, new ServiceIdentity("backup-test"))
@@ -87,7 +87,7 @@ class CivicDatabaseBackupTest {
 
         try (CivicDatabase restored = CivicDatabase.open(restoredFile, identity)) {
             assertEquals(identity, restored.identity());
-            assertEquals(25, restored.schemaVersion());
+            assertEquals(26, restored.schemaVersion());
             assertEquals(
                     MoneyAmount.ofMinorUnits(450),
                     ledger(restored, new ServiceIdentity("restore-test"))
@@ -124,7 +124,7 @@ class CivicDatabaseBackupTest {
         }
         try (Connection backup = DriverManager.getConnection("jdbc:sqlite:" + backupFile);
                 Statement statement = backup.createStatement()) {
-            statement.execute("PRAGMA user_version = 26");
+            statement.execute("PRAGMA user_version = 27");
         }
 
         assertThrows(

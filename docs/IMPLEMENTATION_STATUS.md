@@ -60,7 +60,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added idempotent full and partial refunds for committed payments. Refunds reverse source/recipient accounts through the same external transaction UUID marker and reject amounts above the remaining refundable value.
 - Refund recovery covers both ambiguous external application and recorded `EXTERNAL_APPLIED` restart windows; replay does not repeat the economic effect.
 - Added online SQLite backups through Xerial's native backup API, so an open WAL database can produce a consistent point-in-time snapshot without copying live database files directly.
-- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (currently v25) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
+- Added validated restore to a new database path. Restore fails closed before publication unless the backup has the exact current schema (currently v26) and exactly matches the expected world UUID plus Civic, LC, FTB Teams, and FTB Chunks versions.
 - Restore refuses to overwrite an existing destination and publishes through a temporary sibling file, using an atomic move when the filesystem supports it.
 - Raised the SQLite schema to v10 with durable payment-compensation requests and immutable recovery-audit records.
 - Added controlled compensation for a `EXTERNAL_APPLIED` payment or refund that must not complete normally. The transaction enters `COMPENSATING` before the reverse transfer and reaches `COMPENSATED` only after the reverse is confirmed.
@@ -140,14 +140,16 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added `/civic economy nation territory allowance`. It derives the caller's formal Nation server-side, evaluates Citizenship/Correction Grace/online-time population and the policy version at one fixed instant on `Civic-Economy-SQLite`, and reports an explainable formula without reading FTB Team member counts.
 - Added a pure Territory Expansion pricing module. It quotes only requested chunks beyond the current Territory Free Allocation, uses configurable first-overage and additional marginal costs to produce convex total pricing, and uses checked LC-minor-unit arithmetic so count or amount overflow fails closed.
 - Raised the SQLite schema to v25 with append-only Territory Expansion pricing versions and added OP/console-only `/civic economy admin territory pricing show|schedule`. Pricing changes are audited, request-idempotent, future-effective, and conservatively default to zero until configured.
+- Added ADR 0007 and schema v26 Territory Claim Permits to bridge off-thread fiscal prepayment with synchronous FTB claim decisions. A READY Permit is single-use and bound to one Nation, FTB Team, actor, dimension, and chunk; issue and consume requests are idempotent and persist immutable consumption provenance.
+- Added exact committed-prepayment verification. A charged Permit requires one committed, unrefunded payment from the exact National Treasury to the configured territory clearing account for the exact quoted amount; one payment can back only one Permit, and the normal refund path rejects Permit-linked payments.
 
 ## In progress
 
-- Build the durable Territory Expansion prepayment/claim-permit state machine before wiring FTB Chunks events.
+- Add the authorized fiscal coordinator that creates the clearing payment, plus permit expiry/cancellation compensation and the in-memory READY mirror consumed by FTB Chunks events.
 
 ## Not yet completed
 
-- SQLite migrations beyond schema v25, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
+- SQLite migrations beyond schema v26, scheduled/shutdown backup creation, backup rotation, live database replacement and administrator restore workflow.
 - Delegated/custom fiscal-role policy, capital rebinding, liquidation, and Nation lifecycle restrictions.
 - Withdrawals, configurable multi-person approval policy, and broader audit.
 - Cumulative Net Issuance, Issuance Hard Cap, National Issuance Quota, Registered Mint, material custody, and destruction/correction flows.
@@ -200,12 +202,13 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the Nation-facing Territory Free Allocation command, `gradlew.bat clean build --no-daemon --console=plain` again passed all 129 tests from fresh outputs.
 - After the pure Territory Expansion pricing slice, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 130 tests with zero failures. This is domain/build evidence only; no FTB claim or LC transfer occurs yet.
 - After persistent Territory Expansion pricing/schema-v25 and its OP command, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 131 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,757,949 bytes, SHA-256 `2DEFC229E9F202407FC8E4017FB9B074880FDF547DB91D14636B54487B73E063`. It remains a development artifact until all v1 completion gates pass.
+- After Territory Claim Permit/schema-v26, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full suite executed 135 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,775,816 bytes, SHA-256 `2DDE4C34288A177B5D731A8B4D94D0D0C2465B771FEE974FE494A57F3139EE10`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
 - `gradlew.bat test --tests org.civiceconomy.persistence.CivicDatabaseTest` passed against temporary on-disk SQLite files using the real Xerial driver.
-- Verified WAL mode, schema v25, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, Citizenship Correction Grace, Nation Fiscal Permission grant/revocation, Territory Free Allocation and Territory Expansion pricing policy versions, online-time, Nation Application/evidence/activation, release, partial-settlement, refund, compensation, recovery-audit, Escrow, Budget, Fiscal Bill, general-ledger, audited Service Identity registration, capability-grant, revocation, and service-state storage, foreign-world rejection, and unknown-schema rejection.
+- Verified WAL mode, schema v26, persisted identity across close/reopen, migration from a genuine schema-v3 fixture through current Nation, Citizenship, Citizenship Correction Grace, Nation Fiscal Permission grant/revocation, Territory Free Allocation and Territory Expansion pricing policy versions, Territory Claim Permit issue/consumption, online-time, Nation Application/evidence/activation, release, partial-settlement, refund, compensation, recovery-audit, Escrow, Budget, Fiscal Bill, general-ledger, audited Service Identity registration, capability-grant, revocation, and service-state storage, foreign-world rejection, and unknown-schema rejection.
 - `CivicDatabaseBackupTest` uses real temporary on-disk SQLite databases and the real Xerial native backup implementation. It verifies a live `300`-unit Reservation snapshot remains unchanged after the source advances to `500`, and that a restored database is usable through the public persistence and fiscal interfaces.
 - The same integration test verifies that a foreign world/dependency identity and an unsupported schema version are rejected before a restore destination is published.
 - `gradlew.bat test --tests org.civiceconomy.fiscal.PaymentRecoveryTest --tests org.civiceconomy.persistence.CivicDatabaseTest --tests org.civiceconomy.persistence.CivicDatabaseBackupTest --no-daemon --console=plain` passed on 2026-07-14.
@@ -250,6 +253,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the Territory Free Allocation policy command slice, the default GameTest run passed all 21 required tests. The added test executes the real OP/console schedule command and verifies the server-derived administrator identity, request ID, parameters, future effective time, and reason in the world-bound schema-v24 SQLite database.
 - After adding the Nation-facing allowance command, the same 21/21 GameTest suite passed; its exact dispatcher assertion now includes `nation territory allowance` while the policy schedule test continues to exercise real SQLite persistence.
 - After persistent Territory Expansion pricing/schema-v25, the same 21/21 GameTest suite passed. The OP/console policy test now schedules and verifies both free-allocation and convex-pricing versions in the real world-bound SQLite database.
+- After Territory Claim Permit/schema-v26, the existing 21/21 real-runtime GameTest suite passed and migrated its world-bound database. Permit behavior itself is currently covered by real SQLite tests with a fiscal-verifier seam, not by an FTB claim event.
 - `CitizenshipReconciliationTest` uses real temporary SQLite databases to verify immediate Provider suspension, restoration of the same Citizenship, deadline-effective Citizenship leave, no automatic Citizenship for new FTB members, and restart recovery after the Citizenship leave committed but before the Correction Grace resolved.
 - `EffectiveCitizenCalculatorTest` verifies online time during Correction Grace is excluded immediately while eligible time before the grace remains attributed.
 - The GameTest used real `BankDataCache` player accounts, `BankAPI.BankWithdrawFromServer`, `BankAPI.BankDepositFromServer`, `CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, ...)`, and the applied Mixin.
@@ -319,6 +323,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the Nation Fiscal Permission/schema-v23 slice, the no-Create server loaded the real LC/FTB stack, migrated the world-bound database, disabled Create production scoring, and reached `Done (11.841s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (9.568s)!`; both task-owned process trees were stopped after startup confirmation.
 - After Territory Free Allocation policy/schema-v24, the no-Create server migrated/opened the world-bound SQLite database, disabled Create production scoring, and reached `Done (11.329s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (10.329s)!`; both task-owned process trees were stopped after startup confirmation.
 - After Territory Expansion pricing/schema-v25, the no-Create server migrated/opened the world-bound database, disabled Create production scoring, and reached `Done (4.082s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (3.735s)!`; both task-owned process trees were stopped after startup confirmation.
+- After Territory Claim Permit/schema-v26, the no-Create server migrated/opened the world-bound database, disabled Create production scoring, and reached `Done (3.624s)!`. The Create `6.0.6` server enabled production scoring and reached `Done (3.373s)!`; both task-owned process trees were stopped after startup confirmation.
 
 ### Environment note
 
@@ -355,6 +360,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Grants support immutable revocation and services support disable/re-enable; grants still have no automatic expiry. Production sessions now verify `ownerModId` against the actual calling NeoForge Mod container. The resolver relies on exact loaded scan data and direct caller stack provenance; unknown, generated-only, or multiply-owned caller classes fail closed.
 - Nation Fiscal Permissions are persistently grantable/revocable and immediately fail closed when formal Provider authority is unavailable. The current governance command intentionally reserves grant/revoke to the live Nation head; delegated `MANAGE_FISCAL_ROLES`, configurable role bundles, approval-policy thresholds, and human-facing fiscal operations still need wiring.
 - Territory Free Allocation and Territory Expansion pricing versions are persistent and delayed, but both conservative fallbacks are zero until an OP schedules versions. Nation-facing allowance display is wired; FTB claim-event charging is not, so the policies currently move no funds and grant no claim bypass.
+- Territory Claim Permits persist and consume exactly once, but no gameplay coordinator yet creates the real LC clearing payment or publishes READY permits into a server-thread mirror. Permit expiry/cancellation compensation and free-claim authorization are also not yet implemented. The committed-prepayment verifier test uses real SQLite transaction states but does not claim real LC movement.
 - Current ledger entry kinds cover only committed `PAYMENT` and `REFUND` transfers. Issuance, destruction, withdrawal, public-fund allocation, and administrator/debug adjustments require explicit future entry kinds rather than being forced into payment semantics.
 - Online backup is currently a synchronous persistence operation with no server lifecycle scheduler. Future periodic and shutdown callers must run it outside regular Minecraft ticks, rotate snapshots, and surface failures without replacing the live database in place.
 - Runtime-generated `run/` data is local evidence and must never be committed.
@@ -362,4 +368,4 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Create a durable Territory Expansion prepayment permit that can be consumed by FTB Chunks `BEFORE_CLAIM` without blocking the server thread or treating FTB membership counts as population.
+Create the authorized fiscal coordinator and clearing account for Territory Claim prepayment, then add expiry/cancellation compensation and an in-memory READY Permit mirror for FTB Chunks `BEFORE_CLAIM` without blocking the server thread.

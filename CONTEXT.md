@@ -136,6 +136,10 @@ _Avoid_: 转入国库、封存、未知现金丢失
 国家在一个维护周期内无需支付维护费的区块数量，由服务器基础额度与 Effective Citizen 数共同形成；它不是货币、退款或永久领土权。
 _Avoid_: 免费领土所有权、维护退款、FTB 成员额度
 
+**领土占领许可（Territory Claim Permit）**:
+针对一个 Nation、操作者和目标区块的单次占领授权，证明所需财政预付已经确认；它可被占领事件消费，但本身不是 FTB 所有权、余额或 Reservation。
+_Avoid_: 预付余额、永久占领权、通用领土权限
+
 **有效领土（Effective Territory）**:
 由 FTB Chunks 归属某国且当前满足 Civic 财政维护条件的区块。
 _Avoid_: 所有已占领区块、国界声明

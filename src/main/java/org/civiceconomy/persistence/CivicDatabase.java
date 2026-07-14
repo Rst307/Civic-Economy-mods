@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 25;
+    private static final int SCHEMA_VERSION = 26;
 
     private final Connection connection;
 
@@ -1599,6 +1599,186 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredTerritoryClaimPermit territoryClaimPermit(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryClaimPermit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Territory Claim Permit", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermit territoryClaimPermit(UUID permitId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit WHERE permit_id = ?
+                """)) {
+            query.setString(1, permitId.toString());
+            return readTerritoryClaimPermit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Territory Claim Permit", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermit territoryClaimPermitByTarget(
+            UUID nationId, String dimensionId, int chunkX, int chunkZ) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit
+                WHERE nation_id = ? AND dimension_id = ? AND chunk_x = ? AND chunk_z = ?
+                ORDER BY issued_at_epoch_millis DESC, permit_id DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setString(2, dimensionId);
+            query.setInt(3, chunkX);
+            query.setInt(4, chunkZ);
+            return readTerritoryClaimPermit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Territory Claim Permit target", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermit territoryClaimPermitByPrepaymentTransaction(
+            UUID transactionId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit
+                WHERE prepayment_transaction_id = ?
+                """)) {
+            query.setString(1, transactionId.toString());
+            return readTerritoryClaimPermit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Claim Permit prepayment", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermitConsumption territoryClaimPermitConsumption(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_claim_permit_consumption
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryClaimPermitConsumption(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Territory Claim Permit consumption", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermit consumeTerritoryClaimPermit(
+            UUID permitId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID ftbTeamId,
+            UUID actorPlayerId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ,
+            long consumedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement consume = connection.prepareStatement("""
+                    INSERT INTO territory_claim_permit_consumption (
+                        permit_id, service_identity, request_id, nation_id, ftb_team_id,
+                        actor_player_id, dimension_id, chunk_x, chunk_z, consumed_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement update = connection.prepareStatement("""
+                    UPDATE territory_claim_permit SET state = 'CONSUMED'
+                    WHERE permit_id = ? AND state = 'READY'
+                    """)) {
+                consume.setString(1, permitId.toString());
+                consume.setString(2, serviceIdentity);
+                consume.setString(3, requestId);
+                consume.setString(4, nationId.toString());
+                consume.setString(5, ftbTeamId.toString());
+                consume.setString(6, actorPlayerId.toString());
+                consume.setString(7, dimensionId);
+                consume.setInt(8, chunkX);
+                consume.setInt(9, chunkZ);
+                consume.setLong(10, consumedAtEpochMillis);
+                consume.executeUpdate();
+                update.setString(1, permitId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Territory Claim Permit was not READY " + permitId);
+                }
+            }
+            connection.commit();
+            return territoryClaimPermit(permitId);
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure instanceof RuntimeException runtime
+                    ? runtime
+                    : new IllegalStateException("Unable to consume Territory Claim Permit", failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Civic database auto-commit", failure);
+            }
+        }
+    }
+
+    public synchronized StoredTerritoryClaimPermit issueTerritoryClaimPermit(
+            UUID permitId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID ftbTeamId,
+            UUID actorPlayerId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ,
+            int quotedCurrentClaimedChunks,
+            int quotedFreeAllocation,
+            long prepaymentMinorUnits,
+            UUID prepaymentTransactionId,
+            String state,
+            long issuedAtEpochMillis,
+            long expiresAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_claim_permit (
+                    permit_id, service_identity, request_id, nation_id, ftb_team_id,
+                    actor_player_id, dimension_id, chunk_x, chunk_z,
+                    quoted_current_claimed_chunks, quoted_free_allocation,
+                    prepayment_minor_units, prepayment_transaction_id, state,
+                    issued_at_epoch_millis, expires_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, permitId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, nationId.toString());
+            insert.setString(5, ftbTeamId.toString());
+            insert.setString(6, actorPlayerId.toString());
+            insert.setString(7, dimensionId);
+            insert.setInt(8, chunkX);
+            insert.setInt(9, chunkZ);
+            insert.setInt(10, quotedCurrentClaimedChunks);
+            insert.setInt(11, quotedFreeAllocation);
+            insert.setLong(12, prepaymentMinorUnits);
+            insert.setString(13, prepaymentTransactionId.toString());
+            insert.setString(14, state);
+            insert.setLong(15, issuedAtEpochMillis);
+            insert.setLong(16, expiresAtEpochMillis);
+            insert.executeUpdate();
+            return territoryClaimPermit(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to issue Territory Claim Permit", failure);
+        }
+    }
+
     public synchronized StoredTerritoryExpansionPricingPolicy currentTerritoryExpansionPricingPolicy(
             long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -2662,6 +2842,11 @@ public final class CivicDatabase implements AutoCloseable {
                 || !"CIVIC_COMMITTED".equals(original.state())) {
             throw new IllegalArgumentException(
                     "Refund parent must be a committed payment " + originalTransactionId);
+        }
+        if (territoryClaimPermitByPrepaymentTransaction(originalTransactionId) != null) {
+            throw new IllegalStateException(
+                    "Territory Claim Permit prepayment cannot use the normal refund path "
+                            + originalTransactionId);
         }
         long refundableMinorUnits = Math.subtractExact(
                 original.amountMinorUnits(), original.refundedMinorUnits());
@@ -3927,6 +4112,67 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 25");
             }
+            if (version < 26) {
+                statement.execute("""
+                        CREATE TABLE territory_claim_permit (
+                            permit_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ftb_team_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            quoted_current_claimed_chunks INTEGER NOT NULL
+                                CHECK (quoted_current_claimed_chunks >= 0),
+                            quoted_free_allocation INTEGER NOT NULL
+                                CHECK (quoted_free_allocation >= 0),
+                            prepayment_minor_units INTEGER NOT NULL
+                                CHECK (prepayment_minor_units > 0),
+                            prepayment_transaction_id TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN (
+                                'READY', 'CONSUMED', 'CANCELLED', 'EXPIRED'
+                            )),
+                            issued_at_epoch_millis INTEGER NOT NULL
+                                CHECK (issued_at_epoch_millis >= 0),
+                            expires_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expires_at_epoch_millis > issued_at_epoch_millis),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (prepayment_transaction_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX territory_claim_permit_one_ready_target
+                        ON territory_claim_permit (nation_id, dimension_id, chunk_x, chunk_z)
+                        WHERE state = 'READY'
+                        """);
+                statement.execute("""
+                        CREATE INDEX territory_claim_permit_ready_expiry
+                        ON territory_claim_permit (expires_at_epoch_millis)
+                        WHERE state = 'READY'
+                        """);
+                statement.execute("""
+                        CREATE TABLE territory_claim_permit_consumption (
+                            permit_id TEXT PRIMARY KEY
+                                REFERENCES territory_claim_permit(permit_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ftb_team_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            consumed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (consumed_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 26");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -4008,6 +4254,52 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredTerritoryClaimPermit readTerritoryClaimPermit(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredTerritoryClaimPermit(
+                    UUID.fromString(result.getString("permit_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("dimension_id"),
+                    result.getInt("chunk_x"),
+                    result.getInt("chunk_z"),
+                    result.getInt("quoted_current_claimed_chunks"),
+                    result.getInt("quoted_free_allocation"),
+                    result.getLong("prepayment_minor_units"),
+                    UUID.fromString(result.getString("prepayment_transaction_id")),
+                    result.getString("state"),
+                    result.getLong("issued_at_epoch_millis"),
+                    result.getLong("expires_at_epoch_millis"));
+        }
+    }
+
+    private StoredTerritoryClaimPermitConsumption readTerritoryClaimPermitConsumption(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredTerritoryClaimPermitConsumption(
+                    UUID.fromString(result.getString("permit_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("dimension_id"),
+                    result.getInt("chunk_x"),
+                    result.getInt("chunk_z"),
+                    result.getLong("consumed_at_epoch_millis"));
         }
     }
 
