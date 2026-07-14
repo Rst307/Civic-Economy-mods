@@ -10,6 +10,7 @@ import org.civiceconomy.persistence.StoredBudget;
 import org.civiceconomy.persistence.StoredEscrow;
 import org.civiceconomy.persistence.StoredEscrowExpiry;
 import org.civiceconomy.persistence.StoredFiscalBill;
+import org.civiceconomy.persistence.StoredLedgerEntry;
 import org.civiceconomy.persistence.StoredReservation;
 import org.civiceconomy.persistence.StoredReservationRelease;
 
@@ -56,6 +57,12 @@ public final class FiscalLedger {
 
     public MoneyAmount reservedBalance(AccountId accountId) {
         return MoneyAmount.ofMinorUnits(database.activeReservedMinorUnits(accountId.value()));
+    }
+
+    public java.util.List<LedgerEntry> ledgerEntries(AccountId accountId) {
+        return database.ledgerEntries(accountId.value()).stream()
+                .map(FiscalLedger::toLedgerEntry)
+                .toList();
     }
 
     public FiscalBill issueBill(IssueFiscalBill request) {
@@ -370,5 +377,17 @@ public final class FiscalLedger {
                 java.util.Optional.ofNullable(stored.escrowId()),
                 MoneyAmount.ofMinorUnits(stored.settledMinorUnits()),
                 FiscalBillState.valueOf(stored.state()));
+    }
+
+    private static LedgerEntry toLedgerEntry(StoredLedgerEntry stored) {
+        return new LedgerEntry(
+                stored.entryId(),
+                stored.transactionId(),
+                new AccountId(stored.account()),
+                new AccountId(stored.counterpartyAccount()),
+                MoneyAmount.ofMinorUnits(stored.amountMinorUnits()),
+                LedgerDirection.valueOf(stored.direction()),
+                PaymentKind.valueOf(stored.transactionKind()),
+                java.time.Instant.ofEpochMilli(stored.recordedAtEpochMillis()));
     }
 }

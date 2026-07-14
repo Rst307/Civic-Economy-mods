@@ -18,7 +18,7 @@ import java.util.UUID;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 13;
+    private static final int SCHEMA_VERSION = 14;
 
     private final Connection connection;
 
@@ -1288,6 +1288,7 @@ public final class CivicDatabase implements AutoCloseable {
                 updateBudget.executeUpdate();
                 updateBill.setString(1, reservationId.toString());
                 updateBill.executeUpdate();
+                insertLedgerEntries(transaction, System.currentTimeMillis());
                 if (recovery) {
                     insertRecoveryAudit(
                             transactionId,
@@ -1367,6 +1368,7 @@ public final class CivicDatabase implements AutoCloseable {
                             "Recovery completed the Civic refund commit",
                             recordedAtEpochMillis);
                 }
+                insertLedgerEntries(refund, System.currentTimeMillis());
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -1543,6 +1545,33 @@ public final class CivicDatabase implements AutoCloseable {
             return List.copyOf(entries);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read payment recovery audit " + transactionId, failure);
+        }
+    }
+
+    public synchronized List<StoredLedgerEntry> ledgerEntries(String accountId) {
+        List<StoredLedgerEntry> entries = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_ledger_entry
+                WHERE account_id = ?
+                ORDER BY recorded_at_epoch_millis, rowid
+                """)) {
+            query.setString(1, accountId);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    entries.add(new StoredLedgerEntry(
+                            UUID.fromString(result.getString("entry_id")),
+                            UUID.fromString(result.getString("transaction_id")),
+                            result.getString("account_id"),
+                            result.getString("counterparty_account_id"),
+                            result.getLong("amount_minor_units"),
+                            result.getString("direction"),
+                            result.getString("transaction_kind"),
+                            result.getLong("recorded_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(entries);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read fiscal ledger for " + accountId, failure);
         }
     }
 
@@ -1900,6 +1929,30 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 13");
+            }
+            if (version < 14) {
+                statement.execute("""
+                        CREATE TABLE fiscal_ledger_entry (
+                            entry_id TEXT PRIMARY KEY,
+                            transaction_id TEXT NOT NULL
+                                REFERENCES payment_transaction(transaction_id),
+                            account_id TEXT NOT NULL,
+                            counterparty_account_id TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            direction TEXT NOT NULL CHECK (direction IN ('OUTFLOW', 'INFLOW')),
+                            transaction_kind TEXT NOT NULL
+                                CHECK (transaction_kind IN ('PAYMENT', 'REFUND')),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (transaction_id, direction)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_ledger_entry_account_time
+                        ON fiscal_ledger_entry (account_id, recorded_at_epoch_millis)
+                        """);
+                statement.execute("PRAGMA user_version = 14");
             }
             connection.commit();
         } catch (SQLException failure) {
@@ -2322,6 +2375,33 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setString(4, serviceIdentity);
             insert.setString(5, detail);
             insert.setLong(6, recordedAtEpochMillis);
+            insert.executeUpdate();
+        }
+    }
+
+    private void insertLedgerEntries(
+            StoredPaymentTransaction transaction, long recordedAtEpochMillis) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO fiscal_ledger_entry (
+                    entry_id, transaction_id, account_id, counterparty_account_id,
+                    amount_minor_units, direction, transaction_kind,
+                    recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, UUID.randomUUID().toString());
+            insert.setString(2, transaction.transactionId().toString());
+            insert.setString(3, transaction.sourceAccount());
+            insert.setString(4, transaction.recipientAccount());
+            insert.setLong(5, transaction.amountMinorUnits());
+            insert.setString(6, "OUTFLOW");
+            insert.setString(7, transaction.kind());
+            insert.setLong(8, recordedAtEpochMillis);
+            insert.executeUpdate();
+
+            insert.setString(1, UUID.randomUUID().toString());
+            insert.setString(3, transaction.recipientAccount());
+            insert.setString(4, transaction.sourceAccount());
+            insert.setString(6, "INFLOW");
             insert.executeUpdate();
         }
     }

@@ -37,6 +37,7 @@ import org.civiceconomy.fiscal.FiscalBillState;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.FundFiscalBill;
 import org.civiceconomy.fiscal.IssueFiscalBill;
+import org.civiceconomy.fiscal.LedgerDirection;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PaymentKind;
@@ -441,6 +442,16 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
                     ledger.escrow(escrow.escrowId()).state(),
                     "settled Fiscal Bill Escrow state");
             helper.assertValueEqual(MoneyAmount.ZERO, ledger.reservedBalance(payerAccount), "Fiscal Bill hold");
+            helper.assertValueEqual(1, ledger.ledgerEntries(payerAccount).size(), "payer ledger entry count");
+            helper.assertValueEqual(
+                    LedgerDirection.OUTFLOW,
+                    ledger.ledgerEntries(payerAccount).getFirst().direction(),
+                    "payer ledger direction");
+            helper.assertValueEqual(1, ledger.ledgerEntries(treasury).size(), "Treasury ledger entry count");
+            helper.assertValueEqual(
+                    LedgerDirection.INFLOW,
+                    ledger.ledgerEntries(treasury).getFirst().direction(),
+                    "Treasury ledger direction");
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
         }
