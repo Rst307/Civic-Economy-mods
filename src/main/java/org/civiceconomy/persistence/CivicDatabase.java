@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 47;
+    private static final int SCHEMA_VERSION = 48;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -3820,6 +3820,319 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryClaimPermit(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Claim Permit", failure);
+        }
+    }
+
+    public synchronized StoredMintRecipeVersion publishMintRecipeVersion(
+            UUID recipeVersionId,
+            String serviceIdentity,
+            String requestId,
+            int versionNumber,
+            List<StoredMintRecipeIngredient> ingredients,
+            long processingDurationMillis,
+            String reason,
+            long publishedAtEpochMillis) {
+        if (recipeVersionId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || versionNumber <= 0
+                || ingredients == null
+                || ingredients.isEmpty()
+                || processingDurationMillis <= 0L
+                || reason == null
+                || reason.isBlank()
+                || publishedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Recipe Version values are invalid");
+        }
+        validateMintRecipeIngredients(ingredients);
+        StoredMintRecipeVersion replay = mintRecipeVersion(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.recipeVersionId().equals(recipeVersionId)
+                    || replay.versionNumber() != versionNumber
+                    || replay.processingDurationMillis() != processingDurationMillis
+                    || !replay.reason().equals(reason)
+                    || !mintRecipeIngredients(recipeVersionId).equals(List.copyOf(ingredients))) {
+                throw new IllegalArgumentException(
+                        "Mint Recipe Version replay changed its immutable payload");
+            }
+            return replay;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertVersion = connection.prepareStatement("""
+                        INSERT INTO mint_recipe_version (
+                            recipe_version_id, service_identity, request_id,
+                            version_number, processing_duration_millis,
+                            reason, published_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement insertIngredient = connection.prepareStatement("""
+                        INSERT INTO mint_recipe_ingredient (
+                            recipe_version_id, ingredient_index, group_index,
+                            matcher_kind, matcher_value, quantity_units,
+                            per_face_value_minor_units
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """)) {
+                insertVersion.setString(1, recipeVersionId.toString());
+                insertVersion.setString(2, serviceIdentity);
+                insertVersion.setString(3, requestId);
+                insertVersion.setInt(4, versionNumber);
+                insertVersion.setLong(5, processingDurationMillis);
+                insertVersion.setString(6, reason);
+                insertVersion.setLong(7, publishedAtEpochMillis);
+                insertVersion.executeUpdate();
+                for (int index = 0; index < ingredients.size(); index++) {
+                    StoredMintRecipeIngredient ingredient = ingredients.get(index);
+                    insertIngredient.setString(1, recipeVersionId.toString());
+                    insertIngredient.setInt(2, index);
+                    insertIngredient.setInt(3, ingredient.groupIndex());
+                    insertIngredient.setString(4, ingredient.matcherKind());
+                    insertIngredient.setString(5, ingredient.matcherValue());
+                    insertIngredient.setLong(6, ingredient.quantityUnits());
+                    insertIngredient.setLong(7, ingredient.perFaceValueMinorUnits());
+                    insertIngredient.addBatch();
+                }
+                insertIngredient.executeBatch();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintRecipeVersion(recipeVersionId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to publish Mint Recipe Version", failure);
+        }
+    }
+
+    public synchronized StoredMintRecipeVersion mintRecipeVersion(UUID recipeVersionId) {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT * FROM mint_recipe_version WHERE recipe_version_id = ?")) {
+            query.setString(1, recipeVersionId.toString());
+            return readMintRecipeVersion(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Recipe Version", failure);
+        }
+    }
+
+    public synchronized StoredMintRecipeVersion mintRecipeVersion(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_recipe_version
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readMintRecipeVersion(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Recipe Version request", failure);
+        }
+    }
+
+    public synchronized List<StoredMintRecipeIngredient> mintRecipeIngredients(
+            UUID recipeVersionId) {
+        List<StoredMintRecipeIngredient> ingredients = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_recipe_ingredient
+                WHERE recipe_version_id = ?
+                ORDER BY ingredient_index
+                """)) {
+            query.setString(1, recipeVersionId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    ingredients.add(new StoredMintRecipeIngredient(
+                            result.getInt("group_index"),
+                            result.getString("matcher_kind"),
+                            result.getString("matcher_value"),
+                            result.getLong("quantity_units"),
+                            result.getLong("per_face_value_minor_units")));
+                }
+            }
+            return List.copyOf(ingredients);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Recipe ingredients", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredMint registerMint(
+            UUID mintId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            String dimensionId,
+            int blockX,
+            int blockY,
+            int blockZ,
+            UUID operatorOrganizationId,
+            UUID licenseId,
+            boolean automationAllowed,
+            UUID recipeVersionId,
+            UUID actorPlayerId,
+            String reason,
+            long registeredAtEpochMillis) {
+        if (mintId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || nationId == null
+                || dimensionId == null
+                || dimensionId.isBlank()
+                || operatorOrganizationId == null
+                || licenseId == null
+                || recipeVersionId == null
+                || actorPlayerId == null
+                || reason == null
+                || reason.isBlank()
+                || registeredAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Registered Mint values are invalid");
+        }
+        StoredRegisteredMint replay = registeredMint(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.mintId().equals(mintId)
+                    || !replay.nationId().equals(nationId)
+                    || !replay.dimensionId().equals(dimensionId)
+                    || replay.blockX() != blockX
+                    || replay.blockY() != blockY
+                    || replay.blockZ() != blockZ
+                    || !replay.operatorOrganizationId().equals(operatorOrganizationId)
+                    || !replay.licenseId().equals(licenseId)
+                    || replay.automationAllowed() != automationAllowed
+                    || !replay.recipeVersionId().equals(recipeVersionId)
+                    || !replay.actorPlayerId().equals(actorPlayerId)
+                    || !replay.reason().equals(reason)) {
+                throw new IllegalArgumentException(
+                        "Registered Mint replay changed its immutable payload");
+            }
+            return replay;
+        }
+        if (nation(nationId) == null) {
+            throw new IllegalStateException("Registered Mint references an unknown Nation");
+        }
+        if (mintRecipeVersion(recipeVersionId) == null) {
+            throw new IllegalStateException("Registered Mint references an unknown Mint Recipe Version");
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO registered_mint (
+                    mint_id, service_identity, request_id, nation_id,
+                    dimension_id, block_x, block_y, block_z,
+                    operator_organization_id, license_id, automation_allowed,
+                    recipe_version_id, actor_player_id, transaction_state, reason,
+                    registered_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'IDLE', ?, ?)
+                """)) {
+            insert.setString(1, mintId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, nationId.toString());
+            insert.setString(5, dimensionId);
+            insert.setInt(6, blockX);
+            insert.setInt(7, blockY);
+            insert.setInt(8, blockZ);
+            insert.setString(9, operatorOrganizationId.toString());
+            insert.setString(10, licenseId.toString());
+            insert.setInt(11, automationAllowed ? 1 : 0);
+            insert.setString(12, recipeVersionId.toString());
+            insert.setString(13, actorPlayerId.toString());
+            insert.setString(14, reason);
+            insert.setLong(15, registeredAtEpochMillis);
+            insert.executeUpdate();
+            return registeredMint(mintId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to register Mint", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredMint registeredMint(UUID mintId) {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT * FROM registered_mint WHERE mint_id = ?")) {
+            query.setString(1, mintId.toString());
+            return readRegisteredMint(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Registered Mint", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredMint registeredMint(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_mint
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readRegisteredMint(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Registered Mint request", failure);
+        }
+    }
+
+    private static void validateMintRecipeIngredients(
+            List<StoredMintRecipeIngredient> ingredients) {
+        Set<String> matchers = new HashSet<>();
+        var groupQuantities = new java.util.HashMap<Integer, String>();
+        for (StoredMintRecipeIngredient ingredient : ingredients) {
+            if (ingredient == null) {
+                throw new IllegalArgumentException("Mint Recipe ingredient cannot be null");
+            }
+            String matcher = ingredient.groupIndex()
+                    + "|" + ingredient.matcherKind() + "|" + ingredient.matcherValue();
+            if (!matchers.add(matcher)) {
+                throw new IllegalArgumentException("Mint Recipe contains a duplicate matcher");
+            }
+            String quantity = ingredient.quantityUnits()
+                    + "|" + ingredient.perFaceValueMinorUnits();
+            String previous = groupQuantities.putIfAbsent(ingredient.groupIndex(), quantity);
+            if (previous != null && !previous.equals(quantity)) {
+                throw new IllegalArgumentException(
+                        "Mint Recipe alternatives must share one exact quantity rule");
+            }
+        }
+    }
+
+    private static StoredMintRecipeVersion readMintRecipeVersion(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredMintRecipeVersion(
+                    UUID.fromString(result.getString("recipe_version_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getInt("version_number"),
+                    result.getLong("processing_duration_millis"),
+                    result.getString("reason"),
+                    result.getLong("published_at_epoch_millis"));
+        }
+    }
+
+    private static StoredRegisteredMint readRegisteredMint(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredRegisteredMint(
+                    UUID.fromString(result.getString("mint_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    result.getString("dimension_id"),
+                    result.getInt("block_x"),
+                    result.getInt("block_y"),
+                    result.getInt("block_z"),
+                    UUID.fromString(result.getString("operator_organization_id")),
+                    UUID.fromString(result.getString("license_id")),
+                    result.getInt("automation_allowed") == 1,
+                    UUID.fromString(result.getString("recipe_version_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("transaction_state"),
+                    result.getString("reason"),
+                    result.getLong("registered_at_epoch_millis"));
         }
     }
 
@@ -8477,6 +8790,74 @@ public final class CivicDatabase implements AutoCloseable {
                         ON issuance_quota_period (starts_at_epoch_millis, ends_at_epoch_millis)
                         """);
                 statement.execute("PRAGMA user_version = 47");
+            }
+            if (version < 48) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS mint_recipe_version (
+                            recipe_version_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            version_number INTEGER NOT NULL UNIQUE
+                                CHECK (version_number > 0),
+                            processing_duration_millis INTEGER NOT NULL
+                                CHECK (processing_duration_millis > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            published_at_epoch_millis INTEGER NOT NULL
+                                CHECK (published_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS mint_recipe_ingredient (
+                            recipe_version_id TEXT NOT NULL
+                                REFERENCES mint_recipe_version(recipe_version_id),
+                            ingredient_index INTEGER NOT NULL
+                                CHECK (ingredient_index >= 0),
+                            group_index INTEGER NOT NULL CHECK (group_index >= 0),
+                            matcher_kind TEXT NOT NULL
+                                CHECK (matcher_kind IN ('EXACT_ITEM', 'TAG')),
+                            matcher_value TEXT NOT NULL
+                                CHECK (length(trim(matcher_value)) > 0),
+                            quantity_units INTEGER NOT NULL CHECK (quantity_units > 0),
+                            per_face_value_minor_units INTEGER NOT NULL
+                                CHECK (per_face_value_minor_units >= 0),
+                            PRIMARY KEY (recipe_version_id, ingredient_index),
+                            UNIQUE (recipe_version_id, group_index, matcher_kind, matcher_value)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS registered_mint (
+                            mint_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            block_x INTEGER NOT NULL,
+                            block_y INTEGER NOT NULL,
+                            block_z INTEGER NOT NULL,
+                            operator_organization_id TEXT NOT NULL,
+                            license_id TEXT NOT NULL,
+                            automation_allowed INTEGER NOT NULL
+                                CHECK (automation_allowed IN (0, 1)),
+                            recipe_version_id TEXT NOT NULL
+                                REFERENCES mint_recipe_version(recipe_version_id),
+                            actor_player_id TEXT NOT NULL,
+                            transaction_state TEXT NOT NULL
+                                CHECK (transaction_state IN ('IDLE', 'PROCESSING', 'RECOVERY')),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            registered_at_epoch_millis INTEGER NOT NULL
+                                CHECK (registered_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (license_id),
+                            UNIQUE (dimension_id, block_x, block_y, block_z)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS registered_mint_nation_state
+                        ON registered_mint (nation_id, transaction_state, mint_id)
+                        """);
+                statement.execute("PRAGMA user_version = 48");
             }
             connection.commit();
         } catch (SQLException failure) {
