@@ -33,6 +33,7 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBa
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyTerritoryClearingAccountProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPublicMaintenanceFundProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.PermanentDestructionCoordinator;
+import org.civiceconomy.integration.lightmanscurrency.TerritoryMaintenancePaymentCoordinator;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
@@ -77,6 +78,10 @@ import org.civiceconomy.territory.TerritoryMaintenanceObservedClaim;
 import org.civiceconomy.territory.TerritoryMaintenancePolicyRegistry;
 import org.civiceconomy.territory.TerritoryMaintenancePolicyVersion;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
+import org.civiceconomy.territory.SettleAvailableTerritoryMaintenance;
+import org.civiceconomy.territory.TerritoryFiscalValidity;
+import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
+import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.slf4j.Logger;
 
@@ -1014,7 +1019,7 @@ public final class CivicServerRuntime {
                         finishTerritoryMaintenanceAssessment(current, batch, failure));
     }
 
-    private static void finishTerritoryMaintenanceAssessment(
+    private void finishTerritoryMaintenanceAssessment(
             RuntimeState current,
             TerritoryMaintenanceAssessmentBatch batch,
             Throwable failure) {
@@ -1026,7 +1031,117 @@ public final class CivicServerRuntime {
                     "Automatic Territory Maintenance Cycle {} has {} Assessment(s)",
                     batch.cycle().cycleId(),
                     batch.assessments().size());
+            scheduleTerritoryMaintenanceSettlement(current, batch);
         }
+    }
+
+    private void scheduleTerritoryMaintenanceSettlement(
+            RuntimeState current, TerritoryMaintenanceAssessmentBatch batch) {
+        if (!current.territoryMaintenanceSettlementQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock settlementClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> settleTerritoryMaintenance(
+                        current, database, batch, settlementClock))
+                .whenComplete((result, failure) -> {
+                    current.territoryMaintenanceSettlementQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Automatic Territory Maintenance settlement failed closed",
+                                failure);
+                    } else if (result != null && result.nationCount() > 0) {
+                        LOGGER.info(
+                                "Automatic Territory Maintenance settled {} Nation(s): "
+                                        + "{} fully funded, {} partially funded, {} unfunded",
+                                result.nationCount(),
+                                result.fullyFunded(),
+                                result.partiallyFunded(),
+                                result.unfunded());
+                    }
+                });
+    }
+
+    private static AutomaticMaintenanceSettlementResult settleTerritoryMaintenance(
+            RuntimeState current,
+            CivicDatabase database,
+            TerritoryMaintenanceAssessmentBatch batch,
+            Clock settlementClock) {
+        String cycleRequestId = batch.cycle().requestId();
+        if (!cycleRequestId.endsWith(":cycle")) {
+            throw new IllegalStateException(
+                    "Automatic Territory Maintenance Cycle request ID is invalid");
+        }
+        String requestPrefix = cycleRequestId.substring(
+                0, cycleRequestId.length() - ":cycle".length());
+        TerritoryMaintenancePolicyVersion policy =
+                new TerritoryMaintenancePolicyRegistry(database, settlementClock)
+                        .find(policyIdFromAutomaticRequest(requestPrefix))
+                        .orElseThrow(() -> new IllegalStateException(
+                                "Automatic Territory Maintenance Settlement policy is missing"));
+        List<org.civiceconomy.nation.NationId> nations = batch.assessments().stream()
+                .filter(assessment -> assessment.validity() == TerritoryFiscalValidity.PENDING)
+                .map(org.civiceconomy.territory.TerritoryFiscalAssessment::nationId)
+                .distinct()
+                .sorted(java.util.Comparator.comparing(org.civiceconomy.nation.NationId::value))
+                .toList();
+        if (nations.isEmpty()) {
+            return new AutomaticMaintenanceSettlementResult(0, 0, 0, 0);
+        }
+        FiscalAuthorization authorization = new FiscalAuthorization(database);
+        TerritoryFiscalServiceProvisioner provisioner =
+                new TerritoryFiscalServiceProvisioner(authorization);
+        for (org.civiceconomy.nation.NationId nationId : nations) {
+            provisioner.ensureAuthorized(nationalTreasury(nationId));
+        }
+        var session = authorization.openSession(TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+        TerritoryMaintenancePaymentCoordinator coordinator =
+                TerritoryMaintenancePaymentCoordinator.live(
+                        database, session, settlementClock, current.server.overworld());
+        int fullyFunded = 0;
+        int partiallyFunded = 0;
+        int unfunded = 0;
+        RuntimeException aggregateFailure = null;
+        for (org.civiceconomy.nation.NationId nationId : nations) {
+            try {
+                var settlement = coordinator.settleAvailable(
+                                new SettleAvailableTerritoryMaintenance(
+                                        TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                        requestPrefix + ":nation:" + nationId.value(),
+                                        batch.cycle().cycleId(),
+                                        nationId,
+                                        nationalTreasury(nationId),
+                                        policy.destructionBasisPoints(),
+                                        "Automatic Territory Maintenance settlement"))
+                        .settlement();
+                if (settlement.outcome() == TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED) {
+                    fullyFunded++;
+                } else if (settlement.outcome()
+                        == TerritoryMaintenanceSettlementOutcome.PARTIALLY_FUNDED) {
+                    partiallyFunded++;
+                } else {
+                    unfunded++;
+                }
+            } catch (RuntimeException failure) {
+                LOGGER.error(
+                        "Automatic Territory Maintenance settlement failed closed for Nation {}",
+                        nationId.value(),
+                        failure);
+                if (aggregateFailure == null) {
+                    aggregateFailure = new IllegalStateException(
+                            "One or more automatic Territory Maintenance Settlements failed");
+                }
+                aggregateFailure.addSuppressed(failure);
+            }
+        }
+        if (aggregateFailure != null) {
+            throw aggregateFailure;
+        }
+        return new AutomaticMaintenanceSettlementResult(
+                nations.size(), fullyFunded, partiallyFunded, unfunded);
+    }
+
+    private static AccountId nationalTreasury(org.civiceconomy.nation.NationId nationId) {
+        return new AccountId("nation:" + nationId.value() + ":treasury");
     }
 
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
@@ -1043,6 +1158,7 @@ public final class CivicServerRuntime {
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
+        private final AtomicBoolean territoryMaintenanceSettlementQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
@@ -1090,4 +1206,7 @@ public final class CivicServerRuntime {
             }
         }
     }
+
+    private record AutomaticMaintenanceSettlementResult(
+            int nationCount, int fullyFunded, int partiallyFunded, int unfunded) {}
 }

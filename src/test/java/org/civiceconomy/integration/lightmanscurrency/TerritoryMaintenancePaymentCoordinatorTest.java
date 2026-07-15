@@ -2,6 +2,7 @@ package org.civiceconomy.integration.lightmanscurrency;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.time.Clock;
@@ -25,8 +26,10 @@ import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.territory.ChargeTerritoryMaintenance;
+import org.civiceconomy.territory.SettleAvailableTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 import org.civiceconomy.territory.TerritoryFiscalValidity;
+import org.civiceconomy.territory.TerritoryMaintenancePriority;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
 import org.junit.jupiter.api.Test;
@@ -47,6 +50,194 @@ class TerritoryMaintenancePaymentCoordinatorTest {
             UUID.fromString("4d2c544b-0241-47cf-a617-ae65c542c6f0");
 
     @TempDir Path temporaryDirectory;
+
+    @Test
+    void settlesOnlyTheAffordablePriorityPrefixWithoutCallerSuppliedAssessments() {
+        Map<AccountId, Long> balances = new HashMap<>();
+        balances.put(TREASURY, 100L);
+        balances.put(PUBLIC_FUND, 0L);
+        Set<UUID> appliedPayments = new HashSet<>();
+        Set<UUID> appliedDestructions = new HashSet<>();
+        UUID capitalAssessmentId = UUID.fromString("1830d235-fb82-4722-a6da-6dc35435683c");
+        UUID ordinaryAssessmentId = UUID.fromString("7661402b-827c-4693-8465-5559b18eb9f5");
+
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    NATION_ID.value(), "maintenance-test", "register-nation", TEAM_ID, NOW.toEpochMilli());
+            database.openTerritoryMaintenanceCycle(
+                    CYCLE_ID,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "open-maintenance-cycle",
+                    NOW.toEpochMilli(),
+                    NOW.plusSeconds(3_600L).toEpochMilli(),
+                    NOW.toEpochMilli());
+            assess(database, capitalAssessmentId, "capital", 0, 0, 100L, TerritoryMaintenancePriority.CAPITAL);
+            assess(database, ordinaryAssessmentId, "ordinary", 1, 0, 50L, TerritoryMaintenancePriority.ORDINARY);
+            database.confirmMonetarySupplyChange(
+                    UUID.randomUUID(),
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "seed-partial-maintenance-issuance",
+                    "ISSUANCE",
+                    100L,
+                    "mint-batch:partial-maintenance",
+                    "Seed partial maintenance issuance",
+                    NOW.toEpochMilli(),
+                    2_000L);
+            TerritoryMaintenancePaymentCoordinator coordinator = coordinator(
+                    database,
+                    balances,
+                    appliedPayments,
+                    appliedDestructions,
+                    new AtomicBoolean(false));
+
+            var result = coordinator.settleAvailable(new SettleAvailableTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "partial-maintenance",
+                    CYCLE_ID,
+                    NATION_ID,
+                    TREASURY,
+                    6_000,
+                    "Automatic partial maintenance"));
+
+            assertEquals(TerritoryMaintenanceSettlementOutcome.PARTIALLY_FUNDED, result.settlement().outcome());
+            assertEquals(Set.of(capitalAssessmentId), Set.copyOf(result.settlement().fundedAssessmentIds()));
+            assertEquals(Set.of(ordinaryAssessmentId), Set.copyOf(result.settlement().suspendedAssessmentIds()));
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(100L),
+                    result.payment().orElseThrow().reservation().amount());
+            assertEquals(0L, balances.get(TREASURY));
+            assertEquals(40L, balances.get(PUBLIC_FUND));
+
+            var replay = coordinator.settleAvailable(new SettleAvailableTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "partial-maintenance",
+                    CYCLE_ID,
+                    NATION_ID,
+                    TREASURY,
+                    6_000,
+                    "Automatic partial maintenance"));
+
+            assertEquals(result.settlement(), replay.settlement());
+            assertEquals(
+                    result.payment().orElseThrow().reservation().reservationId(),
+                    replay.payment().orElseThrow().reservation().reservationId());
+            assertEquals(
+                    result.payment().orElseThrow().publicFundPayment().transactionId(),
+                    replay.payment().orElseThrow().publicFundPayment().transactionId());
+            assertEquals(0L, balances.get(TREASURY));
+            assertEquals(40L, balances.get(PUBLIC_FUND));
+        }
+    }
+
+    @Test
+    void keepsZeroCostAssessmentsEffectiveWithoutInventingFiscalEvidence() {
+        Map<AccountId, Long> balances = new HashMap<>();
+        balances.put(TREASURY, 0L);
+        balances.put(PUBLIC_FUND, 0L);
+        UUID zeroCostCapital = UUID.fromString("9a078d86-f179-4211-bf59-a7358bea2257");
+        UUID paidOrdinary = UUID.fromString("ca99775d-aed2-4c45-9a7f-c573f6f71c7a");
+
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    NATION_ID.value(), "maintenance-test", "register-nation", TEAM_ID, NOW.toEpochMilli());
+            database.openTerritoryMaintenanceCycle(
+                    CYCLE_ID,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "open-maintenance-cycle",
+                    NOW.toEpochMilli(),
+                    NOW.plusSeconds(3_600L).toEpochMilli(),
+                    NOW.toEpochMilli());
+            assess(database, zeroCostCapital, "zero-cost-capital", 0, 0, 0L, TerritoryMaintenancePriority.CAPITAL);
+            assess(database, paidOrdinary, "paid-ordinary", 1, 0, 50L, TerritoryMaintenancePriority.ORDINARY);
+            database.confirmMonetarySupplyChange(
+                    UUID.randomUUID(),
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "seed-zero-cost-test-issuance",
+                    "ISSUANCE",
+                    1L,
+                    "mint-batch:zero-cost-test",
+                    "Keep the coordinator fixture from adding another Assessment",
+                    NOW.toEpochMilli(),
+                    2_000L);
+            TerritoryMaintenancePaymentCoordinator coordinator = coordinator(
+                    database,
+                    balances,
+                    new HashSet<>(),
+                    new HashSet<>(),
+                    new AtomicBoolean(false));
+
+            var result = coordinator.settleAvailable(new SettleAvailableTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "zero-cost-maintenance",
+                    CYCLE_ID,
+                    NATION_ID,
+                    TREASURY,
+                    6_000,
+                    "Automatic zero-cost maintenance"));
+
+            assertEquals(TerritoryMaintenanceSettlementOutcome.PARTIALLY_FUNDED, result.settlement().outcome());
+            assertEquals(Set.of(zeroCostCapital), Set.copyOf(result.settlement().fundedAssessmentIds()));
+            assertEquals(Set.of(paidOrdinary), Set.copyOf(result.settlement().suspendedAssessmentIds()));
+            assertTrue(result.payment().isEmpty());
+            assertEquals(0L, database.activeReservedMinorUnits(TREASURY.value()));
+            assertEquals(0L, balances.get(TREASURY));
+            assertEquals(0L, balances.get(PUBLIC_FUND));
+        }
+    }
+
+    @Test
+    void recordsUnfundedWithoutMovingLcWhenCapitalIsUnaffordable() {
+        Map<AccountId, Long> balances = new HashMap<>();
+        balances.put(TREASURY, 99L);
+        balances.put(PUBLIC_FUND, 0L);
+        UUID capitalAssessmentId = UUID.fromString("845a334c-8a13-4346-80a7-53fe7110e11f");
+
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    NATION_ID.value(), "maintenance-test", "register-nation", TEAM_ID, NOW.toEpochMilli());
+            database.openTerritoryMaintenanceCycle(
+                    CYCLE_ID,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "open-maintenance-cycle",
+                    NOW.toEpochMilli(),
+                    NOW.plusSeconds(3_600L).toEpochMilli(),
+                    NOW.toEpochMilli());
+            assess(database, capitalAssessmentId, "capital", 0, 0, 100L, TerritoryMaintenancePriority.CAPITAL);
+            database.confirmMonetarySupplyChange(
+                    UUID.randomUUID(),
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "seed-unfunded-test-issuance",
+                    "ISSUANCE",
+                    1L,
+                    "mint-batch:unfunded-test",
+                    "Keep the coordinator fixture isolated",
+                    NOW.toEpochMilli(),
+                    2_000L);
+            TerritoryMaintenancePaymentCoordinator coordinator = coordinator(
+                    database,
+                    balances,
+                    new HashSet<>(),
+                    new HashSet<>(),
+                    new AtomicBoolean(false));
+
+            var result = coordinator.settleAvailable(new SettleAvailableTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "unfunded-maintenance",
+                    CYCLE_ID,
+                    NATION_ID,
+                    TREASURY,
+                    6_000,
+                    "Automatic unfunded maintenance"));
+
+            assertEquals(TerritoryMaintenanceSettlementOutcome.UNFUNDED, result.settlement().outcome());
+            assertEquals(Set.of(), Set.copyOf(result.settlement().fundedAssessmentIds()));
+            assertEquals(Set.of(capitalAssessmentId), Set.copyOf(result.settlement().suspendedAssessmentIds()));
+            assertTrue(result.payment().isEmpty());
+            assertEquals(99L, balances.get(TREASURY));
+            assertEquals(0L, balances.get(PUBLIC_FUND));
+            assertEquals(0L, database.activeReservedMinorUnits(TREASURY.value()));
+        }
+    }
 
     @Test
     void crashAfterDestructionRecoversExactConservativeSplit() {
@@ -263,6 +454,30 @@ class TerritoryMaintenancePaymentCoordinatorTest {
                 (ignored, balance) -> Math.subtractExact(balance, payment.amount().minorUnits()));
         balances.merge(
                 payment.recipientAccount(), payment.amount().minorUnits(), Math::addExact);
+    }
+
+    private static void assess(
+            CivicDatabase database,
+            UUID assessmentId,
+            String requestId,
+            int chunkX,
+            int chunkZ,
+            long due,
+            TerritoryMaintenancePriority priority) {
+        database.assessTerritoryFiscalValidity(
+                assessmentId,
+                TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                requestId,
+                CYCLE_ID,
+                NATION_ID.value(),
+                TEAM_ID,
+                "minecraft:overworld",
+                chunkX,
+                chunkZ,
+                due,
+                priority.name(),
+                "Automatic settlement test assessment",
+                NOW.toEpochMilli());
     }
 
     private CivicDatabase database() {

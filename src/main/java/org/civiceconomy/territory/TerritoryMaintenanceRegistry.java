@@ -274,6 +274,34 @@ public final class TerritoryMaintenanceRegistry {
                 clock.millis()));
     }
 
+    public TerritoryMaintenanceSettlement settleZeroCostAssessments(
+            SuspendTerritoryMaintenance request) {
+        StoredTerritoryMaintenanceSettlement replay = database.territoryMaintenanceSettlement(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.cycleId().equals(request.cycleId())
+                    || !replay.nationId().equals(request.nationId().value())
+                    || replay.reservationId() != null
+                    || replay.publicFundPaymentId() != null
+                    || replay.destructionOperationId() != null
+                    || !replay.reason().equals(request.reason())
+                    || replay.outcome().equals(
+                            TerritoryMaintenanceSettlementOutcome.UNFUNDED.name())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toSettlement(replay);
+        }
+        return toSettlement(database.settleZeroCostTerritoryMaintenance(
+                UUID.randomUUID(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.cycleId(),
+                request.nationId().value(),
+                request.reason(),
+                clock.millis()));
+    }
+
     private static void requirePayload(
             StoredTerritoryFiscalAssessment stored,
             AssessTerritoryFiscalValidity request) {

@@ -17,6 +17,7 @@ public final class TerritoryFiscalServiceProvisioner {
     private static final ServiceIdentity INTERNAL_ADMINISTRATOR =
             new ServiceIdentity("civiceconomy-internal");
     private static final EnumSet<FiscalCapability> REQUIRED_CAPABILITIES = EnumSet.of(
+            FiscalCapability.READ_ACCOUNT,
             FiscalCapability.RESERVE_FUNDS,
             FiscalCapability.SETTLE_PAYMENT,
             FiscalCapability.COMPENSATE_PAYMENT,

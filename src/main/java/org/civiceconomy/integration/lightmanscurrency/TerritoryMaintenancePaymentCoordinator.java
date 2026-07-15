@@ -18,8 +18,13 @@ import org.civiceconomy.monetary.MonetarySupplyEvent;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.territory.ChargeTerritoryMaintenance;
 import org.civiceconomy.territory.ConfirmTerritoryMaintenanceSettlement;
+import org.civiceconomy.territory.SettleAvailableTerritoryMaintenance;
+import org.civiceconomy.territory.SuspendTerritoryMaintenance;
+import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.territory.TerritoryMaintenancePayment;
+import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
+import org.civiceconomy.territory.TerritoryMaintenanceSettlementResult;
 
 public final class TerritoryMaintenancePaymentCoordinator {
     private final CivicDatabase database;
@@ -74,6 +79,77 @@ public final class TerritoryMaintenancePaymentCoordinator {
             throw new IllegalArgumentException(
                     "Territory maintenance total must match exact cycle assessments");
         }
+        return chargeExact(request);
+    }
+
+    public TerritoryMaintenanceSettlementResult settleAvailable(
+            SettleAvailableTerritoryMaintenance request) {
+        String settlementRequestId = request.requestId() + ":settlement";
+        var replay = database.territoryMaintenanceSettlement(
+                request.serviceIdentity().value(), settlementRequestId);
+        if (replay != null) {
+            if (replay.outcome().equals(TerritoryMaintenanceSettlementOutcome.UNFUNDED.name())) {
+                var settlement = maintenance.suspend(new SuspendTerritoryMaintenance(
+                        request.serviceIdentity(),
+                        settlementRequestId,
+                        request.cycleId(),
+                        request.nationId(),
+                        request.reason()));
+                return new TerritoryMaintenanceSettlementResult(Optional.empty(), settlement);
+            }
+            if (replay.reservationId() == null) {
+                var settlement = maintenance.settleZeroCostAssessments(
+                        new SuspendTerritoryMaintenance(
+                                request.serviceIdentity(),
+                                settlementRequestId,
+                                request.cycleId(),
+                                request.nationId(),
+                                request.reason()));
+                return new TerritoryMaintenanceSettlementResult(Optional.empty(), settlement);
+            }
+            var reservation = database.reservationRecord(replay.reservationId());
+            if (reservation == null) {
+                throw new IllegalStateException(
+                        "Territory Maintenance Settlement is missing its Reservation");
+            }
+            TerritoryMaintenancePayment payment = chargeExact(toCharge(
+                    request, MoneyAmount.ofMinorUnits(reservation.amountMinorUnits())));
+            return new TerritoryMaintenanceSettlementResult(Optional.of(payment), payment.settlement());
+        }
+
+        var candidates = maintenance.pendingCandidates(request.cycleId(), request.nationId());
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance settlement requires pending Assessments");
+        }
+        MoneyAmount available = ledger.availableBalance(
+                request.serviceIdentity(), request.treasuryAccount());
+        var decision = new TerritoryMaintenancePriorityPolicy().select(candidates, available);
+        if (decision.fundedAmount().equals(MoneyAmount.ZERO)
+                && !decision.funded().isEmpty()) {
+            var settlement = maintenance.settleZeroCostAssessments(
+                    new SuspendTerritoryMaintenance(
+                            request.serviceIdentity(),
+                            settlementRequestId,
+                            request.cycleId(),
+                            request.nationId(),
+                            request.reason()));
+            return new TerritoryMaintenanceSettlementResult(Optional.empty(), settlement);
+        }
+        if (decision.fundedAmount().equals(MoneyAmount.ZERO)) {
+            var settlement = maintenance.suspend(new SuspendTerritoryMaintenance(
+                    request.serviceIdentity(),
+                    settlementRequestId,
+                    request.cycleId(),
+                    request.nationId(),
+                    request.reason()));
+            return new TerritoryMaintenanceSettlementResult(Optional.empty(), settlement);
+        }
+        TerritoryMaintenancePayment payment = chargeExact(toCharge(request, decision.fundedAmount()));
+        return new TerritoryMaintenanceSettlementResult(Optional.of(payment), payment.settlement());
+    }
+
+    private TerritoryMaintenancePayment chargeExact(ChargeTerritoryMaintenance request) {
         Split split = split(request.totalDue(), request.destructionBasisPoints());
         String purpose = "Territory Maintenance "
                 + request.cycleId()
@@ -127,6 +203,19 @@ public final class TerritoryMaintenancePaymentCoordinator {
                 split.publicFundAmount(),
                 split.destroyedAmount(),
                 settlement);
+    }
+
+    private static ChargeTerritoryMaintenance toCharge(
+            SettleAvailableTerritoryMaintenance request, MoneyAmount amount) {
+        return new ChargeTerritoryMaintenance(
+                request.serviceIdentity(),
+                request.requestId(),
+                request.cycleId(),
+                request.nationId(),
+                request.treasuryAccount(),
+                amount,
+                request.destructionBasisPoints(),
+                request.reason());
     }
 
     public void recoverPermanentDestructions() {

@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 37;
+    private static final int SCHEMA_VERSION = 38;
 
     private final Connection connection;
 
@@ -2278,6 +2278,102 @@ public final class CivicDatabase implements AutoCloseable {
             throw propagated;
         } finally {
             restoreAutoCommit("Territory Maintenance suspension", primaryFailure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceSettlement settleZeroCostTerritoryMaintenance(
+            UUID settlementId,
+            String serviceIdentity,
+            String requestId,
+            UUID cycleId,
+            UUID nationId,
+            String reason,
+            long settledAtEpochMillis) {
+        StoredTerritoryMaintenanceSettlement replay =
+                territoryMaintenanceSettlement(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            List<StoredTerritoryFiscalAssessment> pending =
+                    pendingTerritoryFiscalAssessments(cycleId, nationId);
+            if (pending.isEmpty()
+                    || !territoryMaintenanceOwnedBy(
+                            cycleId, nationId, serviceIdentity, pending.size())) {
+                throw new IllegalStateException(
+                        "Territory maintenance has no pending assessment due");
+            }
+            List<TerritoryMaintenanceCandidate> candidates = pending.stream()
+                    .map(assessment -> new TerritoryMaintenanceCandidate(
+                            assessment.assessmentId(),
+                            TerritoryMaintenancePriority.valueOf(assessment.priority()),
+                            assessment.dimensionId(),
+                            assessment.chunkX(),
+                            assessment.chunkZ(),
+                            MoneyAmount.ofMinorUnits(assessment.maintenanceDueMinorUnits())))
+                    .toList();
+            TerritoryMaintenancePriorityDecision decision =
+                    new TerritoryMaintenancePriorityPolicy().select(candidates, MoneyAmount.ZERO);
+            if (decision.funded().isEmpty()
+                    || !decision.fundedAmount().equals(MoneyAmount.ZERO)) {
+                throw new IllegalStateException(
+                        "Payment-free Territory Maintenance Settlement requires zero-cost Assessments");
+            }
+            String outcome = decision.suspended().isEmpty()
+                    ? "FULLY_FUNDED"
+                    : "PARTIALLY_FUNDED";
+            try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO territory_maintenance_settlement (
+                            settlement_id, service_identity, request_id, cycle_id, nation_id,
+                            outcome, reason, settled_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement detail = connection.prepareStatement("""
+                        INSERT INTO territory_maintenance_settlement_assessment (
+                            settlement_id, assessment_id, validity
+                        ) VALUES (?, ?, ?)
+                        """);
+                    PreparedStatement update = connection.prepareStatement("""
+                        UPDATE territory_fiscal_assessment
+                        SET validity = ?
+                        WHERE assessment_id = ? AND validity = 'PENDING'
+                        """)) {
+                insert.setString(1, settlementId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, cycleId.toString());
+                insert.setString(5, nationId.toString());
+                insert.setString(6, outcome);
+                insert.setString(7, reason);
+                insert.setLong(8, settledAtEpochMillis);
+                insert.executeUpdate();
+                for (TerritoryMaintenanceCandidate candidate : decision.funded()) {
+                    persistTerritorySettlementAssessment(
+                            detail, update, settlementId, candidate.assessmentId(), "EFFECTIVE");
+                }
+                for (TerritoryMaintenanceCandidate candidate : decision.suspended()) {
+                    persistTerritorySettlementAssessment(
+                            detail, update, settlementId, candidate.assessmentId(), "SUSPENDED");
+                }
+            }
+            connection.commit();
+            return territoryMaintenanceSettlement(serviceIdentity, requestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException(
+                            "Unable to settle zero-cost Territory Maintenance", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Zero-cost Territory Maintenance settlement", primaryFailure);
         }
     }
 
@@ -6061,6 +6157,73 @@ public final class CivicDatabase implements AutoCloseable {
                               )
                         """);
                 statement.execute("PRAGMA user_version = 37");
+            }
+            if (version < 38) {
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_settlement_assessment
+                        RENAME TO territory_maintenance_settlement_assessment_v37
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_settlement
+                        RENAME TO territory_maintenance_settlement_v37
+                        """);
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_settlement (
+                            settlement_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            cycle_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_cycle(cycle_id),
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            reservation_id TEXT UNIQUE
+                                REFERENCES fiscal_reservation(reservation_id),
+                            public_fund_payment_id TEXT UNIQUE
+                                REFERENCES payment_transaction(transaction_id),
+                            destruction_operation_id TEXT UNIQUE
+                                REFERENCES permanent_destruction_operation(operation_id),
+                            outcome TEXT NOT NULL CHECK (outcome IN (
+                                'FULLY_FUNDED', 'PARTIALLY_FUNDED', 'UNFUNDED'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            settled_at_epoch_millis INTEGER NOT NULL
+                                CHECK (settled_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (cycle_id, nation_id),
+                            CHECK ((outcome IN ('FULLY_FUNDED', 'PARTIALLY_FUNDED')
+                                    AND ((reservation_id IS NOT NULL
+                                            AND public_fund_payment_id IS NOT NULL)
+                                        OR (reservation_id IS NULL
+                                            AND public_fund_payment_id IS NULL
+                                            AND destruction_operation_id IS NULL)))
+                                OR (outcome = 'UNFUNDED'
+                                    AND reservation_id IS NULL
+                                    AND public_fund_payment_id IS NULL
+                                    AND destruction_operation_id IS NULL))
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO territory_maintenance_settlement
+                        SELECT * FROM territory_maintenance_settlement_v37
+                        """);
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_settlement_assessment (
+                            settlement_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_settlement(settlement_id)
+                                ON DELETE CASCADE,
+                            assessment_id TEXT NOT NULL UNIQUE
+                                REFERENCES territory_fiscal_assessment(assessment_id),
+                            validity TEXT NOT NULL
+                                CHECK (validity IN ('EFFECTIVE', 'SUSPENDED')),
+                            PRIMARY KEY (settlement_id, assessment_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO territory_maintenance_settlement_assessment
+                        SELECT * FROM territory_maintenance_settlement_assessment_v37
+                        """);
+                statement.execute("DROP TABLE territory_maintenance_settlement_assessment_v37");
+                statement.execute("DROP TABLE territory_maintenance_settlement_v37");
+                statement.execute("PRAGMA user_version = 38");
             }
             connection.commit();
         } catch (SQLException failure) {
