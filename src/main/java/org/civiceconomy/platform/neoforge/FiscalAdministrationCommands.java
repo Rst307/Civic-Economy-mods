@@ -161,28 +161,36 @@ public final class FiscalAdministrationCommands {
                                                                 "forceLoadSurcharge",
                                                                 LongArgumentType.longArg(0L))
                                                         .then(Commands.argument(
-                                                                        "destructionBasisPoints",
-                                                                        IntegerArgumentType.integer(3_000, 8_000))
+                                                                        "restorationFee",
+                                                                        LongArgumentType.longArg(0L))
                                                                 .then(Commands.argument(
-                                                                                "effectiveAtEpochMillis",
-                                                                                LongArgumentType.longArg(0L))
+                                                                                "restorationCooldownMillis",
+                                                                                LongArgumentType.longArg(1L))
                                                                         .then(Commands.argument(
-                                                                                        "requestId",
-                                                                                        StringArgumentType.word())
+                                                                                        "destructionBasisPoints",
+                                                                                        IntegerArgumentType.integer(3_000, 8_000))
                                                                                 .then(Commands.argument(
-                                                                                                "reason",
-                                                                                                StringArgumentType.greedyString())
-                                                                                        .executes(context ->
-                                                                                                scheduleTerritoryMaintenancePolicy(
-                                                                                                        context.getSource(),
-                                                                                                        LongArgumentType.getLong(context, "cycleDurationMillis"),
-                                                                                                        LongArgumentType.getLong(context, "baseMaintenancePerClaim"),
-                                                                                                        IntegerArgumentType.getInteger(context, "enclaveMultiplierBasisPoints"),
-                                                                                                        LongArgumentType.getLong(context, "forceLoadSurcharge"),
-                                                                                                        IntegerArgumentType.getInteger(context, "destructionBasisPoints"),
-                                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
-                                                                                                        StringArgumentType.getString(context, "requestId"),
-                                                                                                        StringArgumentType.getString(context, "reason"))))))))))));
+                                                                                                "effectiveAtEpochMillis",
+                                                                                                LongArgumentType.longArg(0L))
+                                                                                        .then(Commands.argument(
+                                                                                                        "requestId",
+                                                                                                        StringArgumentType.word())
+                                                                                                .then(Commands.argument(
+                                                                                                                "reason",
+                                                                                                                StringArgumentType.greedyString())
+                                                                                                        .executes(context ->
+                                                                                                                scheduleTerritoryMaintenancePolicy(
+                                                                                                                        context.getSource(),
+                                                                                                                        LongArgumentType.getLong(context, "cycleDurationMillis"),
+                                                                                                                        LongArgumentType.getLong(context, "baseMaintenancePerClaim"),
+                                                                                                                        IntegerArgumentType.getInteger(context, "enclaveMultiplierBasisPoints"),
+                                                                                                                        LongArgumentType.getLong(context, "forceLoadSurcharge"),
+                                                                                                                        LongArgumentType.getLong(context, "restorationFee"),
+                                                                                                                        LongArgumentType.getLong(context, "restorationCooldownMillis"),
+                                                                                                                        IntegerArgumentType.getInteger(context, "destructionBasisPoints"),
+                                                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                                                        StringArgumentType.getString(context, "reason"))))))))))))));
     }
 
     private static int showTerritoryMaintenancePolicy(CommandSourceStack source) {
@@ -216,6 +224,8 @@ public final class FiscalAdministrationCommands {
             long baseMaintenancePerClaim,
             int enclaveMultiplierBasisPoints,
             long forceLoadSurcharge,
+            long restorationFee,
+            long restorationCooldownMillis,
             int destructionBasisPoints,
             long effectiveAtEpochMillis,
             String requestId,
@@ -231,6 +241,8 @@ public final class FiscalAdministrationCommands {
                                 baseMaintenancePerClaim,
                                 enclaveMultiplierBasisPoints,
                                 forceLoadSurcharge,
+                                restorationFee,
+                                Duration.ofMillis(restorationCooldownMillis),
                                 destructionBasisPoints,
                                 Instant.ofEpochMilli(effectiveAtEpochMillis),
                                 reason)))
@@ -259,6 +271,8 @@ public final class FiscalAdministrationCommands {
                 + " enclaveMultiplierBasisPoints="
                 + policy.enclaveAndCrossDimensionMultiplierBasisPoints()
                 + " forceLoadSurcharge=" + policy.forceLoadSurchargeMinorUnits()
+                + " restorationFee=" + policy.restorationFeeMinorUnits()
+                + " restorationCooldownMillis=" + policy.restorationCooldown().toMillis()
                 + " destructionBasisPoints=" + policy.destructionBasisPoints()
                 + " effectiveAt=" + policy.effectiveAt()
                 + " actor=" + policy.actorIdentity();

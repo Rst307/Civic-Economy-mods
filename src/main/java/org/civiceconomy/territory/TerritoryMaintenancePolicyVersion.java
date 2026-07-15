@@ -10,6 +10,8 @@ public record TerritoryMaintenancePolicyVersion(
         long baseMaintenancePerChargeableClaimMinorUnits,
         int enclaveAndCrossDimensionMultiplierBasisPoints,
         long forceLoadSurchargeMinorUnits,
+        long restorationFeeMinorUnits,
+        Duration restorationCooldown,
         int destructionBasisPoints,
         Instant effectiveAt,
         String actorIdentity,
@@ -18,6 +20,7 @@ public record TerritoryMaintenancePolicyVersion(
     public TerritoryMaintenancePolicyVersion {
         if (policyId == null
                 || cycleDuration == null
+                || restorationCooldown == null
                 || effectiveAt == null
                 || actorIdentity == null
                 || reason == null
@@ -30,6 +33,9 @@ public record TerritoryMaintenancePolicyVersion(
                 || baseMaintenancePerChargeableClaimMinorUnits < 0L
                 || enclaveAndCrossDimensionMultiplierBasisPoints < 10_000
                 || forceLoadSurchargeMinorUnits < 0L
+                || restorationFeeMinorUnits < 0L
+                || restorationCooldown.isZero()
+                || restorationCooldown.isNegative()
                 || destructionBasisPoints < 3_000
                 || destructionBasisPoints > 8_000
                 || actorIdentity.isBlank()
@@ -39,6 +45,10 @@ public record TerritoryMaintenancePolicyVersion(
         if (cycleDuration.toMillis() <= 0L) {
             throw new IllegalArgumentException(
                     "Territory Maintenance cycle duration must be at least one millisecond");
+        }
+        if (restorationCooldown.toMillis() <= 0L) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance restoration cooldown must be at least one millisecond");
         }
     }
 }

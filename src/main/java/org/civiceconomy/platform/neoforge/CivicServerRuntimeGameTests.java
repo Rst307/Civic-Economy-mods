@@ -184,7 +184,7 @@ public final class CivicServerRuntimeGameTests {
                         + " " + pricingRequestId + " GameTest territory pricing");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
-                "civic economy admin territory maintenance schedule 604800000 75 15000 25 6000 "
+                "civic economy admin territory maintenance schedule 604800000 75 15000 25 30 1209600000 6000 "
                         + maintenanceEffectiveAt + " " + maintenanceRequestId
                         + " GameTest territory maintenance");
 
@@ -1423,7 +1423,9 @@ public final class CivicServerRuntimeGameTests {
                         SELECT actor_identity, cycle_duration_millis,
                                base_maintenance_per_chargeable_claim_minor_units,
                                enclave_cross_dimension_multiplier_basis_points,
-                               force_load_surcharge_minor_units, destruction_basis_points,
+                               force_load_surcharge_minor_units,
+                               restoration_fee_minor_units, restoration_cooldown_millis,
+                               destruction_basis_points,
                                effective_at_epoch_millis, reason
                         FROM territory_maintenance_policy
                         WHERE service_identity = 'civiceconomy-territory-maintenance-policy'
@@ -1439,11 +1441,13 @@ public final class CivicServerRuntimeGameTests {
                 helper.assertValueEqual(75L, result.getLong(3), "base maintenance per claim");
                 helper.assertValueEqual(15_000, result.getInt(4), "enclave multiplier");
                 helper.assertValueEqual(25L, result.getLong(5), "force-load surcharge");
-                helper.assertValueEqual(6_000, result.getInt(6), "destruction basis points");
+                helper.assertValueEqual(30L, result.getLong(6), "restoration fee");
+                helper.assertValueEqual(1_209_600_000L, result.getLong(7), "restoration cooldown");
+                helper.assertValueEqual(6_000, result.getInt(8), "destruction basis points");
                 helper.assertValueEqual(
-                        effectiveAtEpochMillis, result.getLong(7), "maintenance policy effective time");
+                        effectiveAtEpochMillis, result.getLong(9), "maintenance policy effective time");
                 helper.assertValueEqual(
-                        "GameTest territory maintenance", result.getString(8), "maintenance policy reason");
+                        "GameTest territory maintenance", result.getString(10), "maintenance policy reason");
                 helper.assertFalse(result.next(), "duplicate Territory Maintenance policy");
             }
         } catch (SQLException failure) {

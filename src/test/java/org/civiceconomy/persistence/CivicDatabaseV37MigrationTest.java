@@ -55,11 +55,13 @@ class CivicDatabaseV37MigrationTest {
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("DELETE FROM territory_maintenance_assessment_claim");
+            statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_fee_minor_units");
+            statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_cooldown_millis");
             statement.execute("PRAGMA user_version = 36");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(38, migrated.schemaVersion());
+            assertEquals(39, migrated.schemaVersion());
             var recovered = new TerritoryMaintenanceAssessmentProcessor(
                             new TerritoryMaintenanceRegistry(migrated))
                     .recover(service, "migration-cycle", "Migration assessment")
@@ -116,6 +118,8 @@ class CivicDatabaseV37MigrationTest {
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("DELETE FROM territory_maintenance_assessment_claim");
+            statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_fee_minor_units");
+            statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_cooldown_millis");
             statement.execute("PRAGMA user_version = 36");
         }
 

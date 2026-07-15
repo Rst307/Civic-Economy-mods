@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 38;
+    private static final int SCHEMA_VERSION = 39;
 
     private final Connection connection;
 
@@ -3183,6 +3183,8 @@ public final class CivicDatabase implements AutoCloseable {
             long baseMaintenancePerChargeableClaimMinorUnits,
             int enclaveAndCrossDimensionMultiplierBasisPoints,
             long forceLoadSurchargeMinorUnits,
+            long restorationFeeMinorUnits,
+            long restorationCooldownMillis,
             int destructionBasisPoints,
             long effectiveAtEpochMillis,
             String reason,
@@ -3193,9 +3195,11 @@ public final class CivicDatabase implements AutoCloseable {
                     cycle_duration_millis,
                     base_maintenance_per_chargeable_claim_minor_units,
                     enclave_cross_dimension_multiplier_basis_points,
-                    force_load_surcharge_minor_units, destruction_basis_points,
+                    force_load_surcharge_minor_units,
+                    restoration_fee_minor_units, restoration_cooldown_millis,
+                    destruction_basis_points,
                     effective_at_epoch_millis, reason, recorded_at_epoch_millis
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             insert.setString(1, policyId.toString());
             insert.setString(2, serviceIdentity);
@@ -3205,10 +3209,12 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setLong(6, baseMaintenancePerChargeableClaimMinorUnits);
             insert.setInt(7, enclaveAndCrossDimensionMultiplierBasisPoints);
             insert.setLong(8, forceLoadSurchargeMinorUnits);
-            insert.setInt(9, destructionBasisPoints);
-            insert.setLong(10, effectiveAtEpochMillis);
-            insert.setString(11, reason);
-            insert.setLong(12, recordedAtEpochMillis);
+            insert.setLong(9, restorationFeeMinorUnits);
+            insert.setLong(10, restorationCooldownMillis);
+            insert.setInt(11, destructionBasisPoints);
+            insert.setLong(12, effectiveAtEpochMillis);
+            insert.setString(13, reason);
+            insert.setLong(14, recordedAtEpochMillis);
             insert.executeUpdate();
             return territoryMaintenancePolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
@@ -6225,6 +6231,25 @@ public final class CivicDatabase implements AutoCloseable {
                 statement.execute("DROP TABLE territory_maintenance_settlement_v37");
                 statement.execute("PRAGMA user_version = 38");
             }
+            if (version < 39) {
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_policy
+                        ADD COLUMN restoration_fee_minor_units INTEGER NOT NULL DEFAULT 0
+                        CHECK (restoration_fee_minor_units >= 0)
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_policy
+                        ADD COLUMN restoration_cooldown_millis INTEGER NOT NULL DEFAULT 1
+                        CHECK (restoration_cooldown_millis > 0)
+                        """);
+                statement.execute("""
+                        UPDATE territory_maintenance_policy
+                        SET restoration_fee_minor_units =
+                                base_maintenance_per_chargeable_claim_minor_units,
+                            restoration_cooldown_millis = cycle_duration_millis
+                        """);
+                statement.execute("PRAGMA user_version = 39");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -6305,6 +6330,8 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getLong("base_maintenance_per_chargeable_claim_minor_units"),
                     result.getInt("enclave_cross_dimension_multiplier_basis_points"),
                     result.getLong("force_load_surcharge_minor_units"),
+                    result.getLong("restoration_fee_minor_units"),
+                    result.getLong("restoration_cooldown_millis"),
                     result.getInt("destruction_basis_points"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),

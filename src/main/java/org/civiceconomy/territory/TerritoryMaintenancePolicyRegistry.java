@@ -49,6 +49,8 @@ public final class TerritoryMaintenancePolicyRegistry {
                 request.baseMaintenancePerChargeableClaimMinorUnits(),
                 request.enclaveAndCrossDimensionMultiplierBasisPoints(),
                 request.forceLoadSurchargeMinorUnits(),
+                request.restorationFeeMinorUnits(),
+                request.restorationCooldown().toMillis(),
                 request.destructionBasisPoints(),
                 request.effectiveAt().toEpochMilli(),
                 request.reason(),
@@ -82,6 +84,9 @@ public final class TerritoryMaintenancePolicyRegistry {
                 || stored.enclaveAndCrossDimensionMultiplierBasisPoints()
                         != request.enclaveAndCrossDimensionMultiplierBasisPoints()
                 || stored.forceLoadSurchargeMinorUnits() != request.forceLoadSurchargeMinorUnits()
+                || stored.restorationFeeMinorUnits() != request.restorationFeeMinorUnits()
+                || stored.restorationCooldownMillis()
+                        != request.restorationCooldown().toMillis()
                 || stored.destructionBasisPoints() != request.destructionBasisPoints()
                 || stored.effectiveAtEpochMillis() != request.effectiveAt().toEpochMilli()
                 || !stored.reason().equals(request.reason())) {
@@ -98,6 +103,8 @@ public final class TerritoryMaintenancePolicyRegistry {
                 stored.baseMaintenancePerChargeableClaimMinorUnits(),
                 stored.enclaveAndCrossDimensionMultiplierBasisPoints(),
                 stored.forceLoadSurchargeMinorUnits(),
+                stored.restorationFeeMinorUnits(),
+                Duration.ofMillis(stored.restorationCooldownMillis()),
                 stored.destructionBasisPoints(),
                 Instant.ofEpochMilli(stored.effectiveAtEpochMillis()),
                 stored.actorIdentity(),

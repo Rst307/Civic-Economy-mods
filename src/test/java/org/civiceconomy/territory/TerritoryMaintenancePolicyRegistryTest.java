@@ -43,6 +43,8 @@ class TerritoryMaintenancePolicyRegistryTest {
             assertEquals(100L, current.baseMaintenancePerChargeableClaimMinorUnits());
             assertEquals(15_000, current.enclaveAndCrossDimensionMultiplierBasisPoints());
             assertEquals(25L, current.forceLoadSurchargeMinorUnits());
+            assertEquals(30L, current.restorationFeeMinorUnits());
+            assertEquals(Duration.ofDays(14), current.restorationCooldown());
             assertEquals(6_000, current.destructionBasisPoints());
         }
     }
@@ -63,6 +65,8 @@ class TerritoryMaintenancePolicyRegistryTest {
                             100L,
                             15_000,
                             25L,
+                            30L,
+                            Duration.ofDays(14),
                             6_000,
                             NOW,
                             "Immediate policy")));
@@ -76,6 +80,8 @@ class TerritoryMaintenancePolicyRegistryTest {
                             100L,
                             15_000,
                             25L,
+                            30L,
+                            Duration.ofDays(14),
                             6_000,
                             NOW.plusSeconds(1),
                             "Invalid duration"));
@@ -108,6 +114,8 @@ class TerritoryMaintenancePolicyRegistryTest {
                 baseMaintenance,
                 15_000,
                 25L,
+                30L,
+                Duration.ofDays(14),
                 6_000,
                 NOW.plusSeconds(60),
                 "Initial maintenance policy");

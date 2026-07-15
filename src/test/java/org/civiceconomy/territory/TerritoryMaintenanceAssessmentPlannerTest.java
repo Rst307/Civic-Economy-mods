@@ -72,6 +72,8 @@ class TerritoryMaintenanceAssessmentPlannerTest {
                 baseMaintenance,
                 15_000,
                 25L,
+                30L,
+                Duration.ofDays(14),
                 6_000,
                 Instant.EPOCH,
                 "console",

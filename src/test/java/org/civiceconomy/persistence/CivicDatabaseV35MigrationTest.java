@@ -32,6 +32,8 @@ class CivicDatabaseV35MigrationTest {
                     75L,
                     15_000,
                     25L,
+                    75L,
+                    604_800_000L,
                     6_000,
                     2_000L,
                     "Migration policy",
@@ -44,15 +46,25 @@ class CivicDatabaseV35MigrationTest {
                 var statement = connection.createStatement()) {
             statement.execute("DROP TABLE territory_maintenance_assessment_claim");
             statement.execute("DROP TABLE territory_maintenance_assessment_batch");
+            statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_fee_minor_units");
+            statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_cooldown_millis");
             statement.execute("PRAGMA user_version = 34");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(38, migrated.schemaVersion());
+            assertEquals(39, migrated.schemaVersion());
             assertEquals(
                     75L,
                     migrated.territoryMaintenancePolicy("migration", "maintenance-policy")
                             .baseMaintenancePerChargeableClaimMinorUnits());
+            assertEquals(
+                    75L,
+                    migrated.territoryMaintenancePolicy("migration", "maintenance-policy")
+                            .restorationFeeMinorUnits());
+            assertEquals(
+                    604_800_000L,
+                    migrated.territoryMaintenancePolicy("migration", "maintenance-policy")
+                            .restorationCooldownMillis());
             assertNotNull(migrated.registerTerritoryMaintenanceAssessmentBatch(
                     cycleId,
                     "migration",

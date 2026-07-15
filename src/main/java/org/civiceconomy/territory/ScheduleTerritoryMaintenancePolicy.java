@@ -12,11 +12,16 @@ public record ScheduleTerritoryMaintenancePolicy(
         long baseMaintenancePerChargeableClaimMinorUnits,
         int enclaveAndCrossDimensionMultiplierBasisPoints,
         long forceLoadSurchargeMinorUnits,
+        long restorationFeeMinorUnits,
+        Duration restorationCooldown,
         int destructionBasisPoints,
         Instant effectiveAt,
         String reason) {
     public ScheduleTerritoryMaintenancePolicy {
-        if (serviceIdentity == null || cycleDuration == null || effectiveAt == null) {
+        if (serviceIdentity == null
+                || cycleDuration == null
+                || restorationCooldown == null
+                || effectiveAt == null) {
             throw new IllegalArgumentException(
                     "Territory Maintenance policy request cannot contain null values");
         }
@@ -29,6 +34,9 @@ public record ScheduleTerritoryMaintenancePolicy(
                 || baseMaintenancePerChargeableClaimMinorUnits < 0L
                 || enclaveAndCrossDimensionMultiplierBasisPoints < 10_000
                 || forceLoadSurchargeMinorUnits < 0L
+                || restorationFeeMinorUnits < 0L
+                || restorationCooldown.isZero()
+                || restorationCooldown.isNegative()
                 || destructionBasisPoints < 3_000
                 || destructionBasisPoints > 8_000
                 || reason == null
@@ -38,6 +46,10 @@ public record ScheduleTerritoryMaintenancePolicy(
         if (cycleDuration.toMillis() <= 0L) {
             throw new IllegalArgumentException(
                     "Territory Maintenance cycle duration must be at least one millisecond");
+        }
+        if (restorationCooldown.toMillis() <= 0L) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance restoration cooldown must be at least one millisecond");
         }
     }
 }
