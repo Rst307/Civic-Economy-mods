@@ -4553,6 +4553,28 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredMintBatch> mintBatchesForActor(UUID actorPlayerId) {
+        if (actorPlayerId == null) {
+            throw new IllegalArgumentException("Mint Batch actor cannot be null");
+        }
+        List<StoredMintBatch> batches = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_batch
+                WHERE actor_player_id = ?
+                ORDER BY prepared_at_epoch_millis DESC, batch_id DESC
+                """)) {
+            query.setString(1, actorPlayerId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    batches.add(readMintBatch(result));
+                }
+            }
+            return List.copyOf(batches);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read actor Mint Batches", failure);
+        }
+    }
+
     public synchronized StoredMintIssuanceOperation prepareMintBatchIssuance(
             UUID operationId,
             UUID batchId,
@@ -4639,6 +4661,21 @@ public final class CivicDatabase implements AutoCloseable {
             return readMintIssuanceOperation(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Mint issuance operation", failure);
+        }
+    }
+
+    public synchronized StoredMintIssuanceOperation mintBatchIssuanceOperationByBatch(
+            UUID batchId) {
+        if (batchId == null) {
+            throw new IllegalArgumentException("Mint issuance Batch cannot be null");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_issuance_operation WHERE batch_id = ?
+                """)) {
+            query.setString(1, batchId.toString());
+            return readMintIssuanceOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint issuance by Batch", failure);
         }
     }
 

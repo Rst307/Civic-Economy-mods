@@ -149,6 +149,22 @@ class MintBatchPersistenceTest {
     }
 
     @Test
+    void actorStatusQueryReturnsOnlyThatPlayersBatches() {
+        try (CivicDatabase database = database()) {
+            setup(database);
+            database.prepareMintBatch(
+                    BATCH, "mint-controller", "actor-status", MINT, PERIOD, NATION, RECIPE,
+                    300L, materials(3L), ACTOR, "Actor status fixture", START + 1L);
+
+            assertEquals(List.of(BATCH), database.mintBatchesForActor(ACTOR).stream()
+                    .map(StoredMintBatch::batchId)
+                    .toList());
+            assertEquals(List.of(), database.mintBatchesForActor(UUID.randomUUID()));
+            assertNull(database.mintBatchIssuanceOperationByBatch(BATCH));
+        }
+    }
+
+    @Test
     void cancellationReleasesQuotaOnlyAfterHeldMaterialsAreReturned() {
         try (CivicDatabase database = database()) {
             setup(database);
@@ -210,6 +226,7 @@ class MintBatchPersistenceTest {
                     processing.processingCompletesAtEpochMillis());
             assertEquals("PREPARED", prepared.state());
             assertEquals(BATCH, prepared.batchId());
+            assertEquals(prepared, database.mintBatchIssuanceOperationByBatch(BATCH));
             assertEquals("nation:" + NATION + ":treasury", prepared.treasuryAccount());
             assertEquals(300L, prepared.amountMinorUnits());
             assertEquals("COMMITTING", database.mintBatch(BATCH).state());

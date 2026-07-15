@@ -59,9 +59,19 @@ public final class FiscalAdministrationCommands {
                 .then(revokeCommand())
                 .then(stateCommand("disable", FiscalServiceState.DISABLED))
                 .then(stateCommand("enable", FiscalServiceState.ENABLED));
+        var mint = Commands.literal("mint")
+                .then(Commands.literal("recovery")
+                        .executes(context -> triggerMintRecovery(context.getSource())))
+                .then(Commands.literal("status")
+                        .executes(context -> mintRecoveryStatus(context.getSource()))
+                        .then(Commands.argument("batchId", UuidArgument.uuid())
+                                .executes(context -> mintBatchStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(context, "batchId")))));
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service)
+                .then(mint)
                 .then(databaseBackupCommand())
                 .then(territoryPolicyCommand());
         var civic = Commands.literal("civic")
@@ -77,6 +87,47 @@ public final class FiscalAdministrationCommands {
             civic.then(CivicDebugWorldCommands.command(dedicatedStartupPermit));
         }
         event.getDispatcher().register(civic);
+    }
+
+    private static int triggerMintRecovery(CommandSourceStack source) {
+        try {
+            CivicServerRuntime.current().triggerMintRecovery();
+            source.sendSuccess(() -> Component.literal(
+                    "Mint recovery scan queued; pending operations remain server-authoritative"), true);
+        } catch (RuntimeException failure) {
+            source.sendFailure(Component.literal("Mint recovery rejected: " + failure.getMessage()));
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int mintRecoveryStatus(CommandSourceStack source) {
+        CivicServerRuntime.current().pendingMintRecoveryCount()
+                .whenComplete((count, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        source.sendFailure(Component.literal(
+                                "Mint recovery status failed: " + failure.getMessage()));
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                "Pending Mint recovery operations: " + count), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Mint recovery status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int mintBatchStatus(CommandSourceStack source, UUID batchId) {
+        CivicServerRuntime.current().mintBatchStatus(batchId)
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        source.sendFailure(Component.literal(
+                                "Mint Batch status failed: " + failure.getMessage()));
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                NationApplicationCommands.formatMintStatus(status)), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Mint Batch status queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>

@@ -90,6 +90,40 @@ final class NationApplicationCommands {
                         .executes(context -> activate(context.getSource())));
     }
 
+    private static int mintStatus(CommandSourceStack source, UUID batchId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .mintBatchStatusForActor(player.getUUID(), batchId)
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Mint Batch status", failure);
+                        return;
+                    }
+                    source.sendSuccess(
+                            () -> Component.literal(formatMintStatus(status)), false);
+                }));
+        source.sendSuccess(() -> Component.literal("Mint Batch status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    static String formatMintStatus(MintBatchStatus status) {
+        var batch = status.batch();
+        var issuance = status.issuance();
+        return "Mint Batch status: batch=" + batch.batchId()
+                + " state=" + batch.state()
+                + " custody=" + batch.custodyState()
+                + " amount=" + batch.issuedMinorUnits()
+                + " preparedAt=" + batch.preparedAtEpochMillis()
+                + " completesAt=" + batch.processingCompletesAtEpochMillis()
+                + " reason=" + batch.reason()
+                + " issuanceState=" + (issuance == null ? "NOT_PREPARED" : issuance.state())
+                + " externalReference="
+                + (issuance == null ? null : issuance.externalReference())
+                + " materialReference="
+                + (issuance == null ? null : issuance.materialConsumptionReference());
+    }
+
     private static LiteralArgumentBuilder<CommandSourceStack> mintCommand() {
         return Commands.literal("mint")
                 .then(Commands.literal("start")
@@ -110,6 +144,12 @@ final class NationApplicationCommands {
                                                                 LongArgumentType.getLong(
                                                                         context,
                                                                         "amountMinorUnits"))))))))
+                .then(Commands.literal("status")
+                        .executes(context -> mintStatus(context.getSource(), null))
+                        .then(Commands.argument("batchId", UuidArgument.uuid())
+                                .executes(context -> mintStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(context, "batchId")))))
                 .then(Commands.literal("cancel")
                         .then(Commands.argument("batchId", UuidArgument.uuid())
                                 .then(Commands.argument("requestId", StringArgumentType.word())

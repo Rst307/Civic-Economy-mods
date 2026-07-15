@@ -477,6 +477,49 @@ public final class CivicServerRuntime {
         return result;
     }
 
+    CompletableFuture<MintBatchStatus> mintBatchStatusForActor(
+            UUID actorPlayerId, UUID requestedBatchId) {
+        return submitDatabase(database -> {
+            var batch = database.mintBatchesForActor(actorPlayerId).stream()
+                    .filter(candidate -> requestedBatchId == null
+                            || candidate.batchId().equals(requestedBatchId))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            requestedBatchId == null
+                                    ? "No Mint Batches are recorded for your player identity"
+                                    : "Unknown Mint Batch for your player identity"));
+            return new MintBatchStatus(
+                    batch,
+                    database.mintBatchIssuanceOperationByBatch(batch.batchId()));
+        });
+    }
+
+    CompletableFuture<MintBatchStatus> mintBatchStatus(UUID batchId) {
+        return submitDatabase(database -> {
+            var batch = database.mintBatch(batchId);
+            if (batch == null) {
+                throw new IllegalArgumentException("Unknown Mint Batch " + batchId);
+            }
+            return new MintBatchStatus(
+                    batch,
+                    database.mintBatchIssuanceOperationByBatch(batch.batchId()));
+        });
+    }
+
+    CompletableFuture<Integer> pendingMintRecoveryCount() {
+        return submitDatabase(database ->
+                database.recoverableMintBatches().size()
+                        + database.recoverableMintIssuanceOperations().size());
+    }
+
+    void triggerMintRecovery() {
+        RuntimeState current = state;
+        if (current == null) {
+            throw new IllegalStateException("Civic server runtime is not active");
+        }
+        scheduleMintBatchRecovery(current);
+    }
+
     private CompletableFuture<MintBatch> startNewMintBatch(
             RuntimeState current,
             ServerPlayer actor,

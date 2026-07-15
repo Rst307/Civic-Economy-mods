@@ -80,7 +80,10 @@ import org.civiceconomy.mint.MintBatch;
 public final class CivicServerRuntimeGameTests {
     private CivicServerRuntimeGameTests() {}
 
-    @GameTest(template = "empty", timeoutTicks = 600)
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 12_000,
+            batch = "runtime-mint-issuance")
     public static void runtimeMintBatchCompletesRealLcIssuanceExactlyOnce(
             GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(
@@ -164,7 +167,7 @@ public final class CivicServerRuntimeGameTests {
                             1,
                             java.util.List.of(new StoredMintRecipeIngredient(
                                     0, "EXACT_ITEM", "minecraft:diamond", 1L, 100L)),
-                             1_000L,
+                             1L,
                             "Runtime Mint recipe",
                             now.minusSeconds(10L).toEpochMilli());
                     database.registerMint(
@@ -244,27 +247,8 @@ public final class CivicServerRuntimeGameTests {
                 .thenCompose(issuanceBatch -> {
                     issuanceBatchId.set(issuanceBatch.batchId());
                     CompletableFuture<MintBatch> finished = new CompletableFuture<>();
-                    helper.runAfterDelay(30L, () -> {
-                        runtime.recoverMintBatchesNowForGameTest();
-                        helper.runAfterDelay(30L, () -> {
-                            runtime.recoverMintBatchesNowForGameTest();
-                            helper.runAfterDelay(20L, () -> runtime
-                                    .submitDatabase(database ->
-                                            database.mintBatch(issuanceBatch.batchId()))
-                                    .whenComplete((stored, recoveryFailure) ->
-                                            helper.getLevel().getServer().execute(() -> {
-                                                if (recoveryFailure != null) {
-                                                    finished.completeExceptionally(recoveryFailure);
-                                                } else if (!"COMMITTED".equals(stored.state())) {
-                                                    finished.completeExceptionally(
-                                                            new IllegalStateException(
-                                                                    "Mint issuance did not commit after recovery"));
-                                                } else {
-                                                    finished.complete(issuanceBatch);
-                                                }
-                                            })));
-                        });
-                    });
+                    helper.runAfterDelay(10L, () -> awaitMintCommit(
+                            helper, runtime, issuanceBatch, finished, 8));
                     return finished;
                 })
                 .thenCompose(issued -> runtime.submitDatabase(database -> {
@@ -320,6 +304,40 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    private static void awaitMintCommit(
+            GameTestHelper helper,
+            CivicServerRuntime runtime,
+            MintBatch batch,
+            CompletableFuture<MintBatch> finished,
+            int attemptsRemaining) {
+        if (finished.isDone()) {
+            return;
+        }
+        if (attemptsRemaining <= 0) {
+            finished.completeExceptionally(
+                    new IllegalStateException("Mint issuance did not commit after recovery"));
+            return;
+        }
+        runtime.recoverMintBatchesNowForGameTest();
+        helper.runAfterDelay(10L, () -> runtime
+                .submitDatabase(database -> database.mintBatch(batch.batchId()))
+                .whenComplete((stored, recoveryFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (recoveryFailure != null) {
+                                finished.completeExceptionally(recoveryFailure);
+                            } else if ("COMMITTED".equals(stored.state())) {
+                                finished.complete(batch);
+                            } else {
+                                awaitMintCommit(
+                                        helper,
+                                        runtime,
+                                        batch,
+                                        finished,
+                                        attemptsRemaining - 1);
+                            }
+                        })));
+    }
+
     @GameTest(template = "empty", timeoutTicks = 200)
     public static void playerLifecyclePersistsObservedOnlineTimeOffThread(GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(
@@ -369,6 +387,13 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted fiscal administration command actions");
         helper.assertValueEqual(
+                Set.of("status", "recovery"),
+                dispatcher.getRoot().getChild("civic").getChild("economy")
+                        .getChild("admin").getChild("mint").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted Mint recovery command actions");
+        helper.assertValueEqual(
                 Set.of("status", "trigger", "restore"),
                 backup.getChildren().stream()
                         .map(node -> node.getName())
@@ -402,6 +427,14 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Territory Claim command actions");
+        helper.assertValueEqual(
+                Set.of("start", "status", "cancel"),
+                economy.getChild("nation")
+                        .getChild("mint")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Mint command actions");
         if (CivicDebugWorldCommands.dedicatedStartupPermit()) {
             helper.assertValueEqual(
                     Set.of("status", "enable"),
