@@ -68,11 +68,12 @@ class CivicDatabaseV32MigrationTest {
                         UNIQUE (cycle_id, nation_id)
                     )
                     """);
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 31");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             assertEquals(
                     "ORDINARY",
                     migrated.territoryFiscalAssessment("migration", "assessment").priority());

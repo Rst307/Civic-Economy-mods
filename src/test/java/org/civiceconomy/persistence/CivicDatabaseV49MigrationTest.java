@@ -35,18 +35,19 @@ class CivicDatabaseV49MigrationTest {
                     mintId, "mint", "register", nationId, "minecraft:overworld",
                     1, 64, 2, UUID.randomUUID(), UUID.randomUUID(), false,
                     recipeId, UUID.randomUUID(), "Mint", now);
-            assertEquals(52, database.schemaVersion());
+            assertEquals(53, database.schemaVersion());
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("DROP TABLE mint_batch_material");
             statement.execute("DROP TABLE mint_batch");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 48");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             assertNotNull(migrated.registeredMint(mintId));
             try (var connection = DriverManager.getConnection(
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());

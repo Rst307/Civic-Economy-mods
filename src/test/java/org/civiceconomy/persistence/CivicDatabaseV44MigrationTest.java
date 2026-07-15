@@ -21,18 +21,19 @@ class CivicDatabaseV44MigrationTest {
                 "2101.1.10",
                 "2101.1.20");
         try (CivicDatabase ignored = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, ignored.schemaVersion());
+            assertEquals(53, ignored.schemaVersion());
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute(
                     "DROP TABLE territory_maintenance_restoration_credit_application");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 43");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             try (var connection = DriverManager.getConnection(
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                     var statement = connection.createStatement();

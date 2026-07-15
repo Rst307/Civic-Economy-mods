@@ -28,6 +28,7 @@ import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
@@ -67,7 +68,8 @@ public final class FiscalAdministrationCommands {
                         .then(Commands.argument("batchId", UuidArgument.uuid())
                                 .executes(context -> mintBatchStatus(
                                         context.getSource(),
-                                        UuidArgument.getUuid(context, "batchId")))));
+                                        UuidArgument.getUuid(context, "batchId")))))
+                .then(monetaryStockCorrectionCommand());
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service)
@@ -128,6 +130,102 @@ public final class FiscalAdministrationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Mint Batch status queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            monetaryStockCorrectionCommand() {
+        return Commands.literal("correction")
+                .then(Commands.literal("apply")
+                        .then(Commands.argument("incidentId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "evidenceReference",
+                                                        StringArgumentType.string())
+                                                .then(Commands.argument(
+                                                                "reason",
+                                                                StringArgumentType.greedyString())
+                                                        .executes(context -> correctMonetaryStock(
+                                                                context.getSource(),
+                                                                UuidArgument.getUuid(
+                                                                        context, "incidentId"),
+                                                                StringArgumentType.getString(
+                                                                        context, "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context, "evidenceReference"),
+                                                                StringArgumentType.getString(
+                                                                        context, "reason"))))))))
+                .then(Commands.literal("status")
+                        .then(Commands.argument("incidentId", UuidArgument.uuid())
+                                .executes(context -> monetaryStockCorrectionStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(context, "incidentId")))));
+    }
+
+    private static int correctMonetaryStock(
+            CommandSourceStack source,
+            UUID incidentId,
+            String requestId,
+            String evidenceReference,
+            String reason) {
+        CivicServerRuntime.current()
+                .correctMonetaryStock(
+                        administrator(source).value(),
+                        requestId,
+                        incidentId,
+                        evidenceReference,
+                        reason)
+                .whenComplete((correction, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        Throwable cause = failure instanceof CompletionException
+                                && failure.getCause() != null
+                                ? failure.getCause()
+                                : failure;
+                        source.sendFailure(Component.literal(
+                                "Monetary Stock Correction rejected: " + cause.getMessage()));
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatMonetaryStockCorrection(correction)), true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Monetary Stock Correction queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int monetaryStockCorrectionStatus(
+            CommandSourceStack source, UUID incidentId) {
+        CivicServerRuntime.current()
+                .monetaryStockCorrection(incidentId)
+                .whenComplete((correction, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        Throwable cause = failure instanceof CompletionException
+                                && failure.getCause() != null
+                                ? failure.getCause()
+                                : failure;
+                        source.sendFailure(Component.literal(
+                                "Monetary Stock Correction status failed: "
+                                        + cause.getMessage()));
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatMonetaryStockCorrection(correction)), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Monetary Stock Correction status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    static String formatMonetaryStockCorrection(MonetaryStockCorrection correction) {
+        return "Monetary Stock Correction " + correction.correctionId()
+                + " incident=" + correction.incidentId()
+                + " operation=" + correction.operationId()
+                + " batch=" + correction.batchId()
+                + " amountMinorUnits=" + correction.amount().minorUnits()
+                + " event=" + correction.event().eventId()
+                + " administrator=" + correction.administratorIdentity()
+                + " evidence=" + correction.evidenceReference()
+                + " correctedAt=" + correction.correctedAt()
+                + "; Mint Batch, materials, and quota remain quarantined";
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>

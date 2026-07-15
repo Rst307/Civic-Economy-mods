@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 52;
+    private static final int SCHEMA_VERSION = 53;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4684,6 +4684,10 @@ public final class CivicDatabase implements AutoCloseable {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM mint_issuance_operation
                 WHERE state != 'COMMITTED'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM monetary_stock_correction
+                      WHERE monetary_stock_correction.operation_id = mint_issuance_operation.operation_id
+                  )
                 ORDER BY prepared_at_epoch_millis, operation_id
                 """)) {
             try (ResultSet result = query.executeQuery()) {
@@ -5064,6 +5068,20 @@ public final class CivicDatabase implements AutoCloseable {
             return readMintRecoveryIncident(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read latest Mint Recovery Incident", failure);
+        }
+    }
+
+    public synchronized StoredMintRecoveryIncident mintRecoveryIncident(UUID incidentId) {
+        if (incidentId == null) {
+            throw new IllegalArgumentException("Mint Recovery Incident ID cannot be null");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_recovery_incident WHERE incident_id = ?
+                """)) {
+            query.setString(1, incidentId.toString());
+            return readMintRecoveryIncident(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Recovery Incident", failure);
         }
     }
 
@@ -5703,6 +5721,10 @@ public final class CivicDatabase implements AutoCloseable {
             String reason,
             long confirmedAtEpochMillis,
             long hardCapMinorUnits) {
+        if (!"ISSUANCE".equals(changeKind) && !"PERMANENT_DESTRUCTION".equals(changeKind)) {
+            throw new IllegalArgumentException(
+                    "Normal Monetary Supply changes cannot perform Stock Correction");
+        }
         StoredMonetarySupplyEvent replay = monetarySupplyEvent(serviceIdentity, requestId);
         if (replay != null) {
             return replay;
@@ -5773,6 +5795,175 @@ public final class CivicDatabase implements AutoCloseable {
                             "Unable to restore Monetary Supply transaction mode", failure);
                 }
             }
+        }
+    }
+
+    public synchronized StoredMonetaryStockCorrection monetaryStockCorrection(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM monetary_stock_correction
+                WHERE administrator_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            return readMonetaryStockCorrection(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Monetary Stock Correction", failure);
+        }
+    }
+
+    public synchronized StoredMonetaryStockCorrection monetaryStockCorrection(UUID incidentId) {
+        if (incidentId == null) {
+            throw new IllegalArgumentException("Mint Recovery Incident ID cannot be null");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM monetary_stock_correction
+                WHERE incident_id = ?
+                """)) {
+            query.setString(1, incidentId.toString());
+            return readMonetaryStockCorrection(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Monetary Stock Correction", failure);
+        }
+    }
+
+    public synchronized StoredMonetaryStockCorrection commitMintMonetaryStockCorrection(
+            UUID correctionId,
+            String administratorIdentity,
+            String requestId,
+            UUID incidentId,
+            String evidenceReference,
+            String reason,
+            long correctedAtEpochMillis) {
+        if (correctionId == null
+                || administratorIdentity == null
+                || administratorIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || incidentId == null
+                || evidenceReference == null
+                || evidenceReference.isBlank()
+                || reason == null
+                || reason.isBlank()
+                || correctedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Monetary Stock Correction values are invalid");
+        }
+        StoredMonetaryStockCorrection replay = monetaryStockCorrection(
+                administratorIdentity, requestId);
+        if (replay != null) {
+            if (!replay.incidentId().equals(incidentId)
+                    || !replay.evidenceReference().equals(evidenceReference)
+                    || !replay.reason().equals(reason)) {
+                throw new org.civiceconomy.fiscal.IdempotencyConflictException(
+                        new org.civiceconomy.fiscal.ServiceIdentity(administratorIdentity),
+                        requestId);
+            }
+            return replay;
+        }
+        if (monetarySupplyEvent(administratorIdentity, requestId) != null) {
+            throw new org.civiceconomy.fiscal.IdempotencyConflictException(
+                    new org.civiceconomy.fiscal.ServiceIdentity(administratorIdentity), requestId);
+        }
+        StoredMintRecoveryIncident incident = mintRecoveryIncident(incidentId);
+        if (incident == null
+                || !"OPEN".equals(incident.state())
+                || !"TREASURY_CREDIT".equals(incident.step())) {
+            throw new IllegalStateException(
+                    "Monetary Stock Correction requires one OPEN TREASURY_CREDIT "
+                            + "Mint Recovery Incident");
+        }
+        StoredMintIssuanceOperation operation = mintBatchIssuanceOperation(incident.operationId());
+        StoredMintBatch batch = operation == null ? null : mintBatch(operation.batchId());
+        StoredIssuanceQuotaPeriod period = batch == null ? null : issuanceQuotaPeriod(batch.periodId());
+        if (operation == null
+                || batch == null
+                || period == null
+                || !operation.batchId().equals(incident.batchId())
+                || "COMMITTED".equals(operation.state())) {
+            throw new IllegalStateException(
+                    "Mint Recovery Incident cannot support Monetary Stock Correction");
+        }
+        long nextSupply = Math.addExact(
+                cumulativeNetIssuanceMinorUnits(), operation.amountMinorUnits());
+        if (nextSupply > period.hardCapMinorUnits()) {
+            throw new org.civiceconomy.monetary.IssuanceHardCapExceededException();
+        }
+        UUID eventId = UUID.randomUUID();
+        String externalReference = "mint-recovery-incident:" + incidentId;
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertEvent = connection.prepareStatement("""
+                        INSERT INTO monetary_supply_event (
+                            event_id, service_identity, request_id, change_kind,
+                            amount_minor_units, external_reference, reason,
+                            confirmed_at_epoch_millis
+                        ) VALUES (?, ?, ?, 'STOCK_CORRECTION_INCREASE', ?, ?, ?, ?)
+                        """);
+                    PreparedStatement updateSummary = connection.prepareStatement("""
+                        UPDATE monetary_supply_summary
+                        SET cumulative_net_issuance_minor_units = ? WHERE singleton = 1
+                        """);
+                    PreparedStatement resolveIncident = connection.prepareStatement("""
+                        UPDATE mint_recovery_incident
+                        SET state = 'RESOLVED', resolution_kind = 'STOCK_CORRECTION',
+                            resolution_detail = ?, resolved_at_epoch_millis = ?
+                        WHERE incident_id = ? AND state = 'OPEN'
+                        """);
+                    PreparedStatement insertCorrection = connection.prepareStatement("""
+                        INSERT INTO monetary_stock_correction (
+                            correction_id, administrator_identity, request_id,
+                            incident_id, operation_id, batch_id, amount_minor_units,
+                            evidence_reference, reason, event_id, corrected_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """)) {
+                insertEvent.setString(1, eventId.toString());
+                insertEvent.setString(2, administratorIdentity);
+                insertEvent.setString(3, requestId);
+                insertEvent.setLong(4, operation.amountMinorUnits());
+                insertEvent.setString(5, externalReference);
+                insertEvent.setString(6, reason);
+                insertEvent.setLong(7, correctedAtEpochMillis);
+                insertEvent.executeUpdate();
+                updateSummary.setLong(1, nextSupply);
+                if (updateSummary.executeUpdate() != 1) {
+                    throw new IllegalStateException("Monetary Supply summary is missing");
+                }
+                resolveIncident.setString(1, correctionId.toString());
+                resolveIncident.setLong(2, correctedAtEpochMillis);
+                resolveIncident.setString(3, incidentId.toString());
+                if (resolveIncident.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Mint Recovery Incident changed before Stock Correction");
+                }
+                insertCorrection.setString(1, correctionId.toString());
+                insertCorrection.setString(2, administratorIdentity);
+                insertCorrection.setString(3, requestId);
+                insertCorrection.setString(4, incidentId.toString());
+                insertCorrection.setString(5, operation.operationId().toString());
+                insertCorrection.setString(6, operation.batchId().toString());
+                insertCorrection.setLong(7, operation.amountMinorUnits());
+                insertCorrection.setString(8, evidenceReference);
+                insertCorrection.setString(9, reason);
+                insertCorrection.setString(10, eventId.toString());
+                insertCorrection.setLong(11, correctedAtEpochMillis);
+                insertCorrection.executeUpdate();
+                connection.commit();
+                return monetaryStockCorrection(administratorIdentity, requestId);
+            }
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException("Unable to commit Monetary Stock Correction", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Monetary Stock Correction", primaryFailure);
         }
     }
 
@@ -10279,6 +10470,64 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 52");
             }
+            if (version < 53) {
+                statement.execute("ALTER TABLE monetary_supply_event RENAME TO monetary_supply_event_v52");
+                statement.execute("""
+                        CREATE TABLE monetary_supply_event (
+                            event_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            change_kind TEXT NOT NULL CHECK (change_kind IN (
+                                'ISSUANCE', 'PERMANENT_DESTRUCTION',
+                                'STOCK_CORRECTION_INCREASE'
+                            )),
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            external_reference TEXT NOT NULL
+                                CHECK (length(trim(external_reference)) > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            confirmed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (confirmed_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (change_kind, external_reference)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO monetary_supply_event (
+                            event_id, service_identity, request_id, change_kind,
+                            amount_minor_units, external_reference, reason,
+                            confirmed_at_epoch_millis
+                        )
+                        SELECT event_id, service_identity, request_id, change_kind,
+                               amount_minor_units, external_reference, reason,
+                               confirmed_at_epoch_millis
+                        FROM monetary_supply_event_v52
+                        """);
+                statement.execute("DROP TABLE monetary_supply_event_v52");
+                statement.execute("""
+                        CREATE TABLE monetary_stock_correction (
+                            correction_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL
+                                CHECK (length(trim(administrator_identity)) > 0),
+                            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+                            incident_id TEXT NOT NULL UNIQUE
+                                REFERENCES mint_recovery_incident(incident_id),
+                            operation_id TEXT NOT NULL UNIQUE
+                                REFERENCES mint_issuance_operation(operation_id),
+                            batch_id TEXT NOT NULL UNIQUE REFERENCES mint_batch(batch_id),
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            evidence_reference TEXT NOT NULL
+                                CHECK (length(trim(evidence_reference)) > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            event_id TEXT NOT NULL UNIQUE REFERENCES monetary_supply_event(event_id),
+                            corrected_at_epoch_millis INTEGER NOT NULL
+                                CHECK (corrected_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 53");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11589,6 +11838,27 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("resolution_kind"),
                     result.getString("resolution_detail"),
                     optionalLong(result, "resolved_at_epoch_millis"));
+        }
+    }
+
+    private static StoredMonetaryStockCorrection readMonetaryStockCorrection(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredMonetaryStockCorrection(
+                    UUID.fromString(result.getString("correction_id")),
+                    result.getString("administrator_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("incident_id")),
+                    UUID.fromString(result.getString("operation_id")),
+                    UUID.fromString(result.getString("batch_id")),
+                    result.getLong("amount_minor_units"),
+                    result.getString("evidence_reference"),
+                    result.getString("reason"),
+                    UUID.fromString(result.getString("event_id")),
+                    result.getLong("corrected_at_epoch_millis"));
         }
     }
 

@@ -60,11 +60,12 @@ class CivicDatabaseV30MigrationTest {
             statement.execute("DROP TABLE territory_maintenance_settlement_assessment");
             statement.execute("DROP TABLE territory_maintenance_settlement");
             statement.execute("DROP TABLE permanent_destruction_operation");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 29");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             assertNotNull(migrated.fiscalCapabilityGrant(grantId));
             assertNotNull(migrated.fiscalCapabilityRevocation(grantId));
             assertNotNull(migrated.grantFiscalCapability(

@@ -87,7 +87,7 @@ class CivicDatabaseV33MigrationTest {
         downgradeSettlementTablesToV32(databaseFile);
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             StoredTerritoryMaintenanceSettlement funded =
                     migrated.territoryMaintenanceSettlement("migration", "funded-settlement");
             assertEquals("FULLY_FUNDED", funded.outcome());
@@ -143,6 +143,7 @@ class CivicDatabaseV33MigrationTest {
                     FROM settlement_v33
                     """);
             statement.execute("DROP TABLE settlement_v33");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 32");
         }
     }

@@ -70,6 +70,17 @@ class MonetarySupplyLedgerTest {
         }
     }
 
+    @Test
+    void normalSupplyRequestsCannotInvokeStockCorrection() {
+        assertThrows(IllegalArgumentException.class, () -> new ConfirmMonetarySupplyChange(
+                SERVICE,
+                "forged-correction",
+                MonetarySupplyChange.STOCK_CORRECTION_INCREASE,
+                1L,
+                "forged:correction",
+                "Normal callers cannot correct stock"));
+    }
+
     private MonetarySupplyLedger ledger(CivicDatabase database, long hardCap) {
         return new MonetarySupplyLedger(
                 database, MoneyAmount.ofMinorUnits(hardCap), Clock.fixed(NOW, ZoneOffset.UTC));

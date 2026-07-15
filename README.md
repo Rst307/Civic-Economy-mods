@@ -144,6 +144,8 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin service enable ...
 /civic economy admin mint status [batchId]
 /civic economy admin mint recovery
+/civic economy admin mint correction apply <incidentId> <requestId> <evidenceReference> <reason>
+/civic economy admin mint correction status <incidentId>
 /civic economy admin backup status
 /civic economy admin backup trigger <requestId> <reason>
 /civic economy admin backup restore status
@@ -160,6 +162,8 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 数据库备份和恢复命令只允许 OP/控制台使用。服务器启动时会恢复未完成的备份操作并创建在线快照，此后每 30 分钟以及正常关服前各排队一次；所有在线 SQLite 和文件工作都在 `Civic-Economy-SQLite` 执行。快照写入 `<world>/civiceconomy/backups`，验证世界/依赖身份和当前 schema 后才原子发布，保留最新 8 份；操作状态、失败、SHA-256、大小和轮换均持久化审计。`trigger` 的管理员身份来自真实命令源，同一管理员的 `requestId` 可安全重放，不能更改理由。
 
 `backup restore stage` 只暂存一份仍为 `COMMITTED` 的精确备份，并将它固定在轮换范围之外；它绝不在线替换正在使用的数据库。恢复只在下一次服务器启动、权威 SQLite 尚未打开时执行：重新验证来源后先创建当前数据库的回滚快照，再通过带持久化激活标记的候选库完成原子切换；`cancel` 只取消尚未启动激活的 `STAGED` 请求。SQLite 快照不是完整世界备份：LC 财政账户和交易标记位于世界 `SavedData`，因此生产恢复必须同时使用刻意匹配的完整世界备份，不能把单独回滚 Civic SQLite 当成跨存储事务。
+
+`admin mint correction apply` 只接受一个 `OPEN TREASURY_CREDIT` Mint Recovery Incident、稳定 request ID、独立证据引用和理由；管理员身份从真实 OP/控制台命令源派生。金额、Batch、operation、Nation、账户和方向全部由持久化 Incident 与 Mint Issuance Operation 推导，命令不接受这些值。校正按该发行周期已持久化的硬上限执行，只增加缺失的累计净发行记录并把 Incident 解决为 `STOCK_CORRECTION`；它不移动 LC、不释放额度、不恢复 Registered Mint、不完成 Batch，材料与额度继续隔离。证据引用包含空格或冒号时应使用引号；`status` 按 Incident UUID 返回不可变校正结果。
 
 领土政策命令仅允许 OP/控制台。免费额度与凸性扩张定价都必须安排在未来时刻生效，并持久化操作者、稳定 request ID、参数、理由和生效时间；在管理员安排首个版本前，两者均使用保守的零值默认，因此不会自动产生收费或免费扩张权。
 

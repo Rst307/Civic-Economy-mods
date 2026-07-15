@@ -68,11 +68,12 @@ class CivicDatabaseV50MigrationTest {
             statement.execute("ALTER TABLE mint_batch DROP COLUMN return_request_id");
             statement.execute("ALTER TABLE mint_batch DROP COLUMN return_external_reference");
             statement.execute("ALTER TABLE mint_batch DROP COLUMN cancelled_at_epoch_millis");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 49");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             StoredMintBatch batch = migrated.mintBatch(batchId);
             assertEquals("PREPARING", batch.state());
             assertEquals("EXTERNAL_PENDING", batch.custodyState());

@@ -59,11 +59,12 @@ class CivicDatabaseV40MigrationTest {
             statement.execute("DROP TABLE territory_force_load_enforcement");
             dropRestorationColumns(statement, "territory_maintenance_assessment_claim");
             dropRestorationColumns(statement, "territory_fiscal_assessment");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 39");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             var recovered = new TerritoryMaintenanceAssessmentProcessor(
                             new TerritoryMaintenanceRegistry(migrated))
                     .recover(service, "migration-v40-cycle", "Migration assessment")

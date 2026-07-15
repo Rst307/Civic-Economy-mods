@@ -81,11 +81,12 @@ class CivicDatabaseV42MigrationTest {
                     ALTER TABLE territory_force_load_enforcement
                     DROP COLUMN not_before_epoch_millis
                     """);
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 41");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             TerritoryForceLoadEnforcementRegistry registry =
                     new TerritoryForceLoadEnforcementRegistry(
                             migrated,

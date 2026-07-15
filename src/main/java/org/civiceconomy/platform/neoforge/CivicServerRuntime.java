@@ -110,6 +110,9 @@ import org.civiceconomy.mint.PendingMintMaterialReturn;
 import org.civiceconomy.mint.PendingMintMaterialTake;
 import org.civiceconomy.mint.PendingMintIssuanceStep;
 import org.civiceconomy.mint.PrepareMintBatch;
+import org.civiceconomy.monetary.CorrectMonetaryStock;
+import org.civiceconomy.monetary.MonetaryStockCorrection;
+import org.civiceconomy.monetary.MonetaryStockCorrectionRegistry;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.FtbTeamsNationProvider;
@@ -422,6 +425,27 @@ public final class CivicServerRuntime {
 
     CompletableFuture<List<StoredDatabaseRestoreOperation>> databaseRestores() {
         return submitDatabase(CivicDatabase::databaseRestoreOperations);
+    }
+
+    CompletableFuture<MonetaryStockCorrection> correctMonetaryStock(
+            String administratorIdentity,
+            String requestId,
+            UUID incidentId,
+            String evidenceReference,
+            String reason) {
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return submitDatabase(database -> new MonetaryStockCorrectionRegistry(database, commandClock)
+                .correct(new CorrectMonetaryStock(
+                        administratorIdentity,
+                        requestId,
+                        incidentId,
+                        evidenceReference,
+                        reason)));
+    }
+
+    CompletableFuture<MonetaryStockCorrection> monetaryStockCorrection(UUID incidentId) {
+        return submitDatabase(database ->
+                new MonetaryStockCorrectionRegistry(database, clock).correction(incidentId));
     }
 
     CompletableFuture<MintBatch> startMintBatch(

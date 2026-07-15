@@ -43,11 +43,12 @@ class CivicDatabaseV31MigrationTest {
             statement.execute("DROP TABLE territory_maintenance_assessment_batch");
             statement.execute("DROP TABLE territory_maintenance_settlement_assessment");
             statement.execute("DROP TABLE territory_maintenance_settlement");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 30");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             assertEquals(
                     "EFFECTIVE",
                     migrated.territoryFiscalAssessment("migration", "legacy-assessment").validity());

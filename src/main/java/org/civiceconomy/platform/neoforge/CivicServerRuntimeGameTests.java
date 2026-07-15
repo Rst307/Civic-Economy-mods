@@ -72,6 +72,7 @@ import org.civiceconomy.territory.TerritoryClaimPosition;
 import org.civiceconomy.territory.TerritoryMaintenancePriority;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.persistence.StoredMintRecipeIngredient;
+import org.civiceconomy.persistence.StoredMintMaterialStack;
 import org.civiceconomy.persistence.StoredNationalIssuanceQuotaAllocation;
 import org.civiceconomy.mint.MintBatch;
 
@@ -461,12 +462,20 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted fiscal administration command actions");
         helper.assertValueEqual(
-                Set.of("status", "recovery"),
+                Set.of("status", "recovery", "correction"),
                 dispatcher.getRoot().getChild("civic").getChild("economy")
                         .getChild("admin").getChild("mint").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "trusted Mint recovery command actions");
+        helper.assertValueEqual(
+                Set.of("apply", "status"),
+                dispatcher.getRoot().getChild("civic").getChild("economy")
+                        .getChild("admin").getChild("mint").getChild("correction")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted Monetary Stock Correction command actions");
         helper.assertValueEqual(
                 Set.of("status", "trigger", "restore"),
                 backup.getChildren().stream()
@@ -544,6 +553,66 @@ public final class CivicServerRuntimeGameTests {
                 serviceIdentity,
                 "civiceconomy",
                 requestId));
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 300)
+    public static void consoleAppliesAuditedMonetaryStockCorrectionOffThread(
+            GameTestHelper helper) {
+        String requestId = "stock-correction-command-" + UUID.randomUUID();
+        String evidenceReference = "incident-ticket:CE-GT-" + UUID.randomUUID();
+        String reason = "Independent LC Treasury evidence confirms untracked issuance";
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<UUID> incidentId = new AtomicReference<>();
+        AtomicReference<Integer> commandResult = new AtomicReference<>();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        var server = helper.getLevel().getServer();
+        Path databaseFile = server.getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+
+        CivicServerRuntime.current()
+                .submitDatabase(CivicServerRuntimeGameTests::prepareStockCorrectionIncident)
+                .whenComplete((preparedIncidentId, failure) -> server.execute(() -> {
+                    if (failure != null) {
+                        asyncFailure.set(failure);
+                        return;
+                    }
+                    try {
+                        incidentId.set(preparedIncidentId);
+                        commandResult.set(server.getCommands().getDispatcher().execute(
+                                "civic economy admin mint correction apply "
+                                        + preparedIncidentId + " " + requestId + " "
+                                        + "\"" + evidenceReference + "\" " + reason,
+                                server.createCommandSourceStack()));
+                        commandStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "Monetary Stock Correction command async state"
+                            : "Monetary Stock Correction command failure: "
+                                    + failure.getMessage());
+            helper.assertTrue(commandStarted.get(), "Monetary Stock Correction command queued");
+            helper.assertValueEqual(
+                    1,
+                    commandResult.get(),
+                    "Monetary Stock Correction command accepted");
+            UUID observedIncidentId = incidentId.get();
+            helper.assertTrue(observedIncidentId != null, "prepared Mint Recovery Incident");
+            assertMonetaryStockCorrection(
+                    helper,
+                    databaseFile,
+                    observedIncidentId,
+                    requestId,
+                    evidenceReference,
+                    reason);
+        });
     }
 
     @GameTest(template = "empty", timeoutTicks = 300)
@@ -2418,6 +2487,190 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static UUID prepareStockCorrectionIncident(
+            org.civiceconomy.persistence.CivicDatabase database) {
+        UUID nationId = UUID.randomUUID();
+        UUID periodId = UUID.randomUUID();
+        UUID recipeId = UUID.randomUUID();
+        UUID mintId = UUID.randomUUID();
+        UUID actorId = UUID.randomUUID();
+        UUID batchId = UUID.randomUUID();
+        UUID operationId = UUID.randomUUID();
+        int recipeVersionNumber = 1
+                + Math.floorMod(recipeId.hashCode(), Integer.MAX_VALUE - 1);
+        int mintBlockX = mintId.hashCode();
+        int mintBlockZ = Long.hashCode(mintId.getLeastSignificantBits());
+        long periodStart = 1_000_000L
+                + Math.floorMod(periodId.getLeastSignificantBits(), 1_000_000_000_000L);
+        long amountMinorUnits = 300L;
+
+        database.registerNation(
+                nationId,
+                "civiceconomy-gametest",
+                "stock-correction-nation-" + UUID.randomUUID(),
+                UUID.randomUUID(),
+                periodStart - 1_000L);
+        database.publishIssuanceQuotaPeriod(
+                periodId,
+                "civiceconomy-gametest",
+                "stock-correction-period-" + UUID.randomUUID(),
+                periodStart,
+                periodStart + 60_000L,
+                Long.MAX_VALUE,
+                1_000L,
+                java.util.List.of(new StoredNationalIssuanceQuotaAllocation(
+                        nationId, 1_000L)),
+                "Monetary Stock Correction command GameTest period",
+                periodStart - 900L);
+        database.activateNationalIssuanceQuota(
+                UUID.randomUUID(),
+                "civiceconomy-gametest",
+                "stock-correction-activation-" + UUID.randomUUID(),
+                periodId,
+                nationId,
+                actorId,
+                1_000L,
+                "Monetary Stock Correction command GameTest quota",
+                periodStart - 800L);
+        database.publishMintRecipeVersion(
+                recipeId,
+                "civiceconomy-gametest",
+                "stock-correction-recipe-" + UUID.randomUUID(),
+                recipeVersionNumber,
+                java.util.List.of(new StoredMintRecipeIngredient(
+                        0, "EXACT_ITEM", "minecraft:diamond", 1L, 100L)),
+                1L,
+                "Monetary Stock Correction command GameTest recipe",
+                periodStart - 700L);
+        database.registerMint(
+                mintId,
+                "civiceconomy-gametest",
+                "stock-correction-mint-" + UUID.randomUUID(),
+                nationId,
+                "minecraft:overworld",
+                mintBlockX,
+                64,
+                mintBlockZ,
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                false,
+                recipeId,
+                actorId,
+                "Monetary Stock Correction command GameTest Mint",
+                periodStart - 600L);
+        database.prepareMintBatch(
+                batchId,
+                "civiceconomy-gametest",
+                "stock-correction-batch-" + UUID.randomUUID(),
+                mintId,
+                periodId,
+                nationId,
+                recipeId,
+                amountMinorUnits,
+                java.util.List.of(new StoredMintMaterialStack(
+                        0,
+                        "EXACT_ITEM",
+                        "minecraft:diamond",
+                        "minecraft:diamond",
+                        3L)),
+                actorId,
+                "Monetary Stock Correction command GameTest Batch",
+                periodStart + 100L);
+        database.confirmMintBatchCustody(
+                batchId,
+                "civiceconomy-gametest",
+                "stock-correction-custody-" + UUID.randomUUID(),
+                "gametest-custody:" + UUID.randomUUID(),
+                periodStart + 200L);
+        database.prepareMintBatchIssuance(
+                operationId,
+                batchId,
+                "civiceconomy-gametest",
+                "stock-correction-issuance-" + UUID.randomUUID(),
+                "Monetary Stock Correction command GameTest issuance",
+                periodStart + 300L);
+        return database.recordMintRecoveryIncident(
+                        operationId,
+                        "TREASURY_CREDIT",
+                        "IllegalStateException",
+                        "LC Treasury confirmation requires independent evidence",
+                        periodStart + 400L)
+                .incidentId();
+    }
+
+    private static void assertMonetaryStockCorrection(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID incidentId,
+            String requestId,
+            String evidenceReference,
+            String reason) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT correction.correction_id,
+                               correction.administrator_identity,
+                               correction.request_id,
+                               correction.amount_minor_units,
+                               correction.evidence_reference,
+                               correction.reason,
+                               event.change_kind,
+                               event.external_reference,
+                               incident.state,
+                               incident.resolution_kind,
+                               incident.resolution_detail,
+                               batch.state,
+                               batch.custody_state,
+                               quota.reserved_minor_units,
+                               quota.used_minor_units
+                        FROM monetary_stock_correction correction
+                        JOIN monetary_supply_event event
+                          ON event.event_id = correction.event_id
+                        JOIN mint_recovery_incident incident
+                          ON incident.incident_id = correction.incident_id
+                        JOIN mint_batch batch
+                          ON batch.batch_id = correction.batch_id
+                        JOIN national_issuance_quota quota
+                          ON quota.period_id = batch.period_id
+                         AND quota.nation_id = batch.nation_id
+                        WHERE correction.incident_id = ?
+                        """)) {
+            query.setString(1, incidentId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persisted Monetary Stock Correction");
+                String correctionId = result.getString(1);
+                helper.assertTrue(
+                        result.getString(2).startsWith("civic-admin-console:"),
+                        "correction administrator derives from command source");
+                helper.assertValueEqual(requestId, result.getString(3), "correction request ID");
+                helper.assertValueEqual(300L, result.getLong(4), "incident-derived amount");
+                helper.assertValueEqual(
+                        evidenceReference, result.getString(5), "immutable evidence reference");
+                helper.assertValueEqual(reason, result.getString(6), "immutable correction reason");
+                helper.assertValueEqual(
+                        "STOCK_CORRECTION_INCREASE",
+                        result.getString(7),
+                        "separate Monetary Supply event kind");
+                helper.assertValueEqual(
+                        "mint-recovery-incident:" + incidentId,
+                        result.getString(8),
+                        "incident-scoped supply evidence");
+                helper.assertValueEqual("RESOLVED", result.getString(9), "incident state");
+                helper.assertValueEqual(
+                        "STOCK_CORRECTION", result.getString(10), "incident resolution kind");
+                helper.assertValueEqual(
+                        correctionId, result.getString(11), "immutable correction resolution");
+                helper.assertValueEqual("COMMITTING", result.getString(12), "Batch quarantine");
+                helper.assertValueEqual("HELD", result.getString(13), "material quarantine");
+                helper.assertValueEqual(300L, result.getLong(14), "reserved quota quarantine");
+                helper.assertValueEqual(0L, result.getLong(15), "used quota remains unchanged");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Monetary Stock Correction command result", failure);
+        }
+    }
+
     private static ChunkDimPos paidClaimSeedPosition(ChunkDimPos target) {
         return new ChunkDimPos(
                 target.dimension(), new ChunkPos(target.x() + 1, target.z()));
@@ -2504,7 +2757,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(52, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(53, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

@@ -19,7 +19,9 @@ public record ConfirmMonetarySupplyChange(
                 || externalReference.isBlank()
                 || reason == null
                 || reason.isBlank()
-                || amountMinorUnits <= 0L) {
+                || amountMinorUnits <= 0L
+                || (change != MonetarySupplyChange.ISSUANCE
+                        && change != MonetarySupplyChange.PERMANENT_DESTRUCTION)) {
             throw new IllegalArgumentException("Monetary Supply change values are invalid");
         }
     }

@@ -70,11 +70,12 @@ class CivicDatabaseV41MigrationTest {
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("DROP TABLE territory_force_load_enforcement");
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("PRAGMA user_version = 40");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             var enforcement = new TerritoryForceLoadEnforcementRegistry(migrated)
                     .prepare(SERVICE, "force-load", assessmentId, "Migration enforcement");
             assertEquals(TerritoryForceLoadEnforcementState.PREPARED, enforcement.state());

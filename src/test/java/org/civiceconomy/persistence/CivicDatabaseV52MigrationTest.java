@@ -66,12 +66,13 @@ class CivicDatabaseV52MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE monetary_stock_correction");
             statement.execute("DROP TABLE mint_recovery_incident");
             statement.execute("PRAGMA user_version = 51");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(52, migrated.schemaVersion());
+            assertEquals(53, migrated.schemaVersion());
             assertEquals("PREPARED", migrated.mintBatchIssuanceOperation(operationId).state());
             assertEquals("COMMITTING", migrated.mintBatch(batchId).state());
             assertEquals(300L,
