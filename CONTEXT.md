@@ -160,6 +160,10 @@ _Avoid_: FTB 所有权、付款交易、有效性结论
 对一个 Nation 在一个 Territory Maintenance Cycle 内全部 Territory Fiscal Assessment 作出的单次财政结论；结算结果为 FULLY_FUNDED、PARTIALLY_FUNDED 或 UNFUNDED，并将每条评估分别结论为 EFFECTIVE 或 SUSPENDED。正费用续费只能由服务端读取精确 National Treasury 可用余额并按 Territory Maintenance Priority 选择；零费用评估可以在没有虚构财政交易的情况下结论为 EFFECTIVE。
 _Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 
+**领土恢复（Territory Maintenance Restoration）**:
+先前因维护不足而 SUSPENDED 的区块重新取得财政有效性的过程；只收配置的恢复费和下一个完整周期维护费，不追缴历史欠费，并在成功恢复后进入冷却。
+_Avoid_: 补缴全部欠费、重新占领 FTB 区块、无冷却反复恢复
+
 **领土维护优先级（Territory Maintenance Priority）**:
 国家在维护资金不足时用于选择续费区块的五级顺序：首都、首都连接核心、有效基础设施、普通领土、飞地或跨维度领地；低级别不能挤占高级别。
 _Avoid_: FTB 占领权限、区块遍历顺序、部分付款比例

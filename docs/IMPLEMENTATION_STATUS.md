@@ -196,10 +196,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised SQLite to schema v38 so a Settlement may preserve zero-cost Assessments as `EFFECTIVE` without inventing a zero-value Reservation, payment, or Permanent Destruction. SQLite still reloads all pending Assessments, reruns the zero-budget Priority decision, and permits the payment-free funded outcome only when at least one selected Assessment has exact zero due.
 - Added server-derived available-balance settlement. The public command contains no amount and no Assessment IDs; the coordinator reads the exact National Treasury through owner-bound `READ_ACCOUNT`, subtracts active Reservations, selects the affordable Priority prefix, and either executes the existing durable LC/public-fund/destruction state machine or records an audited `UNFUNDED` result with no external movement.
 - Wired the persisted Assessment Batch into automatic per-Nation settlement on `Civic-Economy-SQLite`. Stable Cycle/Nation request IDs make startup and minute replay idempotent, the Cycle's persisted Maintenance Policy supplies the destruction ratio, and one Nation failure is logged and accumulated without preventing unaffected Nations from settling.
+- Added the pure Territory Maintenance Restoration policy. A restoration quote contains only a configured Restoration fee plus the next full Cycle maintenance amount; no historical arrears enter the interface. A successful quote establishes the next cooldown boundary, and a repeated restoration inside that window fails closed.
 
 ## In progress
 
-- Implement Territory restoration after a later successful Cycle while preserving the prior suspended history and current FTB ownership checks.
+- Persist Restoration fee/cooldown in future-effective Maintenance Policy, then apply it to later Cycles while preserving prior suspended history and current FTB ownership checks.
 
 ## Not yet completed
 
@@ -274,6 +275,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the pure Territory Maintenance Assessment Planner, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 180 tests with zero failures.
 - After schema-v37 full Claim Snapshot recovery and automatic runtime assessment, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 187 tests with zero failures. Focused RED/GREEN cases cover missing persisted snapshots and multi-Nation UUID ordering across the signed boundary.
 - After schema-v38 automatic available-balance Settlement, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 190 tests with zero failures. The JAR is 14,989,076 bytes with SHA-256 `78A6E75FAC61D328DCD1AD807CB38CFCBDFF5A5BCB07CD46D1DE2F546B788687`.
+- After the pure Territory Maintenance Restoration policy, `gradlew.bat build --no-daemon --console=plain` passed; the full JUnit/SQLite suite executed 192 tests with zero failures. No new GameTest or real LC/FTB runtime claim is made for this pure calculation slice.
 - Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,979,534 bytes, SHA-256 `47FB6D346ABB2D59A6728AAF4B94C47D2D589679BBEF3728B6F7E4C159338B3E`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
