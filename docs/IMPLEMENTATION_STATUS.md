@@ -221,10 +221,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Added the pinned LC Monetary Guard. Runtime reads force every native Coin Mint craft/mint/melt and material option, entity/chest free-money option, money-generating villager/wandering-trader option, seasonal reward/replacement option and bank-interest option to a conservation-safe value without rewriting the operator's LC files.
 - Added method-level fail-closed barriers for the real LC Coin Mint recipe/action paths, player-bank interest, entity and chest coin loot, seasonal loot/rewards, villager and wandering-trader hooks, and `/lcbank give`. Vanilla `/give` is rejected only when LC's real `CoinAPI` classifies the requested item as money; unrelated item administration remains available.
 - Added five exact-version real-runtime GameTests. The initial RED run failed only the three new config/Coin Mint/player-bank-interest tests; GREEN additionally executes real permission-level-four `/give` and `/lcbank give` commands and verifies that neither an inventory coin nor player-bank balance is created. Stored LC config remains operator-owned and may still contain enabled values; the tested runtime reads and issuance methods remain fail closed.
+- Added the pure National Issuance Quota state model. Ceiling, Nation-activated authority, durable-batch reservation and committed use are distinct nonnegative facts; reservation cannot exceed activated remainder, commit/release cannot exceed the reserved amount, and a later ceiling or activation change cannot revoke already reserved or used quota. This slice does not calculate macroeconomic allocation or move LC.
 
 ## In progress
 
-- Implement National Issuance Quota and Registered Mint as the only normal gameplay path for new money, with material custody, exact fiscal authority, durable cross-store issuance state and Monetary Supply audit.
+- Persist National Issuance Quota periods/allocations/activation in schema v47, then make Registered Mint batches reserve that exact quota and material custody before coordinating real LC credit and Monetary Supply audit.
 
 ## Not yet completed
 
@@ -311,7 +312,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After schema-v45 lifecycle backup/rotation and administrator commands, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 221 tests with zero failures.
 - After schema-v46 restart-only restore, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 229 tests with zero failures.
 - After the pinned LC Monetary Guard, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite remained 229 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 15,131,413 bytes, SHA-256 `E65F4EBCB867FAAE7FFB7911D5F1A6F96B6E3BD6BD50D0DCE2BCE52414142FC0`. It remains a development artifact until all v1 completion gates pass.
+- After the pure National Issuance Quota model, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 232 tests with zero failures. No new real-LC, FTB, GameTest or dedicated-server claim is made for this pure calculation slice.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 15,134,084 bytes, SHA-256 `6B12CD02759FE7985B3B441265301F5A2F6BB49860DE4A68C329DCC1FC9E8A50`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
