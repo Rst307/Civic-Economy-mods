@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 46;
+    private static final int SCHEMA_VERSION = 47;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -3820,6 +3820,348 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryClaimPermit(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Claim Permit", failure);
+        }
+    }
+
+    public synchronized StoredIssuanceQuotaPeriod publishIssuanceQuotaPeriod(
+            UUID periodId,
+            String serviceIdentity,
+            String requestId,
+            long startsAtEpochMillis,
+            long endsAtEpochMillis,
+            long hardCapMinorUnits,
+            long globalQuotaMinorUnits,
+            List<StoredNationalIssuanceQuotaAllocation> allocations,
+            String reason,
+            long publishedAtEpochMillis) {
+        if (periodId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || allocations == null
+                || reason == null
+                || reason.isBlank()
+                || startsAtEpochMillis < 0L
+                || endsAtEpochMillis <= startsAtEpochMillis
+                || hardCapMinorUnits < 0L
+                || globalQuotaMinorUnits < 0L
+                || globalQuotaMinorUnits > hardCapMinorUnits
+                || publishedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Issuance Quota Period values are invalid");
+        }
+        StoredIssuanceQuotaPeriod replay = issuanceQuotaPeriod(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.periodId().equals(periodId)
+                    || replay.startsAtEpochMillis() != startsAtEpochMillis
+                    || replay.endsAtEpochMillis() != endsAtEpochMillis
+                    || replay.hardCapMinorUnits() != hardCapMinorUnits
+                    || replay.globalQuotaMinorUnits() != globalQuotaMinorUnits
+                    || !replay.reason().equals(reason)
+                    || !allocationSet(replay.periodId()).equals(Set.copyOf(allocations))) {
+                throw new IllegalArgumentException(
+                        "Issuance Quota Period replay changed its immutable payload");
+            }
+            return replay;
+        }
+        long totalAllocated = 0L;
+        Set<UUID> nationIds = new HashSet<>();
+        for (StoredNationalIssuanceQuotaAllocation allocation : allocations) {
+            if (!nationIds.add(allocation.nationId())) {
+                throw new IllegalArgumentException(
+                        "Issuance Quota Period contains a duplicate Nation allocation");
+            }
+            totalAllocated = Math.addExact(totalAllocated, allocation.ceilingMinorUnits());
+            if (nation(allocation.nationId()) == null) {
+                throw new IllegalStateException(
+                        "Issuance Quota allocation references an unknown Nation "
+                                + allocation.nationId());
+            }
+        }
+        if (totalAllocated > globalQuotaMinorUnits) {
+            throw new IllegalStateException(
+                    "National Issuance Quota ceilings exceed the global period quota");
+        }
+        long remainingHardCap = Math.subtractExact(
+                hardCapMinorUnits, cumulativeNetIssuanceMinorUnits());
+        if (globalQuotaMinorUnits > remainingHardCap) {
+            throw new IllegalStateException(
+                    "Global issuance quota exceeds remaining Issuance Hard Cap space");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement overlap = connection.prepareStatement("""
+                        SELECT 1 FROM issuance_quota_period
+                        WHERE starts_at_epoch_millis < ? AND ends_at_epoch_millis > ?
+                        LIMIT 1
+                        """)) {
+                    overlap.setLong(1, endsAtEpochMillis);
+                    overlap.setLong(2, startsAtEpochMillis);
+                    try (ResultSet result = overlap.executeQuery()) {
+                        if (result.next()) {
+                            throw new IllegalStateException(
+                                    "Issuance Quota Period overlaps an existing period");
+                        }
+                    }
+                }
+                try (PreparedStatement insertPeriod = connection.prepareStatement("""
+                        INSERT INTO issuance_quota_period (
+                            period_id, service_identity, request_id,
+                            starts_at_epoch_millis, ends_at_epoch_millis,
+                            hard_cap_minor_units, global_quota_minor_units,
+                            reason, published_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement insertAllocation = connection.prepareStatement("""
+                        INSERT INTO national_issuance_quota (
+                            period_id, nation_id, ceiling_minor_units,
+                            activated_minor_units, reserved_minor_units, used_minor_units
+                        ) VALUES (?, ?, ?, 0, 0, 0)
+                        """)) {
+                    insertPeriod.setString(1, periodId.toString());
+                    insertPeriod.setString(2, serviceIdentity);
+                    insertPeriod.setString(3, requestId);
+                    insertPeriod.setLong(4, startsAtEpochMillis);
+                    insertPeriod.setLong(5, endsAtEpochMillis);
+                    insertPeriod.setLong(6, hardCapMinorUnits);
+                    insertPeriod.setLong(7, globalQuotaMinorUnits);
+                    insertPeriod.setString(8, reason);
+                    insertPeriod.setLong(9, publishedAtEpochMillis);
+                    insertPeriod.executeUpdate();
+                    for (StoredNationalIssuanceQuotaAllocation allocation : allocations) {
+                        insertAllocation.setString(1, periodId.toString());
+                        insertAllocation.setString(2, allocation.nationId().toString());
+                        insertAllocation.setLong(3, allocation.ceilingMinorUnits());
+                        insertAllocation.addBatch();
+                    }
+                    insertAllocation.executeBatch();
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return issuanceQuotaPeriod(periodId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to publish Issuance Quota Period", failure);
+        }
+    }
+
+    public synchronized StoredIssuanceQuotaPeriod issuanceQuotaPeriod(UUID periodId) {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT * FROM issuance_quota_period WHERE period_id = ?")) {
+            query.setString(1, periodId.toString());
+            return readIssuanceQuotaPeriod(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Issuance Quota Period", failure);
+        }
+    }
+
+    public synchronized StoredIssuanceQuotaPeriod issuanceQuotaPeriod(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM issuance_quota_period
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readIssuanceQuotaPeriod(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Issuance Quota Period request", failure);
+        }
+    }
+
+    public synchronized StoredNationalIssuanceQuota nationalIssuanceQuota(
+            UUID periodId, UUID nationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM national_issuance_quota
+                WHERE period_id = ? AND nation_id = ?
+                """)) {
+            query.setString(1, periodId.toString());
+            query.setString(2, nationId.toString());
+            return readNationalIssuanceQuota(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read National Issuance Quota", failure);
+        }
+    }
+
+    public synchronized StoredNationalIssuanceQuotaActivation activateNationalIssuanceQuota(
+            UUID activationId,
+            String serviceIdentity,
+            String requestId,
+            UUID periodId,
+            UUID nationId,
+            UUID actorPlayerId,
+            long activatedMinorUnits,
+            String reason,
+            long activatedAtEpochMillis) {
+        if (activationId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || periodId == null
+                || nationId == null
+                || actorPlayerId == null
+                || activatedMinorUnits < 0L
+                || reason == null
+                || reason.isBlank()
+                || activatedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("National Issuance Quota activation values are invalid");
+        }
+        StoredNationalIssuanceQuotaActivation replay =
+                nationalIssuanceQuotaActivation(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.periodId().equals(periodId)
+                    || !replay.nationId().equals(nationId)
+                    || !replay.actorPlayerId().equals(actorPlayerId)
+                    || replay.activatedMinorUnits() != activatedMinorUnits
+                    || !replay.reason().equals(reason)) {
+                throw new IllegalArgumentException(
+                        "National Issuance Quota activation replay changed its payload");
+            }
+            return replay;
+        }
+        StoredNationalIssuanceQuota quota = nationalIssuanceQuota(periodId, nationId);
+        if (quota == null) {
+            throw new IllegalArgumentException("Unknown National Issuance Quota");
+        }
+        long encumbered = Math.addExact(quota.reservedMinorUnits(), quota.usedMinorUnits());
+        if (activatedMinorUnits > quota.ceilingMinorUnits() || activatedMinorUnits < encumbered) {
+            throw new IllegalStateException(
+                    "National Issuance Quota activation exceeds its ceiling or revokes encumbered quota");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE national_issuance_quota SET activated_minor_units = ?
+                        WHERE period_id = ? AND nation_id = ?
+                        """);
+                    PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO national_issuance_quota_activation (
+                            activation_id, service_identity, request_id,
+                            period_id, nation_id, actor_player_id,
+                            activated_minor_units, reason, activated_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """)) {
+                update.setLong(1, activatedMinorUnits);
+                update.setString(2, periodId.toString());
+                update.setString(3, nationId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException("National Issuance Quota changed concurrently");
+                }
+                insert.setString(1, activationId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, periodId.toString());
+                insert.setString(5, nationId.toString());
+                insert.setString(6, actorPlayerId.toString());
+                insert.setLong(7, activatedMinorUnits);
+                insert.setString(8, reason);
+                insert.setLong(9, activatedAtEpochMillis);
+                insert.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return nationalIssuanceQuotaActivation(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to activate National Issuance Quota", failure);
+        }
+    }
+
+    public synchronized StoredNationalIssuanceQuotaActivation nationalIssuanceQuotaActivation(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM national_issuance_quota_activation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationalIssuanceQuotaActivation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read National Issuance Quota activation", failure);
+        }
+    }
+
+    private Set<StoredNationalIssuanceQuotaAllocation> allocationSet(UUID periodId) {
+        Set<StoredNationalIssuanceQuotaAllocation> allocations = new HashSet<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT nation_id, ceiling_minor_units FROM national_issuance_quota
+                WHERE period_id = ?
+                """)) {
+            query.setString(1, periodId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    allocations.add(new StoredNationalIssuanceQuotaAllocation(
+                            UUID.fromString(result.getString("nation_id")),
+                            result.getLong("ceiling_minor_units")));
+                }
+            }
+            return Set.copyOf(allocations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read National Issuance allocations", failure);
+        }
+    }
+
+    private static StoredIssuanceQuotaPeriod readIssuanceQuotaPeriod(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredIssuanceQuotaPeriod(
+                    UUID.fromString(result.getString("period_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getLong("starts_at_epoch_millis"),
+                    result.getLong("ends_at_epoch_millis"),
+                    result.getLong("hard_cap_minor_units"),
+                    result.getLong("global_quota_minor_units"),
+                    result.getString("reason"),
+                    result.getLong("published_at_epoch_millis"));
+        }
+    }
+
+    private static StoredNationalIssuanceQuota readNationalIssuanceQuota(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationalIssuanceQuota(
+                    UUID.fromString(result.getString("period_id")),
+                    UUID.fromString(result.getString("nation_id")),
+                    result.getLong("ceiling_minor_units"),
+                    result.getLong("activated_minor_units"),
+                    result.getLong("reserved_minor_units"),
+                    result.getLong("used_minor_units"));
+        }
+    }
+
+    private static StoredNationalIssuanceQuotaActivation readNationalIssuanceQuotaActivation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationalIssuanceQuotaActivation(
+                    UUID.fromString(result.getString("activation_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("period_id")),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getLong("activated_minor_units"),
+                    result.getString("reason"),
+                    result.getLong("activated_at_epoch_millis"));
         }
     }
 
@@ -8021,6 +8363,120 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 46");
+            }
+            if (version < 47) {
+                statement.execute("DROP INDEX fiscal_service_grant_active_scope");
+                statement.execute("ALTER TABLE fiscal_service_grant_revocation RENAME TO fiscal_service_grant_revocation_v46");
+                statement.execute("ALTER TABLE fiscal_service_grant RENAME TO fiscal_service_grant_v46");
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            capability TEXT NOT NULL CHECK (capability IN (
+                                'READ_ACCOUNT', 'RESERVE_FUNDS', 'MANAGE_ESCROW',
+                                'MANAGE_BUDGET', 'ISSUE_BILL', 'FUND_BILL',
+                                'SETTLE_PAYMENT', 'REFUND_PAYMENT', 'COMPENSATE_PAYMENT',
+                                'PERMANENT_DESTRUCTION', 'MANAGE_ISSUANCE'
+                            )),
+                            account_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant
+                        SELECT * FROM fiscal_service_grant_v46
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_service_grant_active_scope
+                        ON fiscal_service_grant (service_identity, capability, account_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_service_grant(grant_id),
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant_revocation
+                        SELECT * FROM fiscal_service_grant_revocation_v46
+                        """);
+                statement.execute("DROP TABLE fiscal_service_grant_revocation_v46");
+                statement.execute("DROP TABLE fiscal_service_grant_v46");
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS issuance_quota_period (
+                            period_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            starts_at_epoch_millis INTEGER NOT NULL
+                                CHECK (starts_at_epoch_millis >= 0),
+                            ends_at_epoch_millis INTEGER NOT NULL,
+                            hard_cap_minor_units INTEGER NOT NULL
+                                CHECK (hard_cap_minor_units >= 0),
+                            global_quota_minor_units INTEGER NOT NULL
+                                CHECK (global_quota_minor_units >= 0
+                                    AND global_quota_minor_units <= hard_cap_minor_units),
+                            reason TEXT NOT NULL CHECK (length(reason) > 0),
+                            published_at_epoch_millis INTEGER NOT NULL
+                                CHECK (published_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            CHECK (ends_at_epoch_millis > starts_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS national_issuance_quota (
+                            period_id TEXT NOT NULL
+                                REFERENCES issuance_quota_period(period_id),
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ceiling_minor_units INTEGER NOT NULL
+                                CHECK (ceiling_minor_units >= 0),
+                            activated_minor_units INTEGER NOT NULL DEFAULT 0
+                                CHECK (activated_minor_units >= 0
+                                    AND activated_minor_units <= ceiling_minor_units),
+                            reserved_minor_units INTEGER NOT NULL DEFAULT 0
+                                CHECK (reserved_minor_units >= 0),
+                            used_minor_units INTEGER NOT NULL DEFAULT 0
+                                CHECK (used_minor_units >= 0),
+                            PRIMARY KEY (period_id, nation_id),
+                            CHECK (reserved_minor_units + used_minor_units
+                                <= activated_minor_units)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS national_issuance_quota_activation (
+                            activation_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            period_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            activated_minor_units INTEGER NOT NULL
+                                CHECK (activated_minor_units >= 0),
+                            reason TEXT NOT NULL CHECK (length(reason) > 0),
+                            activated_at_epoch_millis INTEGER NOT NULL
+                                CHECK (activated_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            FOREIGN KEY (period_id, nation_id)
+                                REFERENCES national_issuance_quota(period_id, nation_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS issuance_quota_period_time
+                        ON issuance_quota_period (starts_at_epoch_millis, ends_at_epoch_millis)
+                        """);
+                statement.execute("PRAGMA user_version = 47");
             }
             connection.commit();
         } catch (SQLException failure) {

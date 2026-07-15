@@ -47,7 +47,7 @@ class CivicDatabaseV31MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(46, migrated.schemaVersion());
+            assertEquals(47, migrated.schemaVersion());
             assertEquals(
                     "EFFECTIVE",
                     migrated.territoryFiscalAssessment("migration", "legacy-assessment").validity());
