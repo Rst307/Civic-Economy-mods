@@ -89,6 +89,8 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 /civic economy nation role list
 /civic economy nation role grant <playerUuid> <permission> <reason>
 /civic economy nation role revoke <grantUuid> <reason>
+/civic economy nation mint start <requestId> <mintId> <periodId> <amountMinorUnits>
+/civic economy nation mint cancel <batchId> <requestId> <reason>
 /civic economy nation territory allowance
 /civic economy nation territory prepare <requestId>
 /civic economy nation territory restore <requestId>
@@ -102,6 +104,8 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 `nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。
 
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、公共政策和恢复管理。
+
+`nation mint start` 只接受稳定请求 ID、Registered Mint ID、Issuance Quota Period ID 和面值。服务端从真实玩家、FTB Team、Registered Mint、锁定 Recipe Version、当前 Effective Territory 与玩家库存推导 Nation、位置和材料清单，并要求精确 Nation `MANAGE_ISSUANCE`；重复请求不得改变 Mint、Period、操作者或金额。`cancel` 仅返还该批次真实托管材料并在确认返还后释放额度。启动和取消目前不会向 LC 入账，也不会写入 Monetary Supply event；最终发行入口尚未开放。
 
 `nation territory allowance` 使用查询时刻生效的持久化领土政策与同一时刻的正式 Effective Citizen 人口，显示基础区块、有效 Citizen 数、每人区块数、总免费额度和政策版本；它不读取 FTB Team 成员数量。
 

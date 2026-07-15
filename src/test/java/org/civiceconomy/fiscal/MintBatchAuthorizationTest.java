@@ -17,6 +17,7 @@ import org.civiceconomy.issuance.IssuanceQuotaRegistry;
 import org.civiceconomy.mint.CancelMintBatch;
 import org.civiceconomy.mint.ExternalMintMaterialCustody;
 import org.civiceconomy.mint.MintBatchCoordinator;
+import org.civiceconomy.mint.MintBatchRecovery;
 import org.civiceconomy.mint.MintMaterialCustodyReturn;
 import org.civiceconomy.mint.MintMaterialCustodyTransfer;
 import org.civiceconomy.mint.MintMaterialStack;
@@ -106,6 +107,100 @@ class MintBatchAuthorizationTest {
     }
 
     @Test
+    void startReplayRejectsChangedImmutablePayloadBeforeCustody() {
+        try (CivicDatabase database = database()) {
+            RecordingCustody custody = new RecordingCustody();
+            Fixtures fixtures = fixtures(database, custody, true, true);
+            var original = fixtures.coordinator().prepare(request(SERVICE), FailurePoint.NONE);
+
+            assertEquals(
+                    original,
+                    fixtures.coordinator()
+                            .findByRequest(
+                                    SERVICE,
+                                    "prepare-batch",
+                                    MINT,
+                                    PERIOD,
+                                    ACTOR,
+                                    MoneyAmount.ofMinorUnits(300L))
+                            .orElseThrow());
+            assertThrows(IdempotencyConflictException.class, () -> fixtures.coordinator()
+                    .findByRequest(
+                            SERVICE,
+                            "prepare-batch",
+                            UUID.randomUUID(),
+                            PERIOD,
+                            ACTOR,
+                            MoneyAmount.ofMinorUnits(300L)));
+            assertThrows(IdempotencyConflictException.class, () -> fixtures.coordinator()
+                    .findByRequest(
+                            SERVICE,
+                            "prepare-batch",
+                            MINT,
+                            UUID.randomUUID(),
+                            ACTOR,
+                            MoneyAmount.ofMinorUnits(300L)));
+            assertThrows(IdempotencyConflictException.class, () -> fixtures.coordinator()
+                    .findByRequest(
+                            SERVICE,
+                            "prepare-batch",
+                            MINT,
+                            PERIOD,
+                            UUID.randomUUID(),
+                            MoneyAmount.ofMinorUnits(300L)));
+            assertThrows(IdempotencyConflictException.class, () -> fixtures.coordinator()
+                    .findByRequest(
+                            SERVICE,
+                            "prepare-batch",
+                            MINT,
+                            PERIOD,
+                            ACTOR,
+                            MoneyAmount.ofMinorUnits(301L)));
+            assertEquals(1, custody.transfers.size());
+            assertEquals(
+                    300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION.value()).reservedMinorUnits());
+        }
+    }
+
+    @Test
+    void exposesExplicitDatabaseExternalDatabasePhasesForServerRuntimeComposition() {
+        try (CivicDatabase database = database()) {
+            RecordingCustody custody = new RecordingCustody();
+            Fixtures fixtures = fixtures(database, custody, true, true);
+
+            var take = fixtures.coordinator().prepareExternal(request(SERVICE));
+            assertEquals("PREPARING", database.mintBatch(take.batchId()).state());
+            assertEquals(300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION.value()).reservedMinorUnits());
+            assertEquals(0, custody.transfers.size());
+
+            take.apply(custody);
+            assertEquals("PREPARING", database.mintBatch(take.batchId()).state());
+            assertEquals(1, custody.transfers.size());
+
+            var processing = fixtures.coordinator().confirmExternal(take);
+            assertEquals("PROCESSING", processing.state());
+            var materialReturn = fixtures.coordinator().prepareCancellationExternal(
+                    new CancelMintBatch(SERVICE, "cancel-phased", processing.batchId(), ACTOR,
+                            "Cancel phased batch"));
+            assertEquals("CANCELLING", database.mintBatch(processing.batchId()).state());
+            assertEquals(0, custody.returns.size());
+
+            materialReturn.apply(custody);
+            assertEquals("CANCELLING", database.mintBatch(processing.batchId()).state());
+            assertEquals(300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION.value()).reservedMinorUnits());
+            assertEquals(1, custody.returns.size());
+
+            var cancelled = fixtures.coordinator().confirmExternal(materialReturn);
+            assertEquals("CANCELLED", cancelled.state());
+            assertEquals(0L,
+                    database.nationalIssuanceQuota(PERIOD, NATION.value()).reservedMinorUnits());
+        }
+    }
+
+    @Test
     void cancellationReplaysSameReturnAndReleasesQuotaOnlyAfterSqliteConfirmation() {
         try (CivicDatabase database = database()) {
             RecordingCustody custody = new RecordingCustody();
@@ -131,6 +226,64 @@ class MintBatchAuthorizationTest {
             assertEquals(2, custody.returns.size());
             assertEquals(custody.returns.get(0).operationId(), custody.returns.get(1).operationId());
             assertNull(database.monetarySupplyEvent(SERVICE.value(), "cancel-batch"));
+        }
+    }
+
+    @Test
+    void completedCancellationReplayReturnsSameBatchWithoutReturningMaterialsAgain() {
+        try (CivicDatabase database = database()) {
+            RecordingCustody custody = new RecordingCustody();
+            Fixtures fixtures = fixtures(database, custody, true, true);
+            var processing = fixtures.coordinator().prepare(request(SERVICE), FailurePoint.NONE);
+            var cancellation = new CancelMintBatch(
+                    SERVICE,
+                    "cancel-completed",
+                    processing.batchId(),
+                    ACTOR,
+                    "Cancel completed batch");
+
+            var cancelled = fixtures.coordinator().cancel(cancellation, FailurePoint.NONE);
+            assertEquals(cancelled, fixtures.coordinator().cancel(cancellation, FailurePoint.NONE));
+            assertEquals("CANCELLED", cancelled.state());
+            assertEquals(1, custody.returns.size());
+            assertThrows(IllegalArgumentException.class, () -> fixtures.coordinator()
+                    .cancel(
+                            new CancelMintBatch(
+                                    SERVICE,
+                                    "cancel-completed",
+                                    processing.batchId(),
+                                    ACTOR,
+                                    "Changed cancellation reason"),
+                            FailurePoint.NONE));
+            assertEquals(1, custody.returns.size());
+        }
+    }
+
+    @Test
+    void recoveryExposesDatabaseAndExternalPhasesWithoutApplyingCustodyOnDatabaseThread() {
+        try (CivicDatabase database = database()) {
+            RecordingCustody custody = new RecordingCustody();
+            Fixtures fixtures = fixtures(database, custody, true, true);
+            var pendingTake = fixtures.coordinator().prepareExternal(request(SERVICE));
+            MintBatchRecovery recovery = new MintBatchRecovery(database, CLOCK);
+
+            assertEquals(List.of(pendingTake), recovery.pendingExternal());
+            assertEquals(0, custody.transfers.size());
+            pendingTake.apply(custody);
+            assertEquals("PROCESSING", recovery.confirmExternal(pendingTake).state());
+
+            var pendingReturn = fixtures.coordinator().prepareCancellationExternal(
+                    new CancelMintBatch(
+                            SERVICE,
+                            "cancel-recovery-phases",
+                            pendingTake.batchId(),
+                            ACTOR,
+                            "Recover cancelled batch"));
+            assertEquals(List.of(pendingReturn), recovery.pendingExternal());
+            assertEquals(0, custody.returns.size());
+            pendingReturn.apply(custody);
+            assertEquals("CANCELLED", recovery.confirmExternal(pendingReturn).state());
+            assertEquals(List.of(), recovery.pendingExternal());
         }
     }
     private Fixtures fixtures(CivicDatabase database, RecordingCustody custody,

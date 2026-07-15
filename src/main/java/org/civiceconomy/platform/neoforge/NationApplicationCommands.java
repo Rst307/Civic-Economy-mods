@@ -3,6 +3,7 @@ package org.civiceconomy.platform.neoforge;
 import com.mojang.logging.LogUtils;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import java.time.Clock;
 import java.time.Duration;
@@ -83,9 +84,94 @@ final class NationApplicationCommands {
                 .then(Commands.literal("population")
                         .executes(context -> population(context.getSource())))
                 .then(roleCommand())
+                .then(mintCommand())
                 .then(territoryCommand())
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> mintCommand() {
+        return Commands.literal("mint")
+                .then(Commands.literal("start")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument("mintId", UuidArgument.uuid())
+                                        .then(Commands.argument("periodId", UuidArgument.uuid())
+                                                .then(Commands.argument(
+                                                                "amountMinorUnits",
+                                                                LongArgumentType.longArg(1L))
+                                                        .executes(context -> startMintBatch(
+                                                                context.getSource(),
+                                                                StringArgumentType.getString(
+                                                                        context, "requestId"),
+                                                                UuidArgument.getUuid(
+                                                                        context, "mintId"),
+                                                                UuidArgument.getUuid(
+                                                                        context, "periodId"),
+                                                                LongArgumentType.getLong(
+                                                                        context,
+                                                                        "amountMinorUnits"))))))))
+                .then(Commands.literal("cancel")
+                        .then(Commands.argument("batchId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> cancelMintBatch(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "batchId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))));
+    }
+
+    private static int startMintBatch(
+            CommandSourceStack source,
+            String requestId,
+            UUID mintId,
+            UUID periodId,
+            long amountMinorUnits)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .startMintBatch(
+                        player, requestId, mintId, periodId, amountMinorUnits)
+                .whenComplete((batch, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Mint Batch start", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Started Mint Batch " + batch.batchId()
+                                                + " state=" + batch.state()
+                                                + " amount=" + batch.amount().minorUnits()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Mint Batch start queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int cancelMintBatch(
+            CommandSourceStack source, UUID batchId, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .cancelMintBatch(player, batchId, requestId, reason)
+                .whenComplete((batch, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Mint Batch cancellation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Cancelled Mint Batch " + batch.batchId()
+                                                + " custody=" + batch.custodyState()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Mint Batch cancellation queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> territoryCommand() {

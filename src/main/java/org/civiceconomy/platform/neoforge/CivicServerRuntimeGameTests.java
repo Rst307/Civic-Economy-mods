@@ -31,6 +31,8 @@ import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.storage.LevelResource;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
@@ -68,11 +70,206 @@ import org.civiceconomy.territory.SuspendTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryClaimPosition;
 import org.civiceconomy.territory.TerritoryMaintenancePriority;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
+import org.civiceconomy.persistence.StoredMintRecipeIngredient;
+import org.civiceconomy.persistence.StoredNationalIssuanceQuotaAllocation;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
 public final class CivicServerRuntimeGameTests {
     private CivicServerRuntimeGameTests() {}
+
+    @GameTest(template = "empty", timeoutTicks = 600)
+    public static void runtimeMintBatchUsesRealFtbTerritoryInventoryAndSqliteWithoutIssuance(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-runtime-mint"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(8, 0, 8)).getCenter());
+        player.getInventory().setItem(0, new ItemStack(Items.DIAMOND, 3));
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        claimCapital(helper, team, player);
+        NationTeam teamSnapshot = new NationTeam(team.getId(), team.getOwner(), team.getMembers());
+        UUID periodId = UUID.randomUUID();
+        UUID recipeId = UUID.randomUUID();
+        UUID mintId = UUID.randomUUID();
+        String requestId = "runtime-mint-" + UUID.randomUUID();
+        String cancellationRequestId = "runtime-mint-cancel-" + UUID.randomUUID();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<UUID> batchId = new AtomicReference<>();
+        AtomicBoolean completed = new AtomicBoolean();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+        ChunkPos chunk = new ChunkPos(player.blockPosition());
+
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "runtime-mint-nation-" + UUID.randomUUID(),
+                            team.getId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, java.time.Duration.ofDays(7L), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "runtime-mint-citizenship-" + UUID.randomUUID(),
+                            player.getUUID(),
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                            .grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "runtime-mint-authority-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    player.getUUID(),
+                                    player.getUUID(),
+                                    NationFiscalPermission.MANAGE_ISSUANCE,
+                                    "Real runtime Mint GameTest"));
+                    database.publishIssuanceQuotaPeriod(
+                            periodId,
+                            "issuance-gametest",
+                            "runtime-mint-period-" + UUID.randomUUID(),
+                            now.minusSeconds(60L).toEpochMilli(),
+                            now.plusSeconds(3600L).toEpochMilli(),
+                            10_000L,
+                            1_000L,
+                            java.util.List.of(new StoredNationalIssuanceQuotaAllocation(
+                                    nation.nationId().value(), 1_000L)),
+                            "Runtime Mint period",
+                            now.minusSeconds(30L).toEpochMilli());
+                    database.activateNationalIssuanceQuota(
+                            UUID.randomUUID(),
+                            "issuance-gametest",
+                            "runtime-mint-activation-" + UUID.randomUUID(),
+                            periodId,
+                            nation.nationId().value(),
+                            player.getUUID(),
+                            1_000L,
+                            "Runtime Mint activation",
+                            now.minusSeconds(20L).toEpochMilli());
+                    database.publishMintRecipeVersion(
+                            recipeId,
+                            "civiceconomy-mint",
+                            "runtime-mint-recipe-" + UUID.randomUUID(),
+                            1,
+                            java.util.List.of(new StoredMintRecipeIngredient(
+                                    0, "EXACT_ITEM", "minecraft:diamond", 1L, 100L)),
+                            60_000L,
+                            "Runtime Mint recipe",
+                            now.minusSeconds(10L).toEpochMilli());
+                    database.registerMint(
+                            mintId,
+                            "civiceconomy-mint",
+                            "runtime-mint-facility-" + UUID.randomUUID(),
+                            nation.nationId().value(),
+                            player.level().dimension().location().toString(),
+                            player.blockPosition().getX(),
+                            player.blockPosition().getY(),
+                            player.blockPosition().getZ(),
+                            UUID.randomUUID(),
+                            UUID.randomUUID(),
+                            false,
+                            recipeId,
+                            player.getUUID(),
+                            "Runtime Mint facility",
+                            now.minusSeconds(5L).toEpochMilli());
+                    TerritoryMaintenanceRegistry territory =
+                            new TerritoryMaintenanceRegistry(database, setupClock);
+                    var activeCycle = database.territoryMaintenanceCycleAt(now.toEpochMilli());
+                    var cycle = activeCycle == null
+                            ? territory.openCycle(new OpenTerritoryMaintenanceCycle(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "runtime-mint-cycle-" + UUID.randomUUID(),
+                                    now.minusSeconds(60L),
+                                    now.plusSeconds(3600L)))
+                            : territory.cycle(activeCycle.cycleId());
+                    territory.assess(new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "runtime-mint-assessment-" + UUID.randomUUID(),
+                            cycle.cycleId(),
+                            nation.nationId(),
+                            team.getId(),
+                            player.level().dimension().location().toString(),
+                            chunk.x,
+                            chunk.z,
+                            0L,
+                            "Runtime Mint effective territory"));
+                    territory.settleZeroCostAssessments(new SuspendTerritoryMaintenance(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "runtime-mint-settlement-" + UUID.randomUUID(),
+                            cycle.cycleId(),
+                            nation.nationId(),
+                            "Runtime Mint zero-cost settlement"));
+                    return nation.nationId();
+                })
+                .thenCompose(ignored -> runtime.startMintBatch(
+                        player, requestId, mintId, periodId, 300L))
+                .thenCompose(batch -> {
+                    batchId.set(batch.batchId());
+                    return runtime.startMintBatch(player, requestId, mintId, periodId, 300L);
+                })
+                .thenCompose(replay -> runtime.startMintBatch(
+                                player, requestId, mintId, periodId, 301L)
+                        .handle((changed, failure) -> {
+                            helper.assertTrue(
+                                    failure != null,
+                                    "changed-payload runtime Mint replay must fail closed");
+                            return replay;
+                        }))
+                .thenCompose(replay -> runtime.cancelMintBatch(
+                        player,
+                        replay.batchId(),
+                        cancellationRequestId,
+                        "Runtime Mint cancellation"))
+                .thenCompose(cancelled -> runtime.cancelMintBatch(
+                        player,
+                        cancelled.batchId(),
+                        cancellationRequestId,
+                        "Runtime Mint cancellation"))
+                .thenCompose(cancelled -> runtime.submitDatabase(database -> {
+                    helper.assertValueEqual("CANCELLED", cancelled.state(), "runtime Mint state");
+                    helper.assertValueEqual(
+                            0L,
+                            database.nationalIssuanceQuota(periodId, cancelled.nationId().value())
+                                    .reservedMinorUnits(),
+                            "released runtime Mint quota");
+                    helper.assertTrue(
+                            database.monetarySupplyEvent(
+                                            "civiceconomy-mint", requestId)
+                                    == null,
+                            "runtime Mint has no issuance event before commit boundary");
+                    return cancelled;
+                }))
+                .whenComplete((cancelled, failure) -> helper.getLevel().getServer().execute(() -> {
+                    if (failure != null) {
+                        asyncFailure.set(failure);
+                    } else {
+                        helper.assertValueEqual(
+                                3,
+                                player.getInventory().getItem(0).getCount(),
+                                "returned runtime Mint diamonds");
+                        completed.set(true);
+                        unclaimCapital(helper, player);
+                    }
+                }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "runtime Mint async state"
+                            : "runtime Mint async failure: " + failure.getMessage());
+            helper.assertTrue(batchId.get() != null, "runtime Mint Batch ID");
+            helper.assertTrue(completed.get(), "runtime Mint start/cancel completion");
+        });
+    }
 
     @GameTest(template = "empty", timeoutTicks = 200)
     public static void playerLifecyclePersistsObservedOnlineTimeOffThread(GameTestHelper helper) {
@@ -135,7 +332,15 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted restart-only database restore command actions");
         helper.assertValueEqual(
-                Set.of("apply", "status", "cancel", "activate", "population", "role", "territory"),
+                Set.of(
+                        "apply",
+                        "status",
+                        "cancel",
+                        "activate",
+                        "population",
+                        "role",
+                        "mint",
+                        "territory"),
                 economy.getChild("nation").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),

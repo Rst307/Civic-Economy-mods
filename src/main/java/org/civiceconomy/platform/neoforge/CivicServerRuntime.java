@@ -96,6 +96,23 @@ import org.civiceconomy.territory.TerritoryFiscalValidity;
 import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.FiscalLedger;
+import org.civiceconomy.fiscal.MoneyAmount;
+import org.civiceconomy.mint.CancelMintBatch;
+import org.civiceconomy.mint.EffectiveTerritoryMintAuthority;
+import org.civiceconomy.mint.MintBatch;
+import org.civiceconomy.mint.MintBatchCoordinator;
+import org.civiceconomy.mint.MintBatchRecovery;
+import org.civiceconomy.mint.MintFiscalServiceProvisioner;
+import org.civiceconomy.mint.PendingMintMaterialOperation;
+import org.civiceconomy.mint.PendingMintMaterialReturn;
+import org.civiceconomy.mint.PendingMintMaterialTake;
+import org.civiceconomy.mint.PrepareMintBatch;
+import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
+import org.civiceconomy.nation.CitizenshipRegistry;
+import org.civiceconomy.nation.FtbTeamsNationProvider;
+import org.civiceconomy.nation.NationFiscalAuthorityRegistry;
+import org.civiceconomy.territory.EffectiveTerritoryQuery;
+import org.civiceconomy.territory.TerritoryOwnershipSource;
 import org.slf4j.Logger;
 
 public final class CivicServerRuntime {
@@ -105,6 +122,7 @@ public final class CivicServerRuntime {
     private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
+    private static final int MINT_BATCH_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
     private static final int DATABASE_BACKUP_RETENTION = 8;
@@ -203,7 +221,14 @@ public final class CivicServerRuntime {
                 DATABASE_BACKUP_RETENTION);
         OnlineDatabaseRestoreManager restores =
                 new OnlineDatabaseRestoreManager(database, databaseDirectory, clock);
-        state = new RuntimeState(server, sessions, writer, backups, restores, now);
+        state = new RuntimeState(
+                server,
+                sessions,
+                writer,
+                backups,
+                restores,
+                new ServerPlayerMintMaterialCustody(server),
+                now);
         scheduleDatabaseBackupRecovery(state);
         scheduleTerritoryPermitMirrorRefresh(state);
         scheduleTerritoryForceLoadRestrictionRefresh(state);
@@ -211,6 +236,7 @@ public final class CivicServerRuntime {
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
         schedulePermanentDestructionRecovery(state);
+        scheduleMintBatchRecovery(state);
         scheduleTerritoryMaintenanceAssessment(state);
         scheduleTerritoryForceLoadEnforcementRecovery(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
@@ -280,6 +306,11 @@ public final class CivicServerRuntime {
                 >= PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS) {
             current.ticksSincePermanentDestructionRecovery = 0;
             schedulePermanentDestructionRecovery(current);
+        }
+        current.ticksSinceMintBatchRecovery++;
+        if (current.ticksSinceMintBatchRecovery >= MINT_BATCH_RECOVERY_INTERVAL_TICKS) {
+            current.ticksSinceMintBatchRecovery = 0;
+            scheduleMintBatchRecovery(current);
         }
         current.ticksSinceTerritoryMaintenanceAssessment++;
         if (current.ticksSinceTerritoryMaintenanceAssessment
@@ -388,6 +419,262 @@ public final class CivicServerRuntime {
 
     CompletableFuture<List<StoredDatabaseRestoreOperation>> databaseRestores() {
         return submitDatabase(CivicDatabase::databaseRestoreOperations);
+    }
+
+    CompletableFuture<MintBatch> startMintBatch(
+            ServerPlayer actor,
+            String requestId,
+            UUID mintId,
+            UUID periodId,
+            long amountMinorUnits) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Instant commandTime = clock.instant();
+        Clock commandClock = Clock.fixed(commandTime, ZoneOffset.UTC);
+        CompletableFuture<MintBatch> result = new CompletableFuture<>();
+        onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    var existing = mintCoordinator(
+                                    database,
+                                    team,
+                                    NO_TERRITORY_OWNERSHIP,
+                                    current,
+                                    commandClock)
+                            .findByRequest(
+                                    MintFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId,
+                                    mintId,
+                                    periodId,
+                                    actorPlayerId,
+                                    MoneyAmount.ofMinorUnits(amountMinorUnits));
+                    return existing.<MintStartPreparation>map(MintStartReplay::new)
+                            .orElseGet(() -> new NewMintStart(
+                                    mintStartFacts(database, mintId, amountMinorUnits), team));
+                }))
+                .thenCompose(preparation -> preparation instanceof MintStartReplay replay
+                        ? CompletableFuture.completedFuture(replay.batch())
+                        : startNewMintBatch(
+                                current,
+                                actor,
+                                actorPlayerId,
+                                requestId,
+                                mintId,
+                                periodId,
+                                amountMinorUnits,
+                                ((NewMintStart) preparation).facts(),
+                                ((NewMintStart) preparation).team(),
+                                commandClock))
+                .whenComplete((batch, failure) -> {
+                    if (failure == null) {
+                        result.complete(batch);
+                    } else {
+                        result.completeExceptionally(failure);
+                    }
+                });
+        return result;
+    }
+
+    private CompletableFuture<MintBatch> startNewMintBatch(
+            RuntimeState current,
+            ServerPlayer actor,
+            UUID actorPlayerId,
+            String requestId,
+            UUID mintId,
+            UUID periodId,
+            long amountMinorUnits,
+            MintStartFacts facts,
+            NationTeam team,
+            Clock commandClock) {
+        return onServer(current, () -> snapshotMintStart(actor, facts, team))
+                .thenCompose(snapshot -> current.writer.submitDatabase(database -> {
+                    MintBatchCoordinator coordinator = mintCoordinator(
+                            database, snapshot.team(), snapshot.ownership(), current, commandClock);
+                    return new PreparedMintTake(
+                            coordinator.prepareExternal(new PrepareMintBatch(
+                                    MintFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId,
+                                    mintId,
+                                    periodId,
+                                    actorPlayerId,
+                                    MoneyAmount.ofMinorUnits(amountMinorUnits),
+                                    snapshot.materials(),
+                                    "Player starts authorized Mint Batch")),
+                            snapshot.team(),
+                            snapshot.ownership());
+                }))
+                .thenCompose(prepared -> onServer(current, () -> {
+                    prepared.pending().apply(custodyFor(current, actor));
+                    return prepared;
+                }))
+                .thenCompose(prepared -> current.writer.submitDatabase(database ->
+                        mintCoordinator(
+                                        database,
+                                        prepared.team(),
+                                        prepared.ownership(),
+                                        current,
+                                        commandClock)
+                                .confirmExternal(prepared.pending())));
+    }
+
+    CompletableFuture<MintBatch> cancelMintBatch(
+            ServerPlayer actor, UUID batchId, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Instant commandTime = clock.instant();
+        Clock commandClock = Clock.fixed(commandTime, ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    MintBatchCoordinator coordinator = mintCoordinator(
+                            database, team, NO_TERRITORY_OWNERSHIP, current, commandClock);
+                    CancelMintBatch request = new CancelMintBatch(
+                            MintFiscalServiceProvisioner.SERVICE_IDENTITY,
+                            requestId,
+                            batchId,
+                            actorPlayerId,
+                            reason);
+                    var replay = coordinator.findCompletedCancellation(request);
+                    if (replay.isPresent()) {
+                        return new MintCancellationReplay(replay.get());
+                    }
+                    return new PreparedMintReturn(
+                            coordinator.prepareCancellationExternal(request),
+                            team);
+                }))
+                .thenCompose(preparation -> preparation instanceof MintCancellationReplay replay
+                        ? CompletableFuture.completedFuture(replay.batch())
+                        : cancelPreparedMintBatch(
+                                current, actor, (PreparedMintReturn) preparation, commandClock));
+    }
+
+    private CompletableFuture<MintBatch> cancelPreparedMintBatch(
+            RuntimeState current,
+            ServerPlayer actor,
+            PreparedMintReturn prepared,
+            Clock commandClock) {
+        return onServer(current, () -> {
+                    prepared.pending().apply(custodyFor(current, actor));
+                    return prepared;
+                })
+                .thenCompose(confirmedPreparation -> current.writer.submitDatabase(database ->
+                        mintCoordinator(
+                                        database,
+                                        confirmedPreparation.team(),
+                                        NO_TERRITORY_OWNERSHIP,
+                                        current,
+                                        commandClock)
+                                .confirmExternal(confirmedPreparation.pending())));
+    }
+
+    private RuntimeState requireState() {
+        RuntimeState current = state;
+        if (current == null) {
+            throw new IllegalStateException("Civic server runtime is not active");
+        }
+        return current;
+    }
+
+    private MintStartFacts mintStartFacts(
+            CivicDatabase database, UUID mintId, long amountMinorUnits) {
+        if (mintId == null || amountMinorUnits <= 0L) {
+            throw new IllegalArgumentException("Mint Batch start values are invalid");
+        }
+        var mint = database.registeredMint(mintId);
+        if (mint == null) {
+            throw new IllegalArgumentException("Unknown Registered Mint " + mintId);
+        }
+        return new MintStartFacts(
+                mint,
+                database.mintRecipeIngredients(mint.recipeVersionId()),
+                amountMinorUnits);
+    }
+
+    private MintStartSnapshot snapshotMintStart(
+            ServerPlayer player, MintStartFacts facts, NationTeam team) {
+        ResourceLocation dimensionId = ResourceLocation.tryParse(facts.mint().dimensionId());
+        if (dimensionId == null) {
+            throw new IllegalStateException("Registered Mint dimension is invalid");
+        }
+        int chunkX = Math.floorDiv(facts.mint().blockX(), 16);
+        int chunkZ = Math.floorDiv(facts.mint().blockZ(), 16);
+        ResourceKey<Level> dimension = ResourceKey.create(Registries.DIMENSION, dimensionId);
+        var claim = FtbChunksAdapter.live().find(dimension, new ChunkPos(chunkX, chunkZ))
+                .filter(found -> found.teamId().equals(team.teamId()))
+                .orElseThrow(() -> new SecurityException(
+                        "Your exact Nation FTB Team does not own the Registered Mint Claim"));
+        TerritoryOwnershipSource ownership = (requestedDimension, requestedX, requestedZ) ->
+                requestedDimension.equals(claim.dimension().location().toString())
+                                && requestedX == claim.chunkPos().x
+                                && requestedZ == claim.chunkPos().z
+                        ? Optional.of(claim.teamId())
+                        : Optional.empty();
+        return new MintStartSnapshot(
+                team,
+                ownership,
+                MintMaterialManifestSelector.select(
+                        player.getInventory(), facts.ingredients(), facts.amountMinorUnits()));
+    }
+
+    private static ServerPlayerMintMaterialCustody custodyFor(
+            RuntimeState current, ServerPlayer actor) {
+        return new ServerPlayerMintMaterialCustody(
+                current.server,
+                playerId -> playerId.equals(actor.getUUID()) ? actor : null,
+                () -> {});
+    }
+
+    private NationTeam requireActorTeam(UUID actorPlayerId) {
+        FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+        return teams.findEffectiveTeamForPlayer(actorPlayerId)
+                .or(() -> teams.findOwnedTeamForPlayer(actorPlayerId))
+                .orElseThrow(() -> new SecurityException(
+                        "Mint Batch actor has no current non-player FTB Team"));
+    }
+
+    private MintBatchCoordinator mintCoordinator(
+            CivicDatabase database,
+            NationTeam team,
+            TerritoryOwnershipSource ownership,
+            RuntimeState current,
+            Clock operationClock) {
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        NationRegistry nations = new NationRegistry(database, teams);
+        CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                database, CITIZENSHIP_TRANSFER_COOLDOWN, operationClock);
+        CitizenshipCorrectionGraceRegistry corrections =
+                new CitizenshipCorrectionGraceRegistry(database, operationClock);
+        FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
+                nations, citizenships, corrections, teams);
+        FiscalAuthorization authorization = new FiscalAuthorization(database);
+        org.civiceconomy.nation.NationId nationId = nations.findByFtbTeam(team.teamId())
+                .orElseThrow(() -> new SecurityException(
+                        "Your FTB Team is not bound to a formal Nation"))
+                .nationId();
+        new MintFiscalServiceProvisioner(authorization).ensureAuthorized(nationId);
+        return new MintBatchCoordinator(
+                database,
+                authorization.openSession(MintFiscalServiceProvisioner.SERVICE_IDENTITY),
+                new NationFiscalAuthorityRegistry(database, provider, operationClock),
+                new EffectiveTerritoryMintAuthority(
+                        database,
+                        new EffectiveTerritoryQuery(
+                                new TerritoryMaintenanceRegistry(database, operationClock),
+                                ownership),
+                        operationClock),
+                current.mintCustody,
+                operationClock);
+    }
+
+    private static <T> CompletableFuture<T> onServer(
+            RuntimeState current, java.util.concurrent.Callable<T> operation) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        current.server.execute(() -> {
+            try {
+                result.complete(operation.call());
+            } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+            }
+        });
+        return result;
     }
 
     private void scheduleDatabaseBackupRecovery(RuntimeState current) {
@@ -1215,6 +1502,59 @@ public final class CivicServerRuntime {
                 });
     }
 
+    private void scheduleMintBatchRecovery(RuntimeState current) {
+        if (state != current || !current.mintBatchRecoveryQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database ->
+                        new MintBatchRecovery(database, recoveryClock).pendingExternal())
+                .whenComplete((pending, failure) -> {
+                    if (failure != null) {
+                        current.mintBatchRecoveryQueued.set(false);
+                        LOGGER.error("Mint Batch recovery scan failed closed", failure);
+                        return;
+                    }
+                    recoverMintBatchOperations(current, pending, recoveryClock, 0, 0);
+                });
+    }
+
+    private void recoverMintBatchOperations(
+            RuntimeState current,
+            List<PendingMintMaterialOperation> pending,
+            Clock recoveryClock,
+            int index,
+            int recovered) {
+        if (state != current || index >= pending.size()) {
+            current.mintBatchRecoveryQueued.set(false);
+            if (recovered > 0) {
+                LOGGER.info("Recovered {} Mint Batch material operation(s)", recovered);
+            }
+            return;
+        }
+        PendingMintMaterialOperation operation = pending.get(index);
+        onServer(current, () -> {
+                    operation.apply(current.mintCustody);
+                    return operation;
+                })
+                .thenCompose(applied -> current.writer.submitDatabase(database ->
+                        new MintBatchRecovery(database, recoveryClock).confirmExternal(applied)))
+                .whenComplete((batch, failure) -> {
+                    if (failure != null) {
+                        LOGGER.warn(
+                                "Mint Batch {} recovery remains pending; the material owner may be offline",
+                                operation.batchId(),
+                                failure);
+                    }
+                    recoverMintBatchOperations(
+                            current,
+                            pending,
+                            recoveryClock,
+                            index + 1,
+                            failure == null ? recovered + 1 : recovered);
+                });
+    }
+
     void scheduleTerritoryMaintenanceAssessment() {
         RuntimeState current = state;
         if (current != null) {
@@ -1666,11 +2006,13 @@ public final class CivicServerRuntime {
         private final AsyncOnlineTimeWriter writer;
         private final OnlineDatabaseBackupManager backups;
         private final OnlineDatabaseRestoreManager restores;
+        private final ServerPlayerMintMaterialCustody mintCustody;
         private final long startedAtEpochMillis;
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
+        private final AtomicBoolean mintBatchRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceSettlementQueued = new AtomicBoolean();
         private final AtomicBoolean territoryForceLoadEnforcementQueued = new AtomicBoolean();
@@ -1682,6 +2024,7 @@ public final class CivicServerRuntime {
         private int ticksSinceCitizenshipReconciliation;
         private int ticksSinceTerritoryPermitCompensation;
         private int ticksSincePermanentDestructionRecovery;
+        private int ticksSinceMintBatchRecovery;
         private int ticksSinceTerritoryMaintenanceAssessment;
         private int ticksSinceDatabaseBackup;
         private boolean failureLogged;
@@ -1692,15 +2035,51 @@ public final class CivicServerRuntime {
                 AsyncOnlineTimeWriter writer,
                 OnlineDatabaseBackupManager backups,
                 OnlineDatabaseRestoreManager restores,
+                ServerPlayerMintMaterialCustody mintCustody,
                 long startedAtEpochMillis) {
             this.server = server;
             this.sessions = sessions;
             this.writer = writer;
             this.backups = backups;
             this.restores = restores;
+            this.mintCustody = mintCustody;
             this.startedAtEpochMillis = startedAtEpochMillis;
         }
     }
+
+    private static final TerritoryOwnershipSource NO_TERRITORY_OWNERSHIP =
+            (dimension, chunkX, chunkZ) -> Optional.empty();
+
+    private record MintStartFacts(
+            org.civiceconomy.persistence.StoredRegisteredMint mint,
+            List<org.civiceconomy.persistence.StoredMintRecipeIngredient> ingredients,
+            long amountMinorUnits) {}
+
+    private sealed interface MintStartPreparation permits MintStartReplay, NewMintStart {}
+
+    private record MintStartReplay(MintBatch batch) implements MintStartPreparation {}
+
+    private record NewMintStart(MintStartFacts facts, NationTeam team)
+            implements MintStartPreparation {}
+
+    private record MintStartSnapshot(
+            NationTeam team,
+            TerritoryOwnershipSource ownership,
+            List<org.civiceconomy.mint.MintMaterialStack> materials) {}
+
+    private record PreparedMintTake(
+            PendingMintMaterialTake pending,
+            NationTeam team,
+            TerritoryOwnershipSource ownership) {}
+
+    private sealed interface MintCancellationPreparation
+            permits MintCancellationReplay, PreparedMintReturn {}
+
+    private record MintCancellationReplay(MintBatch batch)
+            implements MintCancellationPreparation {}
+
+    private record PreparedMintReturn(PendingMintMaterialReturn pending, NationTeam team)
+            implements MintCancellationPreparation {}
 
     private record TerritoryPermitCompensationResult(int recovered, int expired) {}
 

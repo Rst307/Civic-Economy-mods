@@ -16,6 +16,7 @@ import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.mint.MintMaterialCustodyReturn;
 import org.civiceconomy.mint.MintMaterialCustodyTransfer;
 import org.civiceconomy.mint.MintMaterialStack;
+import org.civiceconomy.persistence.StoredMintRecipeIngredient;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -143,6 +144,41 @@ public final class MintMaterialCustodyGameTests {
                     "diamonds after rejected tag manifest");
             helper.succeed();
         }
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void manifestDerivesExactActualItemFromLockedRecipeAndInventory(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-mint-manifest"),
+                ClientInformation.createDefault());
+        player.getInventory().setItem(0, new ItemStack(Items.OAK_LOG, 4));
+        player.getInventory().setItem(1, new ItemStack(Items.DIAMOND, 3));
+
+        List<MintMaterialStack> manifest = MintMaterialManifestSelector.select(
+                player.getInventory(),
+                List.of(
+                        new StoredMintRecipeIngredient(
+                                0, "TAG", "minecraft:logs", 2L, 0L),
+                        new StoredMintRecipeIngredient(
+                                1, "EXACT_ITEM", "minecraft:diamond", 1L, 100L)),
+                300L);
+
+        helper.assertValueEqual(
+                List.of(
+                        new MintMaterialStack(
+                                0, "TAG", "minecraft:logs", "minecraft:oak_log", 2L),
+                        new MintMaterialStack(
+                                1, "EXACT_ITEM", "minecraft:diamond", "minecraft:diamond", 3L)),
+                manifest,
+                "server-derived Mint material manifest");
+        helper.assertValueEqual(
+                4,
+                player.getInventory().getItem(0).getCount(),
+                "logs before custody phase");
+        helper.succeed();
     }
 
     private static final class SimulatedInventoryCrash extends RuntimeException {}
