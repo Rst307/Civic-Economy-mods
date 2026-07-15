@@ -188,6 +188,7 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised SQLite to schema v34 with append-only, future-effective Territory Maintenance Policy versions. Each policy audits cycle duration, base maintenance per chargeable Claim, enclave/cross-dimension multiplier, force-load surcharge, 30%-80% destruction ratio, administrator, request ID, reason, record time, and effect time.
 - Added OP/console-only `/civic economy admin territory maintenance show|schedule`. With no effective Maintenance Policy, automatic maintenance is explicitly disabled rather than silently applying a zero or hard-coded fee; the existing asynchronous command GameTest persists and verifies every server-derived policy field in the world database.
 - Raised SQLite to schema v35 with a durable Assessment Batch manifest. The canonical SHA-256 and Claim count are recorded before per-Claim writes, so an interrupted batch can continue from the exact snapshot while any added, removed, repriced, rebound, or reclassified Claim conflicts before mixing facts into the Cycle.
+- Added the pure Territory Maintenance Assessment Planner. It assigns Effective Citizen free Claim slots in persisted Priority order, calculates base per-Claim maintenance, rounds enclave/cross-dimension multipliers upward to the next LC minor unit, adds the independent force-load surcharge, and uses checked arithmetic throughout. This is domain/build evidence only; the runtime scheduler is not yet enabled.
 
 ## In progress
 
@@ -263,8 +264,8 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - After the pure Territory Maintenance Priority policy, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 165 tests with zero failures. No GameTest or real dependency runtime claim is made for this pure policy slice.
 - After schema-v32 Priority persistence, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 167 tests with zero failures.
 - After schema-v33 atomic partial Settlement, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 170 tests with zero failures. The suite includes a direct database-boundary test that submits a forged lower-priority-funded/higher-priority-suspended partition and verifies atomic rejection with both Assessments still `PENDING` and no Settlement row.
-- After schema-v35 Maintenance Policy and assessment-snapshot foundations, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 178 tests with zero failures.
-- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,959,386 bytes, SHA-256 `6DB97DC2B6823CA756DEB602EBD341A64AC63DF7D78802EB345A1FE32399C1EE`. It remains a development artifact until all v1 completion gates pass.
+- After the pure Territory Maintenance Assessment Planner, `gradlew.bat clean build --no-daemon --console=plain` passed from fresh outputs; the full JUnit/SQLite suite executed 180 tests with zero failures.
+- Current development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 14,963,710 bytes, SHA-256 `BF0AE60B51B26F9A10748900D8716FB6224C82B4B35810E30902B2814E7C3B29`. It remains a development artifact until all v1 completion gates pass.
 
 ### SQLite integration
 
