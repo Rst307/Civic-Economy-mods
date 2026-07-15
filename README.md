@@ -109,6 +109,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation mint status [batchId]
 /civic economy nation mint cancel <batchId> <requestId> <reason>
 /civic economy nation treasury withdraw <requestId> <amountMinorUnits> <reason>
+/civic economy nation treasury withdraw approve <approvalRequestId> <requestId> <reason>
+/civic economy nation treasury withdraw policy schedule <requestId> <effectiveAtEpochMillis> <thresholdMinorUnits> <requiredApprovals> <reason>
 /civic economy nation treasury destroy <requestId> <amountMinorUnits> <reason>
 /civic economy nation territory allowance
 /civic economy nation territory prepare <requestId>
@@ -122,7 +124,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。
 
-`nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、公共政策和恢复管理。
+`nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、审批策略、公共政策和恢复管理。
 
 `nation mint start` 只接受稳定请求 ID、Registered Mint ID、Issuance Quota Period ID 和面值。服务端从真实玩家、FTB Team、Registered Mint、锁定 Recipe Version、当前 Effective Territory 与玩家库存推导 Nation、位置和材料清单，并要求精确 Nation `MANAGE_ISSUANCE`；重复请求不得改变 Mint、Period、操作者或金额。`cancel` 仅返还该批次真实托管材料并在确认返还后释放额度。处理截止后，服务端先持久化发行 intent，再用同一 operation UUID 向精确 National Treasury 执行真实 LC deposit，幂等确认材料消费，最后在单一 SQLite 事务中将 reserved quota 转为 used、写入唯一 `ISSUANCE` Monetary Supply event 并释放 Registered Mint；启动和每分钟恢复会继续处理所有 pending 窗口。`status` 只读取真实玩家 UUID 所拥有的最新或指定 Batch，显示 Batch/custody/issuance 阶段、处理截止、原始理由、外部 LC/材料审计引用，以及最新 Mint Recovery Incident 的步骤、失败类型、消息、次数、时间和解决证据，不能查看其他玩家的 Batch，也不能将普通 LC 转账当作发行。
 
@@ -134,7 +136,9 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `nation treasury destroy` 是国家国库的永久销毁入口，不是付款、退款、提现或管理员余额调整。命令只接受稳定请求 ID、正金额和审计理由；服务端从真实玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导精确 National Treasury，并要求该玩家拥有 `MANAGE_ISSUANCE`。调用者不能提交 Nation、Team 或来源账户。真实 LC 扣减、累计净发行量减少、`player:<UUID>` 操作者和请求重放都由持久化 Permanent Destruction 状态机约束；同一请求改变金额、操作者、来源或理由会失败且不会再次销毁。
 
-`nation treasury withdraw` 把精确 National Treasury 的 LC 银行余额等额转换为交付给当前获授权玩家的实体 LC 硬币，不是付款、发行、永久销毁或免费赠款。命令只接受稳定请求 ID、正金额和审计理由；服务端推导真实玩家、FTB Team、正式 Citizenship/Nation 与来源国库，并要求该玩家拥有 `MANAGE_WITHDRAWAL`。首次执行会先在真实玩家 inventory 副本上按固定 LC 面额精确模拟容量，容量不足时国库不扣款；持久化操作、国库扣款 marker 和玩家现金交付 marker 共同保证重放只补齐缺失步骤。提现不改变 Cumulative Net Issuance，调用者也不能指定 Nation、Team、来源账户或目标玩家。
+`nation treasury withdraw` 把精确 National Treasury 的 LC 银行余额等额转换为交付给当前获授权玩家的实体 LC 硬币，不是付款、发行、永久销毁或免费赠款。命令只接受稳定请求 ID、正金额和审计理由；服务端推导真实玩家、FTB Team、正式 Citizenship/Nation 与来源国库，并要求该玩家拥有 `MANAGE_WITHDRAWAL`。请求会按发起时生效的 Withdrawal Approval Policy 固定所需人数并自动记录发起人的第一票；人数不足时只保留 `PENDING` 审批，不创建提现操作、不扣 LC。其他具有同一 Nation `MANAGE_WITHDRAWAL` 的正式 Citizen 使用 `withdraw approve` 对精确 approval UUID 审批，同一 Citizen 不能重复计票；达到人数后，提现操作永久绑定该审批决定。首次外部执行会先在目标玩家 inventory 副本上按固定 LC 面额精确模拟容量，容量不足时国库不扣款；持久化操作、国库扣款 marker 和玩家现金交付 marker 共同保证重放只补齐缺失步骤。提现不改变 Cumulative Net Issuance，调用者也不能指定 Nation、Team、来源账户或目标玩家。
+
+`withdraw policy schedule` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`。策略只能未来生效；`thresholdMinorUnits=0` 表示所有提现都需要指定人数，正阈值表示低于阈值保持单人、达到或超过阈值需要 `requiredApprovals`（1–16）名不同 Citizen。策略版本、操作者、门槛、人数、生效时间和理由都会持久化审计，且不会改变已经发起的审批请求。
 
 FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenship；后续 Team 新成员不会自动入籍。正式 Citizen 离开绑定 Team 后立即停止 Provider 权限和 Effective Citizen 人口贡献，进入当前固定两天的 Citizenship Correction Grace；宽限内回归恢复同一 Citizenship，截止仍未回归才结束 Citizenship 并开始转籍冷却。协调扫描只在服务器线程读取 FTB 快照，所有持久化工作均在 SQLite 线程执行。
 

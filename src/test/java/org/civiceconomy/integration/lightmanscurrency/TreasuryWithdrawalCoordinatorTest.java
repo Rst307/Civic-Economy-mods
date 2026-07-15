@@ -8,11 +8,13 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.ApproveTreasuryWithdrawal;
 import org.civiceconomy.fiscal.ConfirmTreasuryWithdrawal;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.FiscalAccessDeniedException;
@@ -23,6 +25,11 @@ import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.ScheduleWithdrawalApprovalPolicy;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalPendingException;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalRegistry;
+import org.civiceconomy.fiscal.WithdrawalApprovalPolicyRegistry;
+import org.civiceconomy.fiscal.WithdrawalApprovalTier;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
@@ -299,6 +306,123 @@ class TreasuryWithdrawalCoordinatorTest {
                     "PREPARED",
                     database.treasuryWithdrawalOperation(
                                     OTHER_SERVICE.value(), other.requestId())
+                            .state());
+        }
+    }
+
+    @Test
+    void multiPersonPolicyBlocksPreparationUntilADistinctApprovedDecisionIsBound() {
+        AtomicLong externalCalls = new AtomicLong();
+        ConfirmTreasuryWithdrawal request = new ConfirmTreasuryWithdrawal(
+                SERVICE,
+                "two-person-withdrawal",
+                NATION,
+                TREASURY,
+                ACTOR,
+                MoneyAmount.ofMinorUnits(700L),
+                "Two-person governed cash withdrawal");
+        try (CivicDatabase database = database()) {
+            authorize(database);
+            new WithdrawalApprovalPolicyRegistry(
+                            database,
+                            Clock.fixed(NOW.minusSeconds(172_800L), ZoneOffset.UTC))
+                    .schedule(new ScheduleWithdrawalApprovalPolicy(
+                            new ServiceIdentity("withdrawal-governance"),
+                            "require-two-withdrawal-approvers",
+                            NATION,
+                            ACTOR,
+                            List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 2)),
+                            NOW.minusSeconds(86_400L),
+                            "Require two Treasury officers"));
+            TreasuryWithdrawalCoordinator coordinator = coordinator(
+                    database, ignored -> externalCalls.incrementAndGet());
+
+            TreasuryWithdrawalApprovalPendingException pending = assertThrows(
+                    TreasuryWithdrawalApprovalPendingException.class,
+                    () -> coordinator.confirm(request));
+
+            assertEquals(0L, externalCalls.get());
+            assertEquals(0, database.treasuryWithdrawalOperations().size());
+            assertEquals(1, pending.approval().approverPlayerIds().size());
+
+            UUID secondApprover =
+                    UUID.fromString("99999999-9999-9999-9999-999999999999");
+            var approved = new TreasuryWithdrawalApprovalRegistry(database, CLOCK)
+                    .approve(new ApproveTreasuryWithdrawal(
+                            SERVICE,
+                            "second-approval",
+                            pending.approval().approvalRequestId(),
+                            secondApprover,
+                            "Independent Treasury officer approval"));
+            assertEquals("APPROVED", approved.state());
+
+            var committed = coordinator.confirmApproved(approved.approvalRequestId());
+
+            assertEquals("COMMITTED", committed.state());
+            assertEquals(approved.approvalRequestId(), committed.approvalRequestId());
+            assertEquals(1L, externalCalls.get());
+            assertEquals(
+                    "EXECUTED",
+                    new TreasuryWithdrawalApprovalRegistry(database, CLOCK)
+                            .find(approved.approvalRequestId())
+                            .state());
+        }
+    }
+
+    @Test
+    void approvedDecisionWithoutAnOperationIsRecoveredAfterRestart() {
+        ConfirmTreasuryWithdrawal request = new ConfirmTreasuryWithdrawal(
+                SERVICE,
+                "approved-before-process-death",
+                NATION,
+                TREASURY,
+                ACTOR,
+                MoneyAmount.ofMinorUnits(700L),
+                "Recover approved decision after process death");
+        UUID approvalRequestId;
+        try (CivicDatabase database = database()) {
+            authorize(database);
+            new WithdrawalApprovalPolicyRegistry(
+                            database,
+                            Clock.fixed(NOW.minusSeconds(172_800L), ZoneOffset.UTC))
+                    .schedule(new ScheduleWithdrawalApprovalPolicy(
+                            new ServiceIdentity("withdrawal-governance-restart"),
+                            "require-two-before-restart",
+                            NATION,
+                            ACTOR,
+                            List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 2)),
+                            NOW.minusSeconds(86_400L),
+                            "Require two approvers before restart"));
+            TreasuryWithdrawalApprovalPendingException pending = assertThrows(
+                    TreasuryWithdrawalApprovalPendingException.class,
+                    () -> coordinator(database, ignored -> {}).confirm(request));
+            approvalRequestId = pending.approval().approvalRequestId();
+            new TreasuryWithdrawalApprovalRegistry(database, CLOCK).approve(
+                    new ApproveTreasuryWithdrawal(
+                            SERVICE,
+                            "second-approval-before-restart",
+                            approvalRequestId,
+                            UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                            "Second approval committed before process death"));
+            assertEquals(0, database.treasuryWithdrawalOperations().size());
+        }
+
+        AtomicLong externalCalls = new AtomicLong();
+        try (CivicDatabase reopened = database()) {
+            TreasuryWithdrawalCoordinator recovery = coordinator(
+                    reopened, ignored -> externalCalls.incrementAndGet());
+
+            var prepared = recovery.prepareApprovedPending();
+
+            assertEquals(1, prepared.size());
+            assertEquals(approvalRequestId, prepared.getFirst().approvalRequestId());
+            recovery.applyExternal(prepared.getFirst());
+            recovery.commit(prepared.getFirst());
+            assertEquals(1L, externalCalls.get());
+            assertEquals(
+                    "EXECUTED",
+                    new TreasuryWithdrawalApprovalRegistry(reopened, CLOCK)
+                            .find(approvalRequestId)
                             .state());
         }
     }

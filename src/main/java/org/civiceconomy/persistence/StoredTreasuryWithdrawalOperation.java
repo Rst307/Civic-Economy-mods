@@ -6,6 +6,7 @@ public record StoredTreasuryWithdrawalOperation(
         UUID withdrawalId,
         String serviceIdentity,
         String requestId,
+        UUID approvalRequestId,
         UUID nationId,
         String sourceAccount,
         UUID actorPlayerId,

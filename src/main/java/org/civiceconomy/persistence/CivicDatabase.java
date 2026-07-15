@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 55;
+    private static final int SCHEMA_VERSION = 56;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -6205,6 +6205,30 @@ public final class CivicDatabase implements AutoCloseable {
             long amountMinorUnits,
             String reason,
             long preparedAtEpochMillis) {
+        return prepareTreasuryWithdrawal(
+                withdrawalId,
+                serviceIdentity,
+                requestId,
+                null,
+                nationId,
+                sourceAccount,
+                actorPlayerId,
+                amountMinorUnits,
+                reason,
+                preparedAtEpochMillis);
+    }
+
+    public synchronized StoredTreasuryWithdrawalOperation prepareTreasuryWithdrawal(
+            UUID withdrawalId,
+            String serviceIdentity,
+            String requestId,
+            UUID approvalRequestId,
+            UUID nationId,
+            String sourceAccount,
+            UUID actorPlayerId,
+            long amountMinorUnits,
+            String reason,
+            long preparedAtEpochMillis) {
         if (withdrawalId == null
                 || serviceIdentity == null
                 || serviceIdentity.isBlank()
@@ -6223,27 +6247,60 @@ public final class CivicDatabase implements AutoCloseable {
         StoredTreasuryWithdrawalOperation replay =
                 treasuryWithdrawalOperation(serviceIdentity, requestId);
         if (replay != null) {
+            if (!java.util.Objects.equals(
+                    replay.approvalRequestId(), approvalRequestId)) {
+                throw new IllegalStateException(
+                        "Treasury Withdrawal approval binding changed");
+            }
             return replay;
         }
         RuntimeException primaryFailure = null;
         try {
             connection.setAutoCommit(false);
+            if (approvalRequestId != null) {
+                StoredTreasuryWithdrawalApproval approval =
+                        treasuryWithdrawalApproval(approvalRequestId);
+                if (approval == null) {
+                    throw new IllegalArgumentException(
+                            "Unknown Treasury Withdrawal approval " + approvalRequestId);
+                }
+                if (!approval.state().equals("APPROVED")) {
+                    throw new IllegalStateException(
+                            "Treasury Withdrawal approval is " + approval.state());
+                }
+                if (!approval.serviceIdentity().equals(serviceIdentity)
+                        || !approval.requestId().equals(requestId)
+                        || !approval.nationId().equals(nationId)
+                        || !approval.sourceAccount().equals(sourceAccount)
+                        || !approval.actorPlayerId().equals(actorPlayerId)
+                        || approval.amountMinorUnits() != amountMinorUnits
+                        || !approval.reason().equals(reason)) {
+                    throw new IllegalStateException(
+                            "Treasury Withdrawal does not match its approved payload");
+                }
+            }
             try (PreparedStatement insert = connection.prepareStatement("""
                     INSERT INTO treasury_withdrawal_operation (
-                        withdrawal_id, service_identity, request_id, nation_id,
+                        withdrawal_id, service_identity, request_id,
+                        approval_request_id, nation_id,
                         source_account, actor_player_id, amount_minor_units,
                         reason, state, prepared_at_epoch_millis
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?)
                     """)) {
                 insert.setString(1, withdrawalId.toString());
                 insert.setString(2, serviceIdentity);
                 insert.setString(3, requestId);
-                insert.setString(4, nationId.toString());
-                insert.setString(5, sourceAccount);
-                insert.setString(6, actorPlayerId.toString());
-                insert.setLong(7, amountMinorUnits);
-                insert.setString(8, reason);
-                insert.setLong(9, preparedAtEpochMillis);
+                if (approvalRequestId == null) {
+                    insert.setNull(4, java.sql.Types.VARCHAR);
+                } else {
+                    insert.setString(4, approvalRequestId.toString());
+                }
+                insert.setString(5, nationId.toString());
+                insert.setString(6, sourceAccount);
+                insert.setString(7, actorPlayerId.toString());
+                insert.setLong(8, amountMinorUnits);
+                insert.setString(9, reason);
+                insert.setLong(10, preparedAtEpochMillis);
                 insert.executeUpdate();
             }
             connection.commit();
@@ -6347,6 +6404,22 @@ public final class CivicDatabase implements AutoCloseable {
                 if (update.executeUpdate() != 1) {
                     throw new IllegalStateException(
                             "Treasury Withdrawal did not advance " + withdrawalId);
+                }
+            }
+            if (operation.approvalRequestId() != null) {
+                try (PreparedStatement executeApproval = connection.prepareStatement("""
+                        UPDATE treasury_withdrawal_approval_request
+                        SET state = 'EXECUTED', executed_at_epoch_millis = ?
+                        WHERE approval_request_id = ? AND state = 'APPROVED'
+                        """)) {
+                    executeApproval.setLong(1, committedAtEpochMillis);
+                    executeApproval.setString(
+                            2, operation.approvalRequestId().toString());
+                    if (executeApproval.executeUpdate() != 1) {
+                        throw new IllegalStateException(
+                                "Treasury Withdrawal approval did not execute "
+                                        + operation.approvalRequestId());
+                    }
                 }
             }
             connection.commit();
@@ -6995,6 +7068,317 @@ public final class CivicDatabase implements AutoCloseable {
             return territoryFreeAllocationPolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to schedule Territory Free Allocation policy", failure);
+        }
+    }
+
+    public synchronized StoredWithdrawalApprovalPolicy withdrawalApprovalPolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM withdrawal_approval_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readWithdrawalApprovalPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Withdrawal Approval Policy request", failure);
+        }
+    }
+
+    public synchronized StoredWithdrawalApprovalPolicy currentWithdrawalApprovalPolicy(
+            UUID nationId, long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM withdrawal_approval_policy
+                WHERE nation_id = ? AND effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setLong(2, asOfEpochMillis);
+            return readWithdrawalApprovalPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Withdrawal Approval Policy", failure);
+        }
+    }
+
+    public synchronized StoredWithdrawalApprovalPolicy scheduleWithdrawalApprovalPolicy(
+            UUID policyId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID actorPlayerId,
+            List<StoredWithdrawalApprovalTier> tiers,
+            long effectiveAtEpochMillis,
+            String reason,
+            long recordedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertPolicy = connection.prepareStatement("""
+                    INSERT INTO withdrawal_approval_policy (
+                        policy_id, service_identity, request_id, nation_id,
+                        actor_player_id, effective_at_epoch_millis, reason,
+                        recorded_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement insertTier = connection.prepareStatement("""
+                    INSERT INTO withdrawal_approval_policy_tier (
+                        policy_id, minimum_amount_minor_units, required_approvals
+                    ) VALUES (?, ?, ?)
+                    """)) {
+                insertPolicy.setString(1, policyId.toString());
+                insertPolicy.setString(2, serviceIdentity);
+                insertPolicy.setString(3, requestId);
+                insertPolicy.setString(4, nationId.toString());
+                insertPolicy.setString(5, actorPlayerId.toString());
+                insertPolicy.setLong(6, effectiveAtEpochMillis);
+                insertPolicy.setString(7, reason);
+                insertPolicy.setLong(8, recordedAtEpochMillis);
+                insertPolicy.executeUpdate();
+                for (StoredWithdrawalApprovalTier tier : tiers) {
+                    insertTier.setString(1, policyId.toString());
+                    insertTier.setLong(2, tier.minimumAmountMinorUnits());
+                    insertTier.setInt(3, tier.requiredApprovals());
+                    insertTier.addBatch();
+                }
+                insertTier.executeBatch();
+            }
+            connection.commit();
+            return withdrawalApprovalPolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to schedule Withdrawal Approval Policy", failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Withdrawal Approval Policy connection", failure);
+            }
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval treasuryWithdrawalApproval(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_approval_request
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTreasuryWithdrawalApproval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Treasury Withdrawal approval request", failure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval treasuryWithdrawalApproval(
+            UUID approvalRequestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_approval_request
+                WHERE approval_request_id = ?
+                """)) {
+            query.setString(1, approvalRequestId.toString());
+            return readTreasuryWithdrawalApproval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Treasury Withdrawal approval", failure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval treasuryWithdrawalApprovalVote(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval.*
+                FROM treasury_withdrawal_approval_vote vote
+                JOIN treasury_withdrawal_approval_request approval
+                    ON approval.approval_request_id = vote.approval_request_id
+                WHERE vote.service_identity = ? AND vote.request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTreasuryWithdrawalApproval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Treasury Withdrawal approval vote", failure);
+        }
+    }
+
+    public synchronized List<StoredTreasuryWithdrawalApproval>
+            approvedTreasuryWithdrawalApprovalsWithoutOperation(String serviceIdentity) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal approval service identity cannot be blank");
+        }
+        List<StoredTreasuryWithdrawalApproval> approvals = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval.*
+                FROM treasury_withdrawal_approval_request approval
+                LEFT JOIN treasury_withdrawal_operation operation
+                  ON operation.approval_request_id = approval.approval_request_id
+                WHERE approval.service_identity = ?
+                  AND approval.state = 'APPROVED'
+                  AND operation.withdrawal_id IS NULL
+                ORDER BY approval.approved_at_epoch_millis,
+                         approval.approval_request_id
+                """)) {
+            query.setString(1, serviceIdentity);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    approvals.add(storedTreasuryWithdrawalApproval(result));
+                }
+            }
+            return List.copyOf(approvals);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list approved Treasury Withdrawals awaiting execution", failure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval createTreasuryWithdrawalApproval(
+            UUID approvalRequestId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            String sourceAccount,
+            UUID actorPlayerId,
+            long amountMinorUnits,
+            String reason,
+            UUID policyId,
+            int requiredApprovals,
+            UUID initialVoteId,
+            UUID initialApproverPlayerId,
+            String initialApprovalReason,
+            long initiatedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            String state = requiredApprovals == 1 ? "APPROVED" : "PENDING";
+            try (PreparedStatement insertRequest = connection.prepareStatement("""
+                    INSERT INTO treasury_withdrawal_approval_request (
+                        approval_request_id, service_identity, request_id, nation_id,
+                        source_account, actor_player_id, amount_minor_units, reason,
+                        policy_id, required_approvals, state,
+                        initiated_at_epoch_millis, approved_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement insertVote = connection.prepareStatement("""
+                    INSERT INTO treasury_withdrawal_approval_vote (
+                        vote_id, approval_request_id, service_identity, request_id,
+                        approver_player_id, reason, approved_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insertRequest.setString(1, approvalRequestId.toString());
+                insertRequest.setString(2, serviceIdentity);
+                insertRequest.setString(3, requestId);
+                insertRequest.setString(4, nationId.toString());
+                insertRequest.setString(5, sourceAccount);
+                insertRequest.setString(6, actorPlayerId.toString());
+                insertRequest.setLong(7, amountMinorUnits);
+                insertRequest.setString(8, reason);
+                insertRequest.setString(9, policyId.toString());
+                insertRequest.setInt(10, requiredApprovals);
+                insertRequest.setString(11, state);
+                insertRequest.setLong(12, initiatedAtEpochMillis);
+                if (requiredApprovals == 1) {
+                    insertRequest.setLong(13, initiatedAtEpochMillis);
+                } else {
+                    insertRequest.setNull(13, java.sql.Types.BIGINT);
+                }
+                insertRequest.executeUpdate();
+
+                insertVote.setString(1, initialVoteId.toString());
+                insertVote.setString(2, approvalRequestId.toString());
+                insertVote.setString(3, serviceIdentity);
+                insertVote.setString(4, requestId);
+                insertVote.setString(5, initialApproverPlayerId.toString());
+                insertVote.setString(6, initialApprovalReason);
+                insertVote.setLong(7, initiatedAtEpochMillis);
+                insertVote.executeUpdate();
+            }
+            connection.commit();
+            return treasuryWithdrawalApproval(approvalRequestId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to create Treasury Withdrawal approval", failure);
+        } finally {
+            restoreAutoCommit("Treasury Withdrawal approval creation");
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval approveTreasuryWithdrawal(
+            UUID approvalRequestId,
+            UUID voteId,
+            String serviceIdentity,
+            String requestId,
+            UUID approverPlayerId,
+            String reason,
+            long approvedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO treasury_withdrawal_approval_vote (
+                        vote_id, approval_request_id, service_identity, request_id,
+                        approver_player_id, reason, approved_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, voteId.toString());
+                insert.setString(2, approvalRequestId.toString());
+                insert.setString(3, serviceIdentity);
+                insert.setString(4, requestId);
+                insert.setString(5, approverPlayerId.toString());
+                insert.setString(6, reason);
+                insert.setLong(7, approvedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            try (PreparedStatement approve = connection.prepareStatement("""
+                    UPDATE treasury_withdrawal_approval_request
+                    SET state = 'APPROVED', approved_at_epoch_millis = ?
+                    WHERE approval_request_id = ? AND state = 'PENDING'
+                      AND required_approvals <= (
+                          SELECT COUNT(*) FROM treasury_withdrawal_approval_vote
+                          WHERE approval_request_id = ?
+                      )
+                    """)) {
+                approve.setLong(1, approvedAtEpochMillis);
+                approve.setString(2, approvalRequestId.toString());
+                approve.setString(3, approvalRequestId.toString());
+                approve.executeUpdate();
+            }
+            connection.commit();
+            return treasuryWithdrawalApproval(approvalRequestId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to approve Treasury Withdrawal", failure);
+        } finally {
+            restoreAutoCommit("Treasury Withdrawal approval vote");
+        }
+    }
+
+    private void restoreAutoCommit(String operation) {
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to restore connection after " + operation, failure);
         }
     }
 
@@ -10867,6 +11251,162 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 55");
             }
+            if (version < 56) {
+                statement.execute("DROP INDEX nation_fiscal_permission_grant_player");
+                statement.execute("ALTER TABLE nation_fiscal_permission_revocation RENAME TO nation_fiscal_permission_revocation_v55");
+                statement.execute("ALTER TABLE nation_fiscal_permission_grant RENAME TO nation_fiscal_permission_grant_v55");
+                statement.execute("""
+                        CREATE TABLE nation_fiscal_permission_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            player_id TEXT NOT NULL,
+                            permission TEXT NOT NULL CHECK (permission IN (
+                                'VIEW_ACCOUNT', 'VIEW_LEDGER', 'DRAFT_BUDGET',
+                                'APPROVE_BUDGET', 'INITIATE_PAYMENT', 'APPROVE_PAYMENT',
+                                'MANAGE_WITHDRAWAL', 'MANAGE_TERRITORY_FINANCE',
+                                'MANAGE_ISSUANCE', 'MANAGE_FISCAL_ROLES',
+                                'MANAGE_APPROVAL_POLICY', 'MANAGE_PUBLIC_POLICY',
+                                'MANAGE_RECOVERY'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO nation_fiscal_permission_grant
+                        SELECT * FROM nation_fiscal_permission_grant_v55
+                        """);
+                statement.execute("""
+                        CREATE INDEX nation_fiscal_permission_grant_player
+                        ON nation_fiscal_permission_grant (nation_id, player_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_fiscal_permission_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES nation_fiscal_permission_grant(grant_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO nation_fiscal_permission_revocation
+                        SELECT * FROM nation_fiscal_permission_revocation_v55
+                        """);
+                statement.execute("DROP TABLE nation_fiscal_permission_revocation_v55");
+                statement.execute("DROP TABLE nation_fiscal_permission_grant_v55");
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS withdrawal_approval_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (nation_id, effective_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS withdrawal_approval_policy_current
+                        ON withdrawal_approval_policy (
+                            nation_id, effective_at_epoch_millis
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS withdrawal_approval_policy_tier (
+                            policy_id TEXT NOT NULL
+                                REFERENCES withdrawal_approval_policy(policy_id),
+                            minimum_amount_minor_units INTEGER NOT NULL
+                                CHECK (minimum_amount_minor_units >= 0),
+                            required_approvals INTEGER NOT NULL
+                                CHECK (required_approvals BETWEEN 1 AND 16),
+                            PRIMARY KEY (policy_id, minimum_amount_minor_units)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS treasury_withdrawal_approval_request (
+                            approval_request_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            source_account TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            policy_id TEXT NOT NULL,
+                            required_approvals INTEGER NOT NULL
+                                CHECK (required_approvals BETWEEN 1 AND 16),
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PENDING', 'APPROVED', 'EXECUTED'
+                            )),
+                            initiated_at_epoch_millis INTEGER NOT NULL
+                                CHECK (initiated_at_epoch_millis >= 0),
+                            approved_at_epoch_millis INTEGER,
+                            executed_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((state = 'PENDING'
+                                    AND approved_at_epoch_millis IS NULL
+                                    AND executed_at_epoch_millis IS NULL)
+                                OR (state = 'APPROVED'
+                                    AND approved_at_epoch_millis IS NOT NULL
+                                    AND executed_at_epoch_millis IS NULL)
+                                OR (state = 'EXECUTED'
+                                    AND approved_at_epoch_millis IS NOT NULL
+                                    AND executed_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS treasury_withdrawal_approval_pending
+                        ON treasury_withdrawal_approval_request (
+                            nation_id, state, initiated_at_epoch_millis
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS treasury_withdrawal_approval_vote (
+                            vote_id TEXT PRIMARY KEY,
+                            approval_request_id TEXT NOT NULL
+                                REFERENCES treasury_withdrawal_approval_request(
+                                    approval_request_id
+                                ),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            approver_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            approved_at_epoch_millis INTEGER NOT NULL
+                                CHECK (approved_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (approval_request_id, approver_player_id)
+                        )
+                        """);
+                addColumnIfMissing(
+                        statement,
+                        "treasury_withdrawal_operation",
+                        "approval_request_id",
+                        "TEXT REFERENCES treasury_withdrawal_approval_request(approval_request_id)");
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS treasury_withdrawal_approval_execution
+                        ON treasury_withdrawal_operation (approval_request_id)
+                        WHERE approval_request_id IS NOT NULL
+                        """);
+                statement.execute("PRAGMA user_version = 56");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11135,6 +11675,91 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
         }
+    }
+
+    private StoredWithdrawalApprovalPolicy readWithdrawalApprovalPolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            UUID policyId = UUID.fromString(result.getString("policy_id"));
+            List<StoredWithdrawalApprovalTier> tiers = new ArrayList<>();
+            try (PreparedStatement tierQuery = connection.prepareStatement("""
+                    SELECT minimum_amount_minor_units, required_approvals
+                    FROM withdrawal_approval_policy_tier
+                    WHERE policy_id = ?
+                    ORDER BY minimum_amount_minor_units
+                    """)) {
+                tierQuery.setString(1, policyId.toString());
+                try (ResultSet tierResult = tierQuery.executeQuery()) {
+                    while (tierResult.next()) {
+                        tiers.add(new StoredWithdrawalApprovalTier(
+                                tierResult.getLong("minimum_amount_minor_units"),
+                                tierResult.getInt("required_approvals")));
+                    }
+                }
+            }
+            return new StoredWithdrawalApprovalPolicy(
+                    policyId,
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    tiers,
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredTreasuryWithdrawalApproval readTreasuryWithdrawalApproval(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedTreasuryWithdrawalApproval(result) : null;
+        }
+    }
+
+    private StoredTreasuryWithdrawalApproval storedTreasuryWithdrawalApproval(
+            ResultSet result) throws SQLException {
+        UUID approvalRequestId =
+                UUID.fromString(result.getString("approval_request_id"));
+        List<StoredTreasuryWithdrawalApprovalVote> votes = new ArrayList<>();
+        try (PreparedStatement voteQuery = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_approval_vote
+                WHERE approval_request_id = ?
+                ORDER BY approved_at_epoch_millis, vote_id
+                """)) {
+            voteQuery.setString(1, approvalRequestId.toString());
+            try (ResultSet voteResult = voteQuery.executeQuery()) {
+                while (voteResult.next()) {
+                    votes.add(new StoredTreasuryWithdrawalApprovalVote(
+                            UUID.fromString(voteResult.getString("vote_id")),
+                            voteResult.getString("service_identity"),
+                            voteResult.getString("request_id"),
+                            UUID.fromString(voteResult.getString("approver_player_id")),
+                            voteResult.getString("reason"),
+                            voteResult.getLong("approved_at_epoch_millis")));
+                }
+            }
+        }
+        long approvedAtValue = result.getLong("approved_at_epoch_millis");
+        Long approvedAt = result.wasNull() ? null : approvedAtValue;
+        return new StoredTreasuryWithdrawalApproval(
+                approvalRequestId,
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("nation_id")),
+                result.getString("source_account"),
+                UUID.fromString(result.getString("actor_player_id")),
+                result.getLong("amount_minor_units"),
+                result.getString("reason"),
+                UUID.fromString(result.getString("policy_id")),
+                result.getInt("required_approvals"),
+                votes,
+                result.getString("state"),
+                result.getLong("initiated_at_epoch_millis"),
+                approvedAt);
     }
 
     private StoredTerritoryMaintenancePolicy readTerritoryMaintenancePolicy(
@@ -11409,10 +12034,12 @@ public final class CivicDatabase implements AutoCloseable {
             ResultSet result) throws SQLException {
         long committedAt = result.getLong("committed_at_epoch_millis");
         Long committedAtEpochMillis = result.wasNull() ? null : committedAt;
+        String approvalRequestId = result.getString("approval_request_id");
         return new StoredTreasuryWithdrawalOperation(
                 UUID.fromString(result.getString("withdrawal_id")),
                 result.getString("service_identity"),
                 result.getString("request_id"),
+                approvalRequestId == null ? null : UUID.fromString(approvalRequestId),
                 UUID.fromString(result.getString("nation_id")),
                 result.getString("source_account"),
                 UUID.fromString(result.getString("actor_player_id")),

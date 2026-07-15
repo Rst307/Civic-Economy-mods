@@ -1,0 +1,24 @@
+package org.civiceconomy.persistence;
+
+import java.util.List;
+import java.util.UUID;
+
+public record StoredTreasuryWithdrawalApproval(
+        UUID approvalRequestId,
+        String serviceIdentity,
+        String requestId,
+        UUID nationId,
+        String sourceAccount,
+        UUID actorPlayerId,
+        long amountMinorUnits,
+        String reason,
+        UUID policyId,
+        int requiredApprovals,
+        List<StoredTreasuryWithdrawalApprovalVote> votes,
+        String state,
+        long initiatedAtEpochMillis,
+        Long approvedAtEpochMillis) {
+    public StoredTreasuryWithdrawalApproval {
+        votes = List.copyOf(votes);
+    }
+}

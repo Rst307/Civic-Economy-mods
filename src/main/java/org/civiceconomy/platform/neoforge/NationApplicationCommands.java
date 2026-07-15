@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.arguments.LongArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import java.time.Clock;
 import java.time.Duration;
@@ -93,22 +94,7 @@ final class NationApplicationCommands {
 
     private static LiteralArgumentBuilder<CommandSourceStack> treasuryCommand() {
         return Commands.literal("treasury")
-                .then(Commands.literal("withdraw")
-                        .then(Commands.argument("requestId", StringArgumentType.word())
-                                .then(Commands.argument(
-                                                "amountMinorUnits",
-                                                LongArgumentType.longArg(1L))
-                                        .then(Commands.argument(
-                                                        "reason",
-                                                        StringArgumentType.greedyString())
-                                                .executes(context -> withdrawTreasury(
-                                                        context.getSource(),
-                                                        StringArgumentType.getString(
-                                                                context, "requestId"),
-                                                        LongArgumentType.getLong(
-                                                                context, "amountMinorUnits"),
-                                                        StringArgumentType.getString(
-                                                                context, "reason")))))))
+                .then(withdrawCommand())
                 .then(Commands.literal("destroy")
                         .then(Commands.argument("requestId", StringArgumentType.word())
                                 .then(Commands.argument(
@@ -125,6 +111,68 @@ final class NationApplicationCommands {
                                                                 context, "amountMinorUnits"),
                                                         StringArgumentType.getString(
                                                                 context, "reason")))))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> withdrawCommand() {
+        return Commands.literal("withdraw")
+                .then(withdrawApprovalCommand())
+                .then(withdrawPolicyCommand())
+                .then(Commands.argument("requestId", StringArgumentType.word())
+                        .then(Commands.argument(
+                                        "amountMinorUnits",
+                                        LongArgumentType.longArg(1L))
+                                .then(Commands.argument(
+                                                "reason",
+                                                StringArgumentType.greedyString())
+                                        .executes(context -> withdrawTreasury(
+                                                context.getSource(),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"),
+                                                LongArgumentType.getLong(
+                                                        context, "amountMinorUnits"),
+                                                StringArgumentType.getString(
+                                                        context, "reason"))))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> withdrawApprovalCommand() {
+        return Commands.literal("approve")
+                .then(Commands.argument("approvalRequestId", UuidArgument.uuid())
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "reason",
+                                                StringArgumentType.greedyString())
+                                        .executes(context -> approveTreasuryWithdrawal(
+                                                context.getSource(),
+                                                UuidArgument.getUuid(
+                                                        context, "approvalRequestId"),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"),
+                                                StringArgumentType.getString(
+                                                        context, "reason"))))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> withdrawPolicyCommand() {
+        var reason = Commands.argument("reason", StringArgumentType.greedyString())
+                .executes(context -> scheduleTreasuryWithdrawalPolicy(
+                        context.getSource(),
+                        StringArgumentType.getString(context, "requestId"),
+                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                        LongArgumentType.getLong(context, "thresholdMinorUnits"),
+                        IntegerArgumentType.getInteger(context, "requiredApprovals"),
+                        StringArgumentType.getString(context, "reason")));
+        var required = Commands.argument(
+                        "requiredApprovals", IntegerArgumentType.integer(1, 16))
+                .then(reason);
+        var threshold = Commands.argument(
+                        "thresholdMinorUnits", LongArgumentType.longArg(0L))
+                .then(required);
+        var effective = Commands.argument(
+                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                .then(threshold);
+        var request = Commands.argument("requestId", StringArgumentType.word())
+                .then(effective);
+        return Commands.literal("policy")
+                .then(Commands.literal("schedule").then(request));
     }
 
     private static int withdrawTreasury(
@@ -153,6 +201,83 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(
                 () -> Component.literal("National Treasury Withdrawal queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int approveTreasuryWithdrawal(
+            CommandSourceStack source,
+            UUID approvalRequestId,
+            String requestId,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .approveNationalTreasuryWithdrawal(
+                        player, approvalRequestId, requestId, reason)
+                .whenComplete((outcome, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "National Treasury Withdrawal approval", failure);
+                    } else if (outcome.executed()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Approved and committed Treasury Withdrawal "
+                                                + outcome.withdrawal().withdrawalId()
+                                                + " approvals="
+                                                + outcome.approval().approverPlayerIds().size()
+                                                + "/"
+                                                + outcome.approval().requiredApprovals()),
+                                true);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Recorded Treasury Withdrawal approval "
+                                                + outcome.approval().approvalRequestId()
+                                                + " approvals="
+                                                + outcome.approval().approverPlayerIds().size()
+                                                + "/"
+                                                + outcome.approval().requiredApprovals()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("National Treasury Withdrawal approval queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleTreasuryWithdrawalPolicy(
+            CommandSourceStack source,
+            String requestId,
+            long effectiveAtEpochMillis,
+            long thresholdMinorUnits,
+            int requiredApprovals,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .scheduleWithdrawalApprovalPolicy(
+                        player,
+                        requestId,
+                        thresholdMinorUnits,
+                        requiredApprovals,
+                        effectiveAtEpochMillis,
+                        reason)
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Treasury Withdrawal approval policy", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled Withdrawal Approval Policy "
+                                                + policy.policyId()
+                                                + " effectiveAt=" + policy.effectiveAt()
+                                                + " tiers=" + policy.tiers()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Treasury Withdrawal approval policy queued"),
                 false);
         return Command.SINGLE_SUCCESS;
     }

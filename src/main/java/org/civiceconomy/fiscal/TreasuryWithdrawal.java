@@ -8,6 +8,7 @@ public record TreasuryWithdrawal(
         UUID withdrawalId,
         ServiceIdentity serviceIdentity,
         String requestId,
+        UUID approvalRequestId,
         NationId nationId,
         AccountId sourceAccount,
         UUID actorPlayerId,

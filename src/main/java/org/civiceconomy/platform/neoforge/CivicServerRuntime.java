@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,8 +42,16 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPublicMai
 import org.civiceconomy.integration.lightmanscurrency.PermanentDestructionCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.TreasuryWithdrawalCoordinator;
 import org.civiceconomy.fiscal.ConfirmTreasuryWithdrawal;
+import org.civiceconomy.fiscal.ApproveTreasuryWithdrawal;
+import org.civiceconomy.fiscal.ScheduleWithdrawalApprovalPolicy;
 import org.civiceconomy.fiscal.TreasuryWithdrawal;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApproval;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalOutcome;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalRegistry;
 import org.civiceconomy.fiscal.TreasuryWithdrawalFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.WithdrawalApprovalPolicyRegistry;
+import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
+import org.civiceconomy.fiscal.WithdrawalApprovalTier;
 import org.civiceconomy.integration.lightmanscurrency.TerritoryMaintenancePaymentCoordinator;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
@@ -570,6 +579,148 @@ public final class CivicServerRuntime {
                 }))
                 .thenCompose(prepared -> current.writer.submitDatabase(database ->
                         prepared.coordinator().commit(prepared.withdrawal())));
+    }
+
+    CompletableFuture<TreasuryWithdrawalApprovalOutcome> approveNationalTreasuryWithdrawal(
+            ServerPlayer actor,
+            UUID approvalRequestId,
+            String requestId,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.MANAGE_WITHDRAWAL);
+                    TreasuryWithdrawalApprovalRegistry approvals =
+                            new TreasuryWithdrawalApprovalRegistry(database, commandClock);
+                    TreasuryWithdrawalApproval existing = approvals.find(approvalRequestId);
+                    if (!existing.nationId().equals(nation.nationId())) {
+                        throw new SecurityException(
+                                "Treasury Withdrawal approval belongs to another Nation");
+                    }
+                    TreasuryWithdrawalApproval approved = approvals.approve(
+                            new ApproveTreasuryWithdrawal(
+                                    TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId,
+                                    approvalRequestId,
+                                    actorPlayerId,
+                                    reason));
+                    if (!approved.state().equals("APPROVED")) {
+                        return new PreparedApprovedTreasuryWithdrawal(
+                                null, approved, null);
+                    }
+                    AccountId treasury = nationalTreasury(nation.nationId());
+                    if (!approved.sourceAccount().equals(treasury)) {
+                        throw new SecurityException(
+                                "Treasury Withdrawal approval source is not the current National Treasury");
+                    }
+                    FiscalAuthorization authorization = new FiscalAuthorization(database);
+                    new TreasuryWithdrawalFiscalServiceProvisioner(authorization)
+                            .ensureAuthorized(treasury);
+                    var session = authorization.openSession(
+                            TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    TreasuryWithdrawalCoordinator coordinator =
+                            TreasuryWithdrawalCoordinator.live(
+                                    database,
+                                    session,
+                                    commandClock,
+                                    current.server.overworld(),
+                                    playerId -> current.server.getPlayerList()
+                                            .getPlayer(playerId));
+                    TreasuryWithdrawal prepared =
+                            coordinator.prepareApproved(approvalRequestId);
+                    return new PreparedApprovedTreasuryWithdrawal(
+                            coordinator, approved, prepared);
+                }))
+                .thenCompose(prepared -> {
+                    if (prepared.withdrawal() == null) {
+                        return CompletableFuture.completedFuture(prepared);
+                    }
+                    return onServer(current, () -> {
+                        prepared.coordinator().applyExternal(prepared.withdrawal());
+                        return prepared;
+                    });
+                })
+                .thenCompose(prepared -> {
+                    if (prepared.withdrawal() == null) {
+                        return CompletableFuture.completedFuture(
+                                new TreasuryWithdrawalApprovalOutcome(
+                                        prepared.approval(), null));
+                    }
+                    return current.writer.submitDatabase(database -> {
+                        TreasuryWithdrawal committed = prepared.coordinator()
+                                .commit(prepared.withdrawal());
+                        TreasuryWithdrawalApproval executed =
+                                new TreasuryWithdrawalApprovalRegistry(database, commandClock)
+                                        .find(approvalRequestId);
+                        return new TreasuryWithdrawalApprovalOutcome(executed, committed);
+                    });
+                });
+    }
+
+    CompletableFuture<WithdrawalApprovalPolicyVersion> scheduleWithdrawalApprovalPolicy(
+            ServerPlayer actor,
+            String requestId,
+            long thresholdMinorUnits,
+            int requiredApprovals,
+            long effectiveAtEpochMillis,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.MANAGE_APPROVAL_POLICY);
+                    List<WithdrawalApprovalTier> tiers = thresholdMinorUnits == 0L
+                            ? List.of(new WithdrawalApprovalTier(
+                                    MoneyAmount.ZERO, requiredApprovals))
+                            : List.of(
+                                    new WithdrawalApprovalTier(MoneyAmount.ZERO, 1),
+                                    new WithdrawalApprovalTier(
+                                            MoneyAmount.ofMinorUnits(thresholdMinorUnits),
+                                            requiredApprovals));
+                    return new WithdrawalApprovalPolicyRegistry(database, commandClock)
+                            .schedule(new ScheduleWithdrawalApprovalPolicy(
+                                    new ServiceIdentity(
+                                            "civiceconomy-withdrawal-governance"),
+                                    requestId,
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    tiers,
+                                    Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                    reason));
+                }));
     }
 
     CompletableFuture<MintBatch> startMintBatch(
@@ -1735,7 +1886,13 @@ public final class CivicServerRuntime {
                                     TreasuryWithdrawalFiscalServiceProvisioner
                                             .SERVICE_IDENTITY
                                             .value());
-                    if (pending.isEmpty()) {
+                    boolean hasApproved = !database
+                            .approvedTreasuryWithdrawalApprovalsWithoutOperation(
+                                    TreasuryWithdrawalFiscalServiceProvisioner
+                                            .SERVICE_IDENTITY
+                                            .value())
+                            .isEmpty();
+                    if (pending.isEmpty() && !hasApproved) {
                         return null;
                     }
                     FiscalAuthorization authorization = new FiscalAuthorization(database);
@@ -1747,13 +1904,15 @@ public final class CivicServerRuntime {
                                     session,
                                     recoveryClock,
                                     current.server.overworld());
-                    return new TreasuryWithdrawalRecovery(
-                            coordinator,
+                    List<TreasuryWithdrawal> withdrawals = new ArrayList<>(
+                            coordinator.prepareApprovedPending());
+                    withdrawals.addAll(
                             pending.stream()
                                     .map(operation -> new TreasuryWithdrawal(
                                             operation.withdrawalId(),
                                             new ServiceIdentity(operation.serviceIdentity()),
                                             operation.requestId(),
+                                            operation.approvalRequestId(),
                                             new org.civiceconomy.nation.NationId(
                                                     operation.nationId()),
                                             new AccountId(operation.sourceAccount()),
@@ -1766,6 +1925,9 @@ public final class CivicServerRuntime {
                                                     operation.preparedAtEpochMillis()),
                                             null))
                                     .toList());
+                    return new TreasuryWithdrawalRecovery(
+                            coordinator,
+                            List.copyOf(withdrawals));
                 })
                 .whenComplete((recovery, failure) -> {
                     if (failure != null) {
@@ -2450,6 +2612,11 @@ public final class CivicServerRuntime {
 
     private record PreparedTreasuryWithdrawal(
             TreasuryWithdrawalCoordinator coordinator,
+            TreasuryWithdrawal withdrawal) {}
+
+    private record PreparedApprovedTreasuryWithdrawal(
+            TreasuryWithdrawalCoordinator coordinator,
+            TreasuryWithdrawalApproval approval,
             TreasuryWithdrawal withdrawal) {}
 
     private record TreasuryWithdrawalRecovery(

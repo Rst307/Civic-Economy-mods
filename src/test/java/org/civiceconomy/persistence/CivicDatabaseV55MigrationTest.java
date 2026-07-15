@@ -60,7 +60,7 @@ class CivicDatabaseV55MigrationTest {
         downgradeToV54(databaseFile);
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(55, migrated.schemaVersion());
+            assertEquals(56, migrated.schemaVersion());
             FiscalAuthorization authorization = new FiscalAuthorization(migrated);
             var beforeNewGrant = authorization.describe(SERVICE);
             assertEquals(1, beforeNewGrant.grants().size());

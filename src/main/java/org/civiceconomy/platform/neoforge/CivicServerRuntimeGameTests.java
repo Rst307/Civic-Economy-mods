@@ -20,6 +20,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.List;
 import java.util.UUID;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -529,6 +533,25 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative National Treasury command actions");
+        helper.assertValueEqual(
+                Set.of("approve", "policy", "requestId"),
+                economy.getChild("nation")
+                        .getChild("treasury")
+                        .getChild("withdraw")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Treasury Withdrawal approval actions");
+        helper.assertValueEqual(
+                Set.of("schedule"),
+                economy.getChild("nation")
+                        .getChild("treasury")
+                        .getChild("withdraw")
+                        .getChild("policy")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "future-effective Treasury Withdrawal policy actions");
         if (CivicDebugWorldCommands.dedicatedStartupPermit()) {
             helper.assertValueEqual(
                     Set.of("status", "enable"),
@@ -1488,6 +1511,287 @@ public final class CivicServerRuntimeGameTests {
                             300L,
                             playerInventoryMoney(player),
                             "changed replay does not repeat cash delivery");
+                })
+                .thenSucceed();
+    }
+
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 800,
+            batch = "runtime-treasury-withdrawal-approval-command")
+    public static void distinctCitizensApproveGovernedTreasuryWithdrawalBeforeRealLcDebit(
+            GameTestHelper helper) {
+        ServerPlayer initiator = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-withdrawal-initiator"),
+                ClientInformation.createDefault());
+        ServerPlayer approver = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-withdrawal-approver"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(initiator);
+        TeamManagerImpl.INSTANCE.getPersonalTeamForPlayerID(approver.getUUID());
+        ((AbstractTeamBase) team).addMember(approver.getUUID(), TeamRank.MEMBER);
+        team.markDirty();
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String withdrawalRequestId = "governed-withdrawal-" + UUID.randomUUID();
+        String approvalRequestId = "governed-approval-" + UUID.randomUUID();
+        String policyRequestId = "future-withdrawal-policy-" + UUID.randomUUID();
+        String reason = "GameTest governed Treasury Withdrawal";
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean policyCommandStarted = new AtomicBoolean();
+        AtomicBoolean withdrawalCommandStarted = new AtomicBoolean();
+        AtomicBoolean approvalCommandStarted = new AtomicBoolean();
+        AtomicBoolean replayCommandStarted = new AtomicBoolean();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        Instant now = Instant.now();
+        Clock setupClock = Clock.fixed(now, ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "governed-withdrawal-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, java.time.Duration.ofDays(7), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "governed-withdrawal-initiator-citizenship-" + UUID.randomUUID(),
+                            initiator.getUUID(),
+                            nation.nationId()));
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "governed-withdrawal-approver-citizenship-" + UUID.randomUUID(),
+                            approver.getUUID(),
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    NationFiscalAuthorityRegistry authorities =
+                            new NationFiscalAuthorityRegistry(database, provider, setupClock);
+                    authorities.grant(new GrantNationFiscalPermission(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "grant-governed-withdrawal-initiator-" + UUID.randomUUID(),
+                            nation.nationId(),
+                            initiator.getUUID(),
+                            initiator.getUUID(),
+                            NationFiscalPermission.MANAGE_WITHDRAWAL,
+                            "Initiate governed Treasury Withdrawal"));
+                    authorities.grant(new GrantNationFiscalPermission(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "grant-withdrawal-policy-manager-" + UUID.randomUUID(),
+                            nation.nationId(),
+                            initiator.getUUID(),
+                            initiator.getUUID(),
+                            NationFiscalPermission.MANAGE_APPROVAL_POLICY,
+                            "Manage governed Withdrawal policy"));
+                    authorities.grant(new GrantNationFiscalPermission(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "grant-governed-withdrawal-approver-" + UUID.randomUUID(),
+                            nation.nationId(),
+                            initiator.getUUID(),
+                            approver.getUUID(),
+                            NationFiscalPermission.MANAGE_WITHDRAWAL,
+                            "Approve governed Treasury Withdrawal"));
+                    new org.civiceconomy.fiscal.WithdrawalApprovalPolicyRegistry(
+                                    database,
+                                    Clock.fixed(
+                                            now.minus(java.time.Duration.ofDays(2)),
+                                            ZoneOffset.UTC))
+                            .schedule(new org.civiceconomy.fiscal
+                                    .ScheduleWithdrawalApprovalPolicy(
+                                    new ServiceIdentity("civiceconomy-gametest-governance"),
+                                    "active-two-person-policy-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    initiator.getUUID(),
+                                    List.of(new org.civiceconomy.fiscal
+                                            .WithdrawalApprovalTier(
+                                            MoneyAmount.ZERO, 2)),
+                                    now.minus(java.time.Duration.ofDays(1)),
+                                    "Require two distinct Citizens"));
+                    return nation.nationId();
+                })
+                .whenComplete((registeredNationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                initiator.getInventory().clearContent();
+                                fundTreasury(
+                                        helper,
+                                        registeredNationId,
+                                        "Governed Withdrawal Treasury",
+                                        1_000L);
+                                setupReady.set(true);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "governed Withdrawal setup");
+                    helper.assertTrue(setupReady.get(), "governed Withdrawal setup ready");
+                })
+                .thenExecute(() -> {
+                    try {
+                        long effectiveAt = now.plus(java.time.Duration.ofDays(7)).toEpochMilli();
+                        String command = "civic economy nation treasury withdraw policy schedule "
+                                + policyRequestId + " " + effectiveAt
+                                + " 500 3 Future governed Withdrawal policy";
+                        helper.assertValueEqual(
+                                1,
+                                helper.getLevel().getServer().getCommands().getDispatcher()
+                                        .execute(
+                                                command,
+                                                initiator.createCommandSourceStack()
+                                                        .withSuppressedOutput()),
+                                "Withdrawal policy schedule command result");
+                        policyCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Withdrawal policy command");
+                    helper.assertTrue(policyCommandStarted.get(), "policy command started");
+                    helper.assertTrue(
+                            withdrawalApprovalPolicyExists(databaseFile, policyRequestId),
+                            "future-effective Withdrawal policy persisted");
+                })
+                .thenExecute(() -> {
+                    try {
+                        String command = "civic economy nation treasury withdraw "
+                                + withdrawalRequestId + " 300 " + reason;
+                        helper.assertValueEqual(
+                                1,
+                                helper.getLevel().getServer().getCommands().getDispatcher()
+                                        .execute(
+                                                command,
+                                                initiator.createCommandSourceStack()
+                                                        .withSuppressedOutput()),
+                                "governed Withdrawal initiation command result");
+                        withdrawalCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "governed Withdrawal initiation");
+                    helper.assertTrue(withdrawalCommandStarted.get(), "initiation command started");
+                    TreasuryWithdrawalApprovalRow approval =
+                            treasuryWithdrawalApprovalByRequest(
+                                    databaseFile, withdrawalRequestId);
+                    helper.assertTrue(approval != null, "durable Withdrawal approval request");
+                    helper.assertValueEqual("PENDING", approval.state(), "pending approval state");
+                    helper.assertValueEqual(2, approval.requiredApprovals(), "pinned approval count");
+                    helper.assertValueEqual(1, approval.approvalCount(), "initiator approval count");
+                    helper.assertTrue(
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId) == null,
+                            "pending approval creates no Withdrawal operation");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(
+                                            "nation:" + nationId.get().value() + ":treasury"))
+                                    .minorUnits(),
+                            "pending approval does not debit real LC");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database ->
+                                new org.civiceconomy.fiscal
+                                                .TreasuryWithdrawalApprovalRegistry(
+                                                database, setupClock)
+                                        .approve(new org.civiceconomy.fiscal
+                                                .ApproveTreasuryWithdrawal(
+                                                org.civiceconomy.fiscal
+                                                        .TreasuryWithdrawalFiscalServiceProvisioner
+                                                        .SERVICE_IDENTITY,
+                                                approvalRequestId,
+                                                treasuryWithdrawalApprovalByRequest(
+                                                                databaseFile,
+                                                                withdrawalRequestId)
+                                                        .approvalRequestId(),
+                                                approver.getUUID(),
+                                                "Independent Treasury officer approval")))
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                approvalCommandStarted.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "distinct Withdrawal approval");
+                    helper.assertTrue(approvalCommandStarted.get(), "approval persisted");
+                    TreasuryWithdrawalApprovalRow approval =
+                            treasuryWithdrawalApprovalByRequest(
+                                    databaseFile, withdrawalRequestId);
+                    helper.assertValueEqual("APPROVED", approval.state(), "approved decision state");
+                    helper.assertValueEqual(2, approval.approvalCount(), "two distinct approvals");
+                    helper.assertTrue(
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId) == null,
+                            "approval alone creates no LC operation before execution");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(
+                                            "nation:" + nationId.get().value() + ":treasury"))
+                                    .minorUnits(),
+                            "approval alone does not debit real LC");
+                })
+                .thenExecute(() -> {
+                    try {
+                        String command = "civic economy nation treasury withdraw "
+                                + withdrawalRequestId + " 300 " + reason;
+                        helper.assertValueEqual(
+                                1,
+                                helper.getLevel().getServer().getCommands().getDispatcher()
+                                        .execute(
+                                                command,
+                                                initiator.createCommandSourceStack()
+                                                        .withSuppressedOutput()),
+                                "approved Withdrawal recovery command result");
+                        replayCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "approved Withdrawal recovery");
+                    helper.assertTrue(replayCommandStarted.get(), "recovery command started");
+                    TreasuryWithdrawalApprovalRow approval =
+                            treasuryWithdrawalApprovalByRequest(
+                                    databaseFile, withdrawalRequestId);
+                    TreasuryWithdrawalRow operation =
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId);
+                    helper.assertValueEqual("EXECUTED", approval.state(), "approval executed state");
+                    helper.assertValueEqual("COMMITTED", operation.state(), "committed Withdrawal state");
+                    helper.assertValueEqual(
+                            700L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(operation.sourceAccount()))
+                                    .minorUnits(),
+                            "approved real LC Treasury debit");
+                    helper.assertValueEqual(
+                            300L,
+                            playerInventoryMoney(initiator),
+                            "approved physical LC cash delivery");
                 })
                 .thenSucceed();
     }
@@ -3037,7 +3341,8 @@ public final class CivicServerRuntimeGameTests {
                                actor_player_id,
                                amount_minor_units,
                                reason,
-                               state
+                               state,
+                               approval_request_id
                         FROM treasury_withdrawal_operation
                         WHERE service_identity = ? AND request_id = ?
                         """)) {
@@ -3055,12 +3360,71 @@ public final class CivicServerRuntimeGameTests {
                                 result.getString(3),
                                 result.getLong(4),
                                 result.getString(5),
-                                result.getString(6))
+                                result.getString(6),
+                                result.getString(7))
                         : null;
             }
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect Treasury Withdrawal command result", failure);
+        }
+    }
+
+    private static TreasuryWithdrawalApprovalRow treasuryWithdrawalApprovalByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT approval.approval_request_id,
+                               approval.state,
+                               approval.required_approvals,
+                               COUNT(vote.vote_id)
+                        FROM treasury_withdrawal_approval_request approval
+                        LEFT JOIN treasury_withdrawal_approval_vote vote
+                          ON vote.approval_request_id = approval.approval_request_id
+                        WHERE approval.service_identity = ?
+                          AND approval.request_id = ?
+                        GROUP BY approval.approval_request_id,
+                                 approval.state,
+                                 approval.required_approvals
+                        """)) {
+            query.setString(
+                    1,
+                    org.civiceconomy.fiscal.TreasuryWithdrawalFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new TreasuryWithdrawalApprovalRow(
+                                UUID.fromString(result.getString(1)),
+                                result.getString(2),
+                                result.getInt(3),
+                                result.getInt(4))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Treasury Withdrawal approval", failure);
+        }
+    }
+
+    private static boolean withdrawalApprovalPolicyExists(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT 1 FROM withdrawal_approval_policy
+                        WHERE service_identity = ? AND request_id = ?
+                        """)) {
+            query.setString(1, "civiceconomy-withdrawal-governance");
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Withdrawal Approval Policy", failure);
         }
     }
 
@@ -3387,7 +3751,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(55, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(56, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -3912,5 +4276,12 @@ public final class CivicServerRuntimeGameTests {
             String actorPlayerId,
             long amountMinorUnits,
             String reason,
-            String state) {}
+            String state,
+            String approvalRequestId) {}
+
+    private record TreasuryWithdrawalApprovalRow(
+            UUID approvalRequestId,
+            String state,
+            int requiredApprovals,
+            int approvalCount) {}
 }

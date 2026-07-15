@@ -16,6 +16,9 @@ import org.civiceconomy.fiscal.IdempotencyConflictException;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.TreasuryWithdrawal;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApproval;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalPendingException;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalRegistry;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTreasuryWithdrawalOperation;
@@ -26,6 +29,7 @@ public final class TreasuryWithdrawalCoordinator {
     private final FiscalAuthorization authorization;
     private final FiscalServiceSession session;
     private final Clock clock;
+    private final TreasuryWithdrawalApprovalRegistry approvals;
 
     private TreasuryWithdrawalCoordinator(
             CivicDatabase database,
@@ -40,6 +44,7 @@ public final class TreasuryWithdrawalCoordinator {
         this.authorization = new FiscalAuthorization(database);
         this.session = session;
         this.clock = clock;
+        this.approvals = new TreasuryWithdrawalApprovalRegistry(database, clock);
     }
 
     static TreasuryWithdrawalCoordinator authorized(
@@ -89,10 +94,16 @@ public final class TreasuryWithdrawalCoordinator {
                 request.serviceIdentity(),
                 FiscalCapability.WITHDRAW_CASH,
                 request.sourceAccount());
+        TreasuryWithdrawalApproval approval = approvals.initiate(request);
+        if (!approval.state().equals("APPROVED")
+                && !approval.state().equals("EXECUTED")) {
+            throw new TreasuryWithdrawalApprovalPendingException(approval);
+        }
         StoredTreasuryWithdrawalOperation operation = database.prepareTreasuryWithdrawal(
                 java.util.UUID.randomUUID(),
                 request.serviceIdentity().value(),
                 request.requestId(),
+                approval.approvalRequestId(),
                 request.nationId().value(),
                 request.sourceAccount().value(),
                 request.actorPlayerId(),
@@ -101,6 +112,29 @@ public final class TreasuryWithdrawalCoordinator {
                 clock.millis());
         requirePayload(operation, request);
         return toWithdrawal(operation);
+    }
+
+    public TreasuryWithdrawal prepareApproved(UUID approvalRequestId) {
+        TreasuryWithdrawalApproval approval = approvals.find(approvalRequestId);
+        if (!approval.state().equals("APPROVED")
+                && !approval.state().equals("EXECUTED")) {
+            throw new TreasuryWithdrawalApprovalPendingException(approval);
+        }
+        return prepare(approval.withdrawal());
+    }
+
+    public TreasuryWithdrawal confirmApproved(UUID approvalRequestId) {
+        TreasuryWithdrawal prepared = prepareApproved(approvalRequestId);
+        applyExternal(prepared);
+        return commit(prepared);
+    }
+
+    public List<TreasuryWithdrawal> prepareApprovedPending() {
+        return database.approvedTreasuryWithdrawalApprovalsWithoutOperation(
+                        session.serviceIdentity().value())
+                .stream()
+                .map(approval -> prepareApproved(approval.approvalRequestId()))
+                .toList();
     }
 
     public void recoverAll() {
@@ -155,6 +189,7 @@ public final class TreasuryWithdrawalCoordinator {
                 operation.withdrawalId(),
                 new ServiceIdentity(operation.serviceIdentity()),
                 operation.requestId(),
+                operation.approvalRequestId(),
                 new NationId(operation.nationId()),
                 new AccountId(operation.sourceAccount()),
                 operation.actorPlayerId(),

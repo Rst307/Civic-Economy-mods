@@ -63,8 +63,16 @@ _Avoid_: FTB 成员同步、自动入籍、团队即国家
 _Avoid_: FTB 等级、全局 OP、服务身份
 
 **国家财政权限（Nation Fiscal Permission）**:
-国家治理授予某个 Citizen 的单一、明确财政动作权限，例如批准预算、管理提现或管理领土财政。
+国家治理授予某个 Citizen 的单一、明确财政动作权限，例如批准预算、管理提现、管理审批策略或管理领土财政。
 _Avoid_: 全局财政访问、模糊官职、账户余额
+
+**Withdrawal Approval Policy（提现审批策略）**:
+一个 Nation 对 Treasury Withdrawal 按金额门槛规定所需不同 Citizen 审批人数的未来生效版本；发起时命中的版本和人数会被固定，后续策略变化不能改写已发起请求。
+_Avoid_: 全服强制双签、即时生效配置、事后改变审批人数
+
+**Withdrawal Approval（提现审批）**:
+具有 `MANAGE_WITHDRAWAL` 的正式 Citizen 对一个精确、不可变 Treasury Withdrawal 请求作出的持久化决定；同一 Citizen 对同一请求最多计一次，达到固定人数前不能准备或移动 LC 资金。
+_Avoid_: Service Identity 授权、FTB 等级、重复点击计数、口头批准
 
 **首都（Capital）**:
 国家唯一的领土连续性与财政治理锚点；只有 Nation Activation 才能建立首个首都。
@@ -77,7 +85,7 @@ _Avoid_: 出生点、任意已占领区块、FTB 团队基地
 _Avoid_: 国家财富、GDP、中央国库
 
 **Treasury Withdrawal（国库提现）**:
-把 National Treasury 的 LC 银行余额等额转换为交付给获授权 Citizen 的实体 LC 现金；它不改变 Cumulative Net Issuance。
+把 National Treasury 的 LC 银行余额等额转换为交付给获授权 Citizen 的实体 LC 现金；它不改变 Cumulative Net Issuance，并在适用时引用一个已满足的 Withdrawal Approval。
 _Avoid_: Payment、Issuance、Permanent Destruction、cash grant
 
 **组织财政账户（Organization Fiscal Account）**:
