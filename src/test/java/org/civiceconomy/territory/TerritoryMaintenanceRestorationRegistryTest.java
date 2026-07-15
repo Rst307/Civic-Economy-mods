@@ -144,6 +144,50 @@ class TerritoryMaintenanceRestorationRegistryTest {
                     evidence.reservationId(),
                     evidence.publicFundPaymentId(),
                     evidence.destructionOperationId())));
+
+            TerritoryMaintenanceRegistry maintenance =
+                    new TerritoryMaintenanceRegistry(database, CLOCK);
+            var nextCycle = maintenance.openCycle(new OpenTerritoryMaintenanceCycle(
+                    SERVICE,
+                    "next-full-cycle",
+                    NOW.plus(Duration.ofDays(7)),
+                    NOW.plus(Duration.ofDays(14))));
+            AssessTerritoryFiscalValidity exactTarget = new AssessTerritoryFiscalValidity(
+                    SERVICE,
+                    "assessment-consuming-restoration-credit",
+                    nextCycle.cycleId(),
+                    NATION_ID,
+                    TEAM_ID,
+                    "minecraft:overworld",
+                    8,
+                    9,
+                    100L,
+                    TerritoryMaintenancePriority.CAPITAL,
+                    "Next full Cycle");
+            TerritoryFiscalAssessment credited = maintenance.assess(exactTarget);
+
+            assertEquals(MoneyAmount.ZERO, credited.maintenanceDue());
+            assertEquals(credited, maintenance.assess(exactTarget));
+            assertEquals(
+                    MoneyAmount.ZERO,
+                    restorations.find(SERVICE, "commit-restoration")
+                            .orElseThrow()
+                            .remainingNextCycleCredit());
+            assertEquals(
+                    MoneyAmount.ofMinorUnits(100L),
+                    maintenance.assess(new AssessTerritoryFiscalValidity(
+                                    SERVICE,
+                                    "assessment-other-target",
+                                    nextCycle.cycleId(),
+                                    NATION_ID,
+                                    TEAM_ID,
+                                    "minecraft:overworld",
+                                    9,
+                                    9,
+                                    100L,
+                                    TerritoryMaintenancePriority.ORDINARY,
+                                    "Other target in next full Cycle"))
+                            .maintenanceDue());
         }
     }
 

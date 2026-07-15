@@ -345,7 +345,7 @@ public final class TerritoryMaintenanceRegistry {
                 clock.millis()));
     }
 
-    private static void requirePayload(
+    private void requirePayload(
             StoredTerritoryFiscalAssessment stored,
             AssessTerritoryFiscalValidity request) {
         if (!stored.cycleId().equals(request.cycleId())
@@ -354,7 +354,9 @@ public final class TerritoryMaintenanceRegistry {
                 || !stored.dimensionId().equals(request.dimensionId())
                 || stored.chunkX() != request.chunkX()
                 || stored.chunkZ() != request.chunkZ()
-                || stored.maintenanceDueMinorUnits() != request.maintenanceDueMinorUnits()
+                || database.territoryFiscalAssessmentGrossMaintenanceDueMinorUnits(
+                                stored.assessmentId())
+                        != request.maintenanceDueMinorUnits()
                 || stored.restorationFeeMinorUnits() != request.restorationFeeMinorUnits()
                 || !stored.restorationEligibility().equals(request.restorationEligibility().name())
                 || !java.util.Objects.equals(

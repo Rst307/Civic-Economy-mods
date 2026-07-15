@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 43;
+    private static final int SCHEMA_VERSION = 44;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -1998,7 +1998,51 @@ public final class CivicDatabase implements AutoCloseable {
         if (replay != null) {
             return replay;
         }
-        try (PreparedStatement insert = connection.prepareStatement("""
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            UUID restorationCreditId = null;
+            long restorationCreditApplied = 0L;
+            try (PreparedStatement credit = connection.prepareStatement("""
+                    SELECT restoration.restoration_id,
+                           restoration.remaining_next_cycle_credit_minor_units
+                    FROM territory_maintenance_restoration restoration
+                    JOIN territory_maintenance_cycle cycle ON cycle.cycle_id = ?
+                    WHERE restoration.service_identity = ?
+                      AND restoration.nation_id = ?
+                      AND restoration.ftb_team_id = ?
+                      AND restoration.dimension_id = ?
+                      AND restoration.chunk_x = ?
+                      AND restoration.chunk_z = ?
+                      AND restoration.state = 'CIVIC_COMMITTED'
+                      AND restoration.next_full_cycle_starts_at_epoch_millis
+                            <= cycle.starts_at_epoch_millis
+                      AND restoration.remaining_next_cycle_credit_minor_units > 0
+                    ORDER BY restoration.next_full_cycle_starts_at_epoch_millis,
+                             restoration.committed_at_epoch_millis,
+                             restoration.restoration_id
+                    LIMIT 1
+                    """)) {
+                credit.setString(1, cycleId.toString());
+                credit.setString(2, serviceIdentity);
+                credit.setString(3, nationId.toString());
+                credit.setString(4, ftbTeamId.toString());
+                credit.setString(5, dimensionId);
+                credit.setInt(6, chunkX);
+                credit.setInt(7, chunkZ);
+                try (ResultSet result = credit.executeQuery()) {
+                    if (result.next()) {
+                        restorationCreditId = UUID.fromString(
+                                result.getString("restoration_id"));
+                        restorationCreditApplied = Math.min(
+                                maintenanceDueMinorUnits,
+                                result.getLong("remaining_next_cycle_credit_minor_units"));
+                    }
+                }
+            }
+            long netMaintenanceDue = Math.subtractExact(
+                    maintenanceDueMinorUnits, restorationCreditApplied);
+            try (PreparedStatement insert = connection.prepareStatement("""
                 INSERT INTO territory_fiscal_assessment (
                     assessment_id, service_identity, request_id, cycle_id,
                     nation_id, ftb_team_id, dimension_id, chunk_x, chunk_z,
@@ -2016,7 +2060,7 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setString(7, dimensionId);
             insert.setInt(8, chunkX);
             insert.setInt(9, chunkZ);
-            insert.setLong(10, maintenanceDueMinorUnits);
+            insert.setLong(10, netMaintenanceDue);
             insert.setLong(11, restorationFeeMinorUnits);
             insert.setString(12, restorationEligibility);
             if (restorationCooldownEndsAtEpochMillis == null) {
@@ -2029,9 +2073,78 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setString(16, reason);
             insert.setLong(17, assessedAtEpochMillis);
             insert.executeUpdate();
+            if (restorationCreditApplied > 0L) {
+                try (PreparedStatement consume = connection.prepareStatement("""
+                            UPDATE territory_maintenance_restoration
+                            SET remaining_next_cycle_credit_minor_units =
+                                    remaining_next_cycle_credit_minor_units - ?
+                            WHERE restoration_id = ?
+                              AND state = 'CIVIC_COMMITTED'
+                              AND remaining_next_cycle_credit_minor_units >= ?
+                            """);
+                        PreparedStatement audit = connection.prepareStatement("""
+                            INSERT INTO territory_maintenance_restoration_credit_application (
+                                restoration_id, assessment_id,
+                                gross_maintenance_due_minor_units,
+                                applied_minor_units, applied_at_epoch_millis
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """)) {
+                    consume.setLong(1, restorationCreditApplied);
+                    consume.setString(2, restorationCreditId.toString());
+                    consume.setLong(3, restorationCreditApplied);
+                    if (consume.executeUpdate() != 1) {
+                        throw new IllegalStateException(
+                                "Territory Restoration Prepayment Credit changed concurrently");
+                    }
+                    audit.setString(1, restorationCreditId.toString());
+                    audit.setString(2, assessmentId.toString());
+                    audit.setLong(3, maintenanceDueMinorUnits);
+                    audit.setLong(4, restorationCreditApplied);
+                    audit.setLong(5, assessedAtEpochMillis);
+                    audit.executeUpdate();
+                }
+            }
+            }
+            connection.commit();
             return territoryFiscalAssessment(serviceIdentity, requestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException(
+                            "Unable to persist Territory Fiscal Assessment", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Territory Fiscal Assessment", primaryFailure);
+        }
+    }
+
+    public synchronized long territoryFiscalAssessmentGrossMaintenanceDueMinorUnits(
+            UUID assessmentId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT assessment.maintenance_due_minor_units
+                       + COALESCE(application.applied_minor_units, 0)
+                FROM territory_fiscal_assessment assessment
+                LEFT JOIN territory_maintenance_restoration_credit_application application
+                  ON application.assessment_id = assessment.assessment_id
+                WHERE assessment.assessment_id = ?
+                """)) {
+            query.setString(1, assessmentId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    throw new IllegalArgumentException(
+                            "Unknown Territory Fiscal Assessment " + assessmentId);
+                }
+                return result.getLong(1);
+            }
         } catch (SQLException failure) {
-            throw new IllegalStateException("Unable to persist Territory Fiscal Assessment", failure);
+            throw new IllegalStateException(
+                    "Unable to read gross Territory maintenance due", failure);
         }
     }
 
@@ -7136,6 +7249,27 @@ public final class CivicDatabase implements AutoCloseable {
                           AND remaining_next_cycle_credit_minor_units > 0
                         """);
                 statement.execute("PRAGMA user_version = 43");
+            }
+            if (version < 44) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS
+                                territory_maintenance_restoration_credit_application (
+                            restoration_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_restoration(restoration_id),
+                            assessment_id TEXT NOT NULL UNIQUE
+                                REFERENCES territory_fiscal_assessment(assessment_id),
+                            gross_maintenance_due_minor_units INTEGER NOT NULL
+                                CHECK (gross_maintenance_due_minor_units >= 0),
+                            applied_minor_units INTEGER NOT NULL
+                                CHECK (applied_minor_units > 0
+                                    AND applied_minor_units
+                                        <= gross_maintenance_due_minor_units),
+                            applied_at_epoch_millis INTEGER NOT NULL
+                                CHECK (applied_at_epoch_millis >= 0),
+                            PRIMARY KEY (restoration_id, assessment_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 44");
             }
             connection.commit();
         } catch (SQLException failure) {
