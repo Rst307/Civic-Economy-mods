@@ -72,6 +72,15 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 .\gradlew.bat runGameTestServer
 ```
 
+Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮。第一轮预期以进程退出码 `86` 终止，不能当作普通测试失败；第二轮必须完整通过：
+
+```powershell
+.\gradlew.bat runGameTestServer -PmintRestartDrill=prepare --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PmintRestartDrill=verify --no-daemon --console=plain
+```
+
+该故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。
+
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
 
 在受支持的 Lightman’s Currency `1.21-2.3.0.5` 运行时中，Civic Economy 会强制关闭 LC 原生 Coin Mint 铸造/熔化、实体与箱子免费货币掉落、村民/流浪商人货币交易、季节奖励和银行利息，并拒绝 `/give` LC 货币与 `/lcbank give`。该保护不改写管理员保存的 LC 配置文件，而是在运行时强制安全读值并在实际发行方法处再次拒绝；升级 LC 版本必须重新审查这些精确边界并重跑 GameTest。

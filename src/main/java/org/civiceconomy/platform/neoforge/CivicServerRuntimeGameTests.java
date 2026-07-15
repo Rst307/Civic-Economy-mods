@@ -86,6 +86,10 @@ public final class CivicServerRuntimeGameTests {
             batch = "runtime-mint-issuance")
     public static void runtimeMintBatchCompletesRealLcIssuanceExactlyOnce(
             GameTestHelper helper) {
+        if (MintProcessRestartDrill.verifying()) {
+            verifyMintProcessRestart(helper);
+            return;
+        }
         ServerPlayer player = new ServerPlayer(
                 helper.getLevel().getServer(),
                 helper.getLevel(),
@@ -301,6 +305,76 @@ public final class CivicServerRuntimeGameTests {
             helper.assertTrue(completed.get(), "runtime Mint start/cancel completion");
             helper.assertTrue(issuanceBatchId.get() != null, "runtime issuance Mint Batch ID");
             helper.assertTrue(issuanceCompleted.get(), "runtime Mint issuance completion");
+        });
+    }
+
+    private static void verifyMintProcessRestart(GameTestHelper helper) {
+        MintProcessRestartDrill.Marker marker =
+                MintProcessRestartDrill.readMarker(helper.getLevel().getServer());
+        AtomicBoolean queryQueued = new AtomicBoolean();
+        AtomicBoolean completed = new AtomicBoolean();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "Mint process restart async state"
+                            : "Mint process restart failure: " + failure.getMessage());
+            if (!completed.get() && queryQueued.compareAndSet(false, true)) {
+                runtime.triggerMintRecovery();
+                runtime.mintBatchStatus(marker.batchId())
+                        .whenComplete((status, statusFailure) ->
+                                helper.getLevel().getServer().execute(() -> {
+                                    try {
+                                        if (statusFailure != null) {
+                                            throw new IllegalStateException(
+                                                    "Unable to read restarted Mint Batch",
+                                                    statusFailure);
+                                        }
+                                        if (!"COMMITTED".equals(status.batch().state())) {
+                                            queryQueued.set(false);
+                                            return;
+                                        }
+                                        helper.assertValueEqual(
+                                                "COMMITTED",
+                                                status.issuance().state(),
+                                                "restarted Mint issuance state");
+                                        helper.assertValueEqual(
+                                                marker.operationId(),
+                                                status.issuance().operationId(),
+                                                "restarted Mint operation identity");
+                                        helper.assertValueEqual(
+                                                marker.amountMinorUnits(),
+                                                LightmansCurrencyFiscalAccounts
+                                                        .forLevel(helper.getLevel())
+                                                        .balance(new AccountId(
+                                                                marker.treasuryAccount()))
+                                                        .minorUnits(),
+                                                "restarted Mint exact Treasury credit");
+                                        var custody = MintMaterialCustodyData
+                                                .get(helper.getLevel().getServer())
+                                                .operation(marker.batchId());
+                                        helper.assertTrue(
+                                                custody != null,
+                                                "restarted Mint custody operation");
+                                        helper.assertValueEqual(
+                                                "CONSUMED",
+                                                custody.state(),
+                                                "restarted Mint custody state");
+                                        helper.assertValueEqual(
+                                                marker.operationId(),
+                                                custody.consumptionOperationId(),
+                                                "restarted Mint consumption identity");
+                                        completed.set(true);
+                                    } catch (Throwable verificationFailure) {
+                                        asyncFailure.set(verificationFailure);
+                                    }
+                                }));
+            }
+            helper.assertTrue(completed.get(), "matched Mint process restart completion");
         });
     }
 

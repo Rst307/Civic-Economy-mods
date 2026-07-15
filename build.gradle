@@ -48,6 +48,9 @@ neoForge {
         gameTestServer {
             type = 'gameTestServer'
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            providers.gradleProperty('mintRestartDrill').orNull?.with { mode ->
+                systemProperty 'civiceconomy.mintRestartDrill', mode
+            }
         }
 
         configureEach {
