@@ -87,7 +87,7 @@ class CivicDatabaseV33MigrationTest {
         downgradeSettlementTablesToV32(databaseFile);
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(45, migrated.schemaVersion());
+            assertEquals(46, migrated.schemaVersion());
             StoredTerritoryMaintenanceSettlement funded =
                     migrated.territoryMaintenanceSettlement("migration", "funded-settlement");
             assertEquals("FULLY_FUNDED", funded.outcome());

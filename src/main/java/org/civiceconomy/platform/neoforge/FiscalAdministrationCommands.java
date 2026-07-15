@@ -29,6 +29,7 @@ import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
+import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -91,7 +92,39 @@ public final class FiscalAdministrationCommands {
                                                 StringArgumentType.getString(
                                                         context, "requestId"),
                                                 StringArgumentType.getString(
-                                                        context, "reason"))))));
+                                                        context, "reason"))))))
+                .then(databaseRestoreCommand());
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            databaseRestoreCommand() {
+        return Commands.literal("restore")
+                .then(Commands.literal("status")
+                        .executes(context -> databaseRestoreStatus(context.getSource())))
+                .then(Commands.literal("stage")
+                        .then(Commands.argument("backupOperationId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(context -> stageDatabaseRestore(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "backupOperationId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))))
+                .then(Commands.literal("cancel")
+                        .then(Commands.argument("restoreOperationId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(context -> cancelDatabaseRestore(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "restoreOperationId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -661,6 +694,76 @@ public final class FiscalAdministrationCommands {
     private static String formatBackup(StoredDatabaseBackupOperation backup) {
         return backup.operationId() + "=" + backup.state() + ":" + backup.fileName()
                 + ":size=" + backup.sizeBytes();
+    }
+
+    private static int stageDatabaseRestore(
+            CommandSourceStack source,
+            UUID backupOperationId,
+            String requestId,
+            String reason) {
+        CivicServerRuntime.current()
+                .stageDatabaseRestore(
+                        administrator(source).value(), requestId, backupOperationId, reason)
+                .whenComplete((restore, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Database restore "
+                                        + restore.state() + " " + restore.operationId()
+                                        + "; it will activate only during the next server startup"),
+                                false);
+                    } else {
+                        sendFailure(source, failure);
+                    }
+                }));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int cancelDatabaseRestore(
+            CommandSourceStack source,
+            UUID restoreOperationId,
+            String requestId,
+            String reason) {
+        CivicServerRuntime.current()
+                .cancelDatabaseRestore(
+                        administrator(source).value(), requestId, restoreOperationId, reason)
+                .whenComplete((restore, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Database restore "
+                                        + restore.operationId() + " is " + restore.state()),
+                                false);
+                    } else {
+                        sendFailure(source, failure);
+                    }
+                }));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int databaseRestoreStatus(CommandSourceStack source) {
+        CivicServerRuntime.current()
+                .databaseRestores()
+                .whenComplete((restores, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        sendFailure(source, failure);
+                        return;
+                    }
+                    String status = restores.isEmpty()
+                            ? "No database restores have been requested"
+                            : restores.stream()
+                                    .limit(8)
+                                    .map(FiscalAdministrationCommands::formatRestore)
+                                    .collect(Collectors.joining(", "));
+                    source.sendSuccess(() -> Component.literal(status), false);
+                }));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatRestore(StoredDatabaseRestoreOperation restore) {
+        return restore.operationId() + "=" + restore.state()
+                + ":source=" + restore.sourceBackupOperationId()
+                + (restore.rollbackFileName() == null
+                        ? ""
+                        : ":rollback=" + restore.rollbackFileName());
     }
 
     private static void sendFailure(CommandSourceStack source, Throwable failure) {

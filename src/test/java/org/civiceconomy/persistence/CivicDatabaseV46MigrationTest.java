@@ -8,14 +8,14 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class CivicDatabaseV45MigrationTest {
+class CivicDatabaseV46MigrationTest {
     @TempDir Path temporaryDirectory;
 
     @Test
-    void v44DatabaseAddsDurableBackupOperationsAndImmutableAudit() throws Exception {
-        Path databaseFile = temporaryDirectory.resolve("schema-v44.sqlite3");
+    void v45DatabaseAddsRestartOnlyRestoreOperationsAndImmutableAudit() throws Exception {
+        Path databaseFile = temporaryDirectory.resolve("schema-v45.sqlite3");
         DatabaseIdentity identity = new DatabaseIdentity(
-                UUID.fromString("cad97534-b19d-4e6c-8874-19e201cb6281"),
+                UUID.fromString("108de65a-ea81-4010-b358-29653d623bca"),
                 "0.1.0-probe",
                 "1.21-2.3.0.5",
                 "2101.1.10",
@@ -26,9 +26,9 @@ class CivicDatabaseV45MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
-            statement.execute("DROP TABLE database_backup_audit");
-            statement.execute("DROP TABLE database_backup_operation");
-            statement.execute("PRAGMA user_version = 44");
+            statement.execute("DROP TABLE database_restore_audit");
+            statement.execute("DROP TABLE database_restore_operation");
+            statement.execute("PRAGMA user_version = 45");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
@@ -37,15 +37,17 @@ class CivicDatabaseV45MigrationTest {
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                     var statement = connection.createStatement();
                     var result = statement.executeQuery("""
-                            SELECT COUNT(*) AS table_count
+                            SELECT COUNT(*) AS object_count
                             FROM sqlite_master
-                            WHERE type = 'table'
-                              AND name IN (
-                                  'database_backup_operation',
-                                  'database_backup_audit'
-                              )
+                            WHERE (type = 'table'
+                                      AND name IN (
+                                          'database_restore_operation',
+                                          'database_restore_audit'
+                                      ))
+                               OR (type = 'index'
+                                      AND name = 'database_restore_one_staged')
                             """)) {
-                assertEquals(2, result.getInt("table_count"));
+                assertEquals(3, result.getInt("object_count"));
             }
         }
     }

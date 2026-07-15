@@ -157,9 +157,16 @@ final class OnlineDatabaseBackupManager {
 
     private void rotateCommittedBackups() {
         List<StoredDatabaseBackupOperation> committed = database.committedDatabaseBackupOperations();
-        int removeCount = committed.size() - retention;
+        var stagedRestore = database.pendingDatabaseRestoreOperation();
+        UUID pinnedOperationId = stagedRestore == null
+                ? null
+                : stagedRestore.sourceBackupOperationId();
+        List<StoredDatabaseBackupOperation> removable = committed.stream()
+                .filter(operation -> !operation.operationId().equals(pinnedOperationId))
+                .toList();
+        int removeCount = removable.size() - retention;
         for (int index = 0; index < removeCount; index++) {
-            StoredDatabaseBackupOperation old = committed.get(index);
+            StoredDatabaseBackupOperation old = removable.get(index);
             try {
                 Files.deleteIfExists(resolveFile(old.fileName()));
                 Files.deleteIfExists(resolveFile(old.fileName() + ".pending"));

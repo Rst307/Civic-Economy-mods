@@ -119,6 +119,9 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin service enable ...
 /civic economy admin backup status
 /civic economy admin backup trigger <requestId> <reason>
+/civic economy admin backup restore status
+/civic economy admin backup restore stage <backupOperationUuid> <requestId> <reason>
+/civic economy admin backup restore cancel <restoreOperationUuid> <requestId> <reason>
 /civic economy admin territory policy show
 /civic economy admin territory policy schedule <baseChunks> <chunksPerEffectiveCitizen> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin territory pricing show
@@ -127,7 +130,9 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin territory maintenance schedule <cycleDurationMillis> <baseMaintenancePerClaim> <enclaveMultiplierBasisPoints> <forceLoadSurcharge> <restorationFee> <restorationCooldownMillis> <destructionBasisPoints> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
-数据库备份命令只允许 OP/控制台使用。服务器启动时会恢复未完成的备份操作并创建在线快照，此后每 30 分钟以及正常关服前各排队一次；所有 SQLite 和文件工作都在 `Civic-Economy-SQLite` 执行。快照写入 `<world>/civiceconomy/backups`，验证世界/依赖身份和当前 schema 后才原子发布，保留最新 8 份；操作状态、失败、SHA-256、大小和轮换均持久化审计。`trigger` 的管理员身份来自真实命令源，同一管理员的 `requestId` 可安全重放，不能更改理由。当前命令不会在线替换或恢复正在使用的数据库。SQLite 快照不是完整世界备份：LC 财政账户和交易标记位于世界 `SavedData`；在受控恢复流程完成前，生产管理员必须同时保留同一时间点的完整世界备份，不得单独回滚 Civic SQLite。
+数据库备份和恢复命令只允许 OP/控制台使用。服务器启动时会恢复未完成的备份操作并创建在线快照，此后每 30 分钟以及正常关服前各排队一次；所有在线 SQLite 和文件工作都在 `Civic-Economy-SQLite` 执行。快照写入 `<world>/civiceconomy/backups`，验证世界/依赖身份和当前 schema 后才原子发布，保留最新 8 份；操作状态、失败、SHA-256、大小和轮换均持久化审计。`trigger` 的管理员身份来自真实命令源，同一管理员的 `requestId` 可安全重放，不能更改理由。
+
+`backup restore stage` 只暂存一份仍为 `COMMITTED` 的精确备份，并将它固定在轮换范围之外；它绝不在线替换正在使用的数据库。恢复只在下一次服务器启动、权威 SQLite 尚未打开时执行：重新验证来源后先创建当前数据库的回滚快照，再通过带持久化激活标记的候选库完成原子切换；`cancel` 只取消尚未启动激活的 `STAGED` 请求。SQLite 快照不是完整世界备份：LC 财政账户和交易标记位于世界 `SavedData`，因此生产恢复必须同时使用刻意匹配的完整世界备份，不能把单独回滚 Civic SQLite 当成跨存储事务。
 
 领土政策命令仅允许 OP/控制台。免费额度与凸性扩张定价都必须安排在未来时刻生效，并持久化操作者、稳定 request ID、参数、理由和生效时间；在管理员安排首个版本前，两者均使用保守的零值默认，因此不会自动产生收费或免费扩张权。
 

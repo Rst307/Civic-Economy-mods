@@ -123,11 +123,17 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted fiscal administration command actions");
         helper.assertValueEqual(
-                Set.of("status", "trigger"),
+                Set.of("status", "trigger", "restore"),
                 backup.getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "trusted asynchronous database backup command actions");
+        helper.assertValueEqual(
+                Set.of("status", "stage", "cancel"),
+                backup.getChild("restore").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted restart-only database restore command actions");
         helper.assertValueEqual(
                 Set.of("apply", "status", "cancel", "activate", "population", "role", "territory"),
                 economy.getChild("nation").getChildren().stream()
@@ -191,6 +197,61 @@ public final class CivicServerRuntimeGameTests {
 
         helper.succeedWhen(() ->
                 assertDatabaseBackupCommitted(helper, civicDirectory, requestId));
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 300)
+    public static void consoleStagesAndCancelsRestartOnlyDatabaseRestoreOffThread(
+            GameTestHelper helper) {
+        String stageRequestId = "restore-stage-gametest-" + UUID.randomUUID();
+        String cancelRequestId = "restore-cancel-gametest-" + UUID.randomUUID();
+        AtomicBoolean stageIssued = new AtomicBoolean();
+        AtomicBoolean cancelIssued = new AtomicBoolean();
+        var server = helper.getLevel().getServer();
+        Path civicDirectory = server.getWorldPath(LevelResource.ROOT).resolve("civiceconomy");
+        Path databaseFile = civicDirectory.resolve("civic.sqlite3");
+
+        helper.succeedWhen(() -> {
+            if (!stageIssued.get()) {
+                UUID backupOperationId = latestCommittedBackupOperation(databaseFile);
+                helper.assertTrue(backupOperationId != null, "committed restore source backup");
+                if (stageIssued.compareAndSet(false, true)) {
+                    server.getCommands().performPrefixedCommand(
+                            server.createCommandSourceStack(),
+                            "civic economy admin backup restore stage " + backupOperationId
+                                    + " " + stageRequestId + " GameTest staged restart restore");
+                }
+                helper.assertTrue(false, "waiting for staged restore");
+            }
+
+            RestoreCommandRow restore = databaseRestoreByRequest(databaseFile, stageRequestId);
+            helper.assertTrue(restore != null, "durable staged database restore row");
+            if (!cancelIssued.get()) {
+                helper.assertValueEqual("STAGED", restore.state(), "staged restore state");
+                helper.assertValueEqual(1L, restore.stagedAuditCount(), "single staged audit");
+                helper.assertTrue(
+                        Files.isRegularFile(civicDirectory.resolve("restore/pending.properties")),
+                        "external staged restore manifest");
+                if (cancelIssued.compareAndSet(false, true)) {
+                    server.getCommands().performPrefixedCommand(
+                            server.createCommandSourceStack(),
+                            "civic economy admin backup restore cancel " + restore.operationId()
+                                    + " " + cancelRequestId + " GameTest cancelled restart restore");
+                }
+                helper.assertTrue(false, "waiting for cancelled restore");
+            }
+
+            restore = databaseRestoreByRequest(databaseFile, stageRequestId);
+            helper.assertValueEqual("CANCELLED", restore.state(), "cancelled restore state");
+            helper.assertValueEqual(1L, restore.cancelledAuditCount(), "single cancelled audit");
+            helper.assertTrue(
+                    !Files.exists(civicDirectory.resolve("restore/pending.properties")),
+                    "cancelled restore manifest is no longer pending");
+            helper.assertTrue(
+                    Files.isRegularFile(civicDirectory
+                            .resolve("restore/history")
+                            .resolve(restore.operationId() + "-cancelled.properties")),
+                    "cancelled restore manifest history");
+        });
     }
 
     @GameTest(template = "empty", timeoutTicks = 200)
@@ -2082,10 +2143,57 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(45, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(46, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
+        }
+    }
+
+    private static UUID latestCommittedBackupOperation(Path databaseFile) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT operation_id
+                        FROM database_backup_operation
+                        WHERE state = 'COMMITTED'
+                        ORDER BY committed_at_epoch_millis DESC, rowid DESC
+                        LIMIT 1
+                        """);
+                var result = query.executeQuery()) {
+            return result.next() ? UUID.fromString(result.getString(1)) : null;
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to find a restore source backup", failure);
+        }
+    }
+
+    private static RestoreCommandRow databaseRestoreByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT operation.operation_id,
+                               operation.state,
+                               SUM(CASE WHEN audit.action = 'STAGED' THEN 1 ELSE 0 END),
+                               SUM(CASE WHEN audit.action = 'CANCELLED' THEN 1 ELSE 0 END)
+                        FROM database_restore_operation operation
+                        LEFT JOIN database_restore_audit audit
+                          ON audit.operation_id = operation.operation_id
+                        WHERE operation.request_id = ?
+                        GROUP BY operation.operation_id
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new RestoreCommandRow(
+                                UUID.fromString(result.getString(1)),
+                                result.getString(2),
+                                result.getLong(3),
+                                result.getLong(4))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect database restore command", failure);
         }
     }
 
@@ -2531,6 +2639,12 @@ public final class CivicServerRuntimeGameTests {
     private record PendingApplicationRow(UUID applicationId, long createdAtEpochMillis) {}
 
     private record TerritoryPermitRow(UUID permitId, TerritoryClaimPermitState state) {}
+
+    private record RestoreCommandRow(
+            UUID operationId,
+            String state,
+            long stagedAuditCount,
+            long cancelledAuditCount) {}
 
     private record TerritoryRestorationRow(
             UUID restorationId,

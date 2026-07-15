@@ -54,6 +54,7 @@ import org.civiceconomy.nation.RegisteredNation;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
+import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
 import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
 import org.civiceconomy.territory.ConsumeTerritoryClaimPermit;
@@ -180,6 +181,11 @@ public final class CivicServerRuntime {
                 requireVersion(mods, "lightmanscurrency"),
                 requireVersion(mods, "ftbteams"),
                 requireVersion(mods, "ftbchunks"));
+        DatabaseRestoreStartup.activate(databaseDirectory, identity, clock).ifPresent(activation ->
+                LOGGER.warn(
+                        "Activated staged Civic database restore {}; rollback snapshot is {}",
+                        activation.operationId(),
+                        activation.rollbackFileName()));
         CivicDatabase database = CivicDatabase.open(databaseDirectory.resolve("civic.sqlite3"), identity);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
@@ -195,7 +201,9 @@ public final class CivicServerRuntime {
                 databaseDirectory.resolve("backups"),
                 clock,
                 DATABASE_BACKUP_RETENTION);
-        state = new RuntimeState(server, sessions, writer, backups, now);
+        OnlineDatabaseRestoreManager restores =
+                new OnlineDatabaseRestoreManager(database, databaseDirectory, clock);
+        state = new RuntimeState(server, sessions, writer, backups, restores, now);
         scheduleDatabaseBackupRecovery(state);
         scheduleTerritoryPermitMirrorRefresh(state);
         scheduleTerritoryForceLoadRestrictionRefresh(state);
@@ -348,6 +356,38 @@ public final class CivicServerRuntime {
 
     CompletableFuture<List<StoredDatabaseBackupOperation>> databaseBackups() {
         return submitDatabase(CivicDatabase::databaseBackupOperations);
+    }
+
+    CompletableFuture<StoredDatabaseRestoreOperation> stageDatabaseRestore(
+            String administratorIdentity,
+            String requestId,
+            UUID backupOperationId,
+            String reason) {
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        return current.writer.submitDatabase(ignored -> current.restores.stage(
+                administratorIdentity, requestId, backupOperationId, reason));
+    }
+
+    CompletableFuture<StoredDatabaseRestoreOperation> cancelDatabaseRestore(
+            String administratorIdentity,
+            String requestId,
+            UUID restoreOperationId,
+            String reason) {
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        return current.writer.submitDatabase(ignored -> current.restores.cancel(
+                administratorIdentity, requestId, restoreOperationId, reason));
+    }
+
+    CompletableFuture<List<StoredDatabaseRestoreOperation>> databaseRestores() {
+        return submitDatabase(CivicDatabase::databaseRestoreOperations);
     }
 
     private void scheduleDatabaseBackupRecovery(RuntimeState current) {
@@ -1625,6 +1665,7 @@ public final class CivicServerRuntime {
         private final OnlineSessionAccumulator sessions;
         private final AsyncOnlineTimeWriter writer;
         private final OnlineDatabaseBackupManager backups;
+        private final OnlineDatabaseRestoreManager restores;
         private final long startedAtEpochMillis;
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
@@ -1650,11 +1691,13 @@ public final class CivicServerRuntime {
                 OnlineSessionAccumulator sessions,
                 AsyncOnlineTimeWriter writer,
                 OnlineDatabaseBackupManager backups,
+                OnlineDatabaseRestoreManager restores,
                 long startedAtEpochMillis) {
             this.server = server;
             this.sessions = sessions;
             this.writer = writer;
             this.backups = backups;
+            this.restores = restores;
             this.startedAtEpochMillis = startedAtEpochMillis;
         }
     }

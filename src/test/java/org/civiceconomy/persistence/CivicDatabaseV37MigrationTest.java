@@ -68,7 +68,7 @@ class CivicDatabaseV37MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(45, migrated.schemaVersion());
+            assertEquals(46, migrated.schemaVersion());
             var recovered = new TerritoryMaintenanceAssessmentProcessor(
                             new TerritoryMaintenanceRegistry(migrated))
                     .recover(service, "migration-cycle", "Migration assessment")

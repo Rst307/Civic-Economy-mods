@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 45;
+    private static final int SCHEMA_VERSION = 46;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -725,6 +725,394 @@ public final class CivicDatabase implements AutoCloseable {
             return List.copyOf(entries);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read database backup audit", failure);
+        }
+    }
+
+    public synchronized StoredDatabaseRestoreOperation prepareDatabaseRestoreOperation(
+            UUID operationId,
+            String administratorIdentity,
+            String requestId,
+            UUID sourceBackupOperationId,
+            String sourceFileName,
+            long sourceSizeBytes,
+            String sourceSha256,
+            String reason,
+            long stagedAtEpochMillis) {
+        StoredDatabaseRestoreOperation replay =
+                databaseRestoreOperation(administratorIdentity, requestId);
+        if (replay != null) {
+            if (!replay.sourceBackupOperationId().equals(sourceBackupOperationId)
+                    || !replay.sourceFileName().equals(sourceFileName)
+                    || replay.sourceSizeBytes() != sourceSizeBytes
+                    || !replay.sourceSha256().equals(sourceSha256)
+                    || !replay.reason().equals(reason)) {
+                throw new IllegalArgumentException(
+                        "Database restore request replay changed its immutable payload");
+            }
+            return replay;
+        }
+        if (pendingDatabaseRestoreOperation() != null) {
+            throw new IllegalStateException("Another database restore is already staged");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO database_restore_operation (
+                            operation_id, administrator_identity, request_id,
+                            source_backup_operation_id, source_file_name,
+                            source_size_bytes, source_sha256, state, reason,
+                            staged_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'STAGED', ?, ?)
+                        """);
+                    PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO database_restore_audit (
+                            audit_id, operation_id, action, actor_identity,
+                            detail, recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'STAGED', ?, ?, ?)
+                        """)) {
+                insert.setString(1, operationId.toString());
+                insert.setString(2, administratorIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, sourceBackupOperationId.toString());
+                insert.setString(5, sourceFileName);
+                insert.setLong(6, sourceSizeBytes);
+                insert.setString(7, sourceSha256);
+                insert.setString(8, reason);
+                insert.setLong(9, stagedAtEpochMillis);
+                insert.executeUpdate();
+                audit.setString(1, UUID.randomUUID().toString());
+                audit.setString(2, operationId.toString());
+                audit.setString(3, administratorIdentity);
+                audit.setString(4, reason);
+                audit.setLong(5, stagedAtEpochMillis);
+                audit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return databaseRestoreOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to stage database restore", failure);
+        }
+    }
+
+    public synchronized StoredDatabaseRestoreOperation cancelDatabaseRestoreOperation(
+            UUID operationId,
+            String administratorIdentity,
+            String requestId,
+            String reason,
+            long cancelledAtEpochMillis) {
+        StoredDatabaseRestoreOperation cancellationReplay =
+                databaseRestoreCancellation(administratorIdentity, requestId);
+        if (cancellationReplay != null) {
+            if (!cancellationReplay.operationId().equals(operationId)
+                    || !reason.equals(cancellationReplay.cancellationReason())) {
+                throw new IllegalArgumentException(
+                        "Database restore cancellation replay changed its immutable payload");
+            }
+            return cancellationReplay;
+        }
+        StoredDatabaseRestoreOperation existing = requireDatabaseRestoreOperation(operationId);
+        if (!"STAGED".equals(existing.state())) {
+            throw new IllegalStateException("Only a staged database restore may be cancelled");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE database_restore_operation
+                        SET state = 'CANCELLED',
+                            cancellation_administrator_identity = ?,
+                            cancellation_request_id = ?, cancellation_reason = ?,
+                            cancelled_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'STAGED'
+                        """);
+                    PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO database_restore_audit (
+                            audit_id, operation_id, action, actor_identity,
+                            detail, recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'CANCELLED', ?, ?, ?)
+                        """)) {
+                update.setString(1, administratorIdentity);
+                update.setString(2, requestId);
+                update.setString(3, reason);
+                update.setLong(4, cancelledAtEpochMillis);
+                update.setString(5, operationId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Database restore state changed before cancellation " + operationId);
+                }
+                audit.setString(1, UUID.randomUUID().toString());
+                audit.setString(2, operationId.toString());
+                audit.setString(3, administratorIdentity);
+                audit.setString(4, reason);
+                audit.setLong(5, cancelledAtEpochMillis);
+                audit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return databaseRestoreOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to cancel database restore " + operationId, failure);
+        }
+    }
+
+    public synchronized StoredDatabaseRestoreOperation recordDatabaseRestoreActivation(
+            UUID operationId,
+            String administratorIdentity,
+            String requestId,
+            UUID sourceBackupOperationId,
+            String sourceFileName,
+            long sourceSizeBytes,
+            String sourceSha256,
+            UUID rollbackBackupOperationId,
+            String rollbackFileName,
+            long rollbackSizeBytes,
+            String rollbackSha256,
+            String reason,
+            long stagedAtEpochMillis,
+            long activatedAtEpochMillis) {
+        StoredDatabaseRestoreOperation existing = databaseRestoreOperation(operationId);
+        if (existing != null && "ACTIVATED".equals(existing.state())) {
+            requireRestoreActivationPayload(
+                    existing,
+                    administratorIdentity,
+                    requestId,
+                    sourceBackupOperationId,
+                    sourceFileName,
+                    sourceSizeBytes,
+                    sourceSha256,
+                    rollbackBackupOperationId,
+                    rollbackFileName,
+                    rollbackSizeBytes,
+                    rollbackSha256,
+                    reason,
+                    stagedAtEpochMillis);
+            return existing;
+        }
+        if (existing != null && !"STAGED".equals(existing.state())) {
+            throw new IllegalStateException(
+                    "Database restore cannot activate from " + existing.state());
+        }
+        try {
+            connection.setAutoCommit(false);
+            if (existing == null) {
+                try (PreparedStatement insert = connection.prepareStatement("""
+                            INSERT INTO database_restore_operation (
+                                operation_id, administrator_identity, request_id,
+                                source_backup_operation_id, source_file_name,
+                                source_size_bytes, source_sha256,
+                                rollback_backup_operation_id, rollback_file_name,
+                                rollback_size_bytes, rollback_sha256,
+                                state, reason, staged_at_epoch_millis,
+                                activated_at_epoch_millis
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                      'ACTIVATED', ?, ?, ?)
+                            """);
+                        PreparedStatement stagedAudit = connection.prepareStatement("""
+                            INSERT INTO database_restore_audit (
+                                audit_id, operation_id, action, actor_identity,
+                                detail, recorded_at_epoch_millis
+                            ) VALUES (?, ?, 'STAGED', ?, ?, ?)
+                            """)) {
+                    bindRestoreActivation(
+                            insert,
+                            operationId,
+                            administratorIdentity,
+                            requestId,
+                            sourceBackupOperationId,
+                            sourceFileName,
+                            sourceSizeBytes,
+                            sourceSha256,
+                            rollbackBackupOperationId,
+                            rollbackFileName,
+                            rollbackSizeBytes,
+                            rollbackSha256,
+                            reason,
+                            stagedAtEpochMillis,
+                            activatedAtEpochMillis);
+                    insert.executeUpdate();
+                    stagedAudit.setString(1, UUID.randomUUID().toString());
+                    stagedAudit.setString(2, operationId.toString());
+                    stagedAudit.setString(3, administratorIdentity);
+                    stagedAudit.setString(4, reason);
+                    stagedAudit.setLong(5, stagedAtEpochMillis);
+                    stagedAudit.executeUpdate();
+                }
+            } else {
+                requireRestoreActivationPayload(
+                        existing,
+                        administratorIdentity,
+                        requestId,
+                        sourceBackupOperationId,
+                        sourceFileName,
+                        sourceSizeBytes,
+                        sourceSha256,
+                        null,
+                        null,
+                        0L,
+                        null,
+                        reason,
+                        stagedAtEpochMillis);
+                try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE database_restore_operation
+                        SET rollback_backup_operation_id = ?, rollback_file_name = ?,
+                            rollback_size_bytes = ?, rollback_sha256 = ?,
+                            state = 'ACTIVATED', activated_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'STAGED'
+                        """)) {
+                    update.setString(1, rollbackBackupOperationId.toString());
+                    update.setString(2, rollbackFileName);
+                    update.setLong(3, rollbackSizeBytes);
+                    update.setString(4, rollbackSha256);
+                    update.setLong(5, activatedAtEpochMillis);
+                    update.setString(6, operationId.toString());
+                    if (update.executeUpdate() != 1) {
+                        throw new IllegalStateException(
+                                "Database restore state changed before activation " + operationId);
+                    }
+                }
+            }
+            try (PreparedStatement audit = connection.prepareStatement("""
+                    INSERT INTO database_restore_audit (
+                        audit_id, operation_id, action, actor_identity,
+                        detail, recorded_at_epoch_millis
+                    ) VALUES (?, ?, 'ACTIVATED', 'civic-restore-startup', ?, ?)
+                    """)) {
+                audit.setString(1, UUID.randomUUID().toString());
+                audit.setString(2, operationId.toString());
+                audit.setString(3, "rollback=" + rollbackFileName);
+                audit.setLong(4, activatedAtEpochMillis);
+                audit.executeUpdate();
+            }
+            connection.commit();
+            return databaseRestoreOperation(operationId);
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to record database restore activation " + operationId, failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore database auto-commit after activation", failure);
+            }
+        }
+    }
+
+    public synchronized StoredDatabaseRestoreOperation databaseRestoreOperation(UUID operationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_restore_operation WHERE operation_id = ?
+                """)) {
+            query.setString(1, operationId.toString());
+            return readDatabaseRestoreOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database restore " + operationId, failure);
+        }
+    }
+
+    public synchronized StoredDatabaseRestoreOperation databaseRestoreOperation(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_restore_operation
+                WHERE administrator_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            return readDatabaseRestoreOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database restore request", failure);
+        }
+    }
+
+    public synchronized StoredDatabaseRestoreOperation pendingDatabaseRestoreOperation() {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_restore_operation
+                WHERE state = 'STAGED'
+                ORDER BY staged_at_epoch_millis, rowid
+                LIMIT 1
+                """)) {
+            return readDatabaseRestoreOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read staged database restore", failure);
+        }
+    }
+
+    public synchronized List<StoredDatabaseRestoreOperation> databaseRestoreOperations() {
+        List<StoredDatabaseRestoreOperation> operations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_restore_operation
+                ORDER BY staged_at_epoch_millis DESC, rowid DESC
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    operations.add(readDatabaseRestoreOperation(result));
+                }
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list database restores", failure);
+        }
+    }
+
+    public synchronized List<StoredDatabaseRestoreAuditEntry> databaseRestoreAudit(
+            UUID operationId) {
+        List<StoredDatabaseRestoreAuditEntry> entries = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_restore_audit
+                WHERE operation_id = ?
+                ORDER BY recorded_at_epoch_millis, rowid
+                """)) {
+            query.setString(1, operationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    entries.add(new StoredDatabaseRestoreAuditEntry(
+                            UUID.fromString(result.getString("audit_id")),
+                            UUID.fromString(result.getString("operation_id")),
+                            result.getString("action"),
+                            result.getString("actor_identity"),
+                            result.getString("detail"),
+                            result.getLong("recorded_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(entries);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database restore audit", failure);
+        }
+    }
+
+    public synchronized void recordDatabaseRestoreFailure(
+            UUID operationId,
+            String actorIdentity,
+            String detail,
+            long recordedAtEpochMillis) {
+        requireDatabaseRestoreOperation(operationId);
+        try (PreparedStatement audit = connection.prepareStatement("""
+                INSERT INTO database_restore_audit (
+                    audit_id, operation_id, action, actor_identity,
+                    detail, recorded_at_epoch_millis
+                ) VALUES (?, ?, 'FAILED', ?, ?, ?)
+                """)) {
+            audit.setString(1, UUID.randomUUID().toString());
+            audit.setString(2, operationId.toString());
+            audit.setString(3, actorIdentity);
+            audit.setString(4, detail);
+            audit.setLong(5, recordedAtEpochMillis);
+            audit.executeUpdate();
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to audit database restore failure " + operationId, failure);
         }
     }
 
@@ -7556,6 +7944,84 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 45");
             }
+            if (version < 46) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS database_restore_operation (
+                            operation_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            source_backup_operation_id TEXT NOT NULL,
+                            source_file_name TEXT NOT NULL,
+                            source_size_bytes INTEGER NOT NULL
+                                CHECK (source_size_bytes > 0),
+                            source_sha256 TEXT NOT NULL
+                                CHECK (length(source_sha256) = 64),
+                            rollback_backup_operation_id TEXT,
+                            rollback_file_name TEXT,
+                            rollback_size_bytes INTEGER NOT NULL DEFAULT 0
+                                CHECK (rollback_size_bytes >= 0),
+                            rollback_sha256 TEXT,
+                            state TEXT NOT NULL
+                                CHECK (state IN ('STAGED', 'ACTIVATED', 'CANCELLED')),
+                            reason TEXT NOT NULL,
+                            staged_at_epoch_millis INTEGER NOT NULL
+                                CHECK (staged_at_epoch_millis >= 0),
+                            activated_at_epoch_millis INTEGER,
+                            cancellation_administrator_identity TEXT,
+                            cancellation_request_id TEXT,
+                            cancellation_reason TEXT,
+                            cancelled_at_epoch_millis INTEGER,
+                            UNIQUE (administrator_identity, request_id),
+                            UNIQUE (
+                                cancellation_administrator_identity,
+                                cancellation_request_id
+                            ),
+                            CHECK ((state = 'STAGED'
+                                    AND rollback_backup_operation_id IS NULL
+                                    AND rollback_file_name IS NULL
+                                    AND rollback_size_bytes = 0
+                                    AND rollback_sha256 IS NULL
+                                    AND activated_at_epoch_millis IS NULL
+                                    AND cancelled_at_epoch_millis IS NULL)
+                                OR (state = 'ACTIVATED'
+                                    AND rollback_backup_operation_id IS NOT NULL
+                                    AND rollback_file_name IS NOT NULL
+                                    AND rollback_size_bytes > 0
+                                    AND length(rollback_sha256) = 64
+                                    AND activated_at_epoch_millis IS NOT NULL
+                                    AND cancelled_at_epoch_millis IS NULL)
+                                OR (state = 'CANCELLED'
+                                    AND rollback_backup_operation_id IS NULL
+                                    AND rollback_file_name IS NULL
+                                    AND rollback_size_bytes = 0
+                                    AND rollback_sha256 IS NULL
+                                    AND activated_at_epoch_millis IS NULL
+                                    AND cancellation_administrator_identity IS NOT NULL
+                                    AND cancellation_request_id IS NOT NULL
+                                    AND cancellation_reason IS NOT NULL
+                                    AND cancelled_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS database_restore_one_staged
+                        ON database_restore_operation (state)
+                        WHERE state = 'STAGED'
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS database_restore_audit (
+                            audit_id TEXT PRIMARY KEY,
+                            operation_id TEXT NOT NULL
+                                REFERENCES database_restore_operation(operation_id),
+                            action TEXT NOT NULL
+                                CHECK (action IN ('STAGED', 'ACTIVATED', 'CANCELLED', 'FAILED')),
+                            actor_identity TEXT NOT NULL,
+                            detail TEXT NOT NULL,
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 46");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -7601,6 +8067,133 @@ public final class CivicDatabase implements AutoCloseable {
             throw new IllegalArgumentException("Unknown database backup operation " + operationId);
         }
         return operation;
+    }
+
+    private StoredDatabaseRestoreOperation requireDatabaseRestoreOperation(UUID operationId) {
+        StoredDatabaseRestoreOperation operation = databaseRestoreOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException("Unknown database restore operation " + operationId);
+        }
+        return operation;
+    }
+
+    private StoredDatabaseRestoreOperation databaseRestoreCancellation(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_restore_operation
+                WHERE cancellation_administrator_identity = ?
+                  AND cancellation_request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            return readDatabaseRestoreOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database restore cancellation", failure);
+        }
+    }
+
+    private static void bindRestoreActivation(
+            PreparedStatement insert,
+            UUID operationId,
+            String administratorIdentity,
+            String requestId,
+            UUID sourceBackupOperationId,
+            String sourceFileName,
+            long sourceSizeBytes,
+            String sourceSha256,
+            UUID rollbackBackupOperationId,
+            String rollbackFileName,
+            long rollbackSizeBytes,
+            String rollbackSha256,
+            String reason,
+            long stagedAtEpochMillis,
+            long activatedAtEpochMillis)
+            throws SQLException {
+        insert.setString(1, operationId.toString());
+        insert.setString(2, administratorIdentity);
+        insert.setString(3, requestId);
+        insert.setString(4, sourceBackupOperationId.toString());
+        insert.setString(5, sourceFileName);
+        insert.setLong(6, sourceSizeBytes);
+        insert.setString(7, sourceSha256);
+        insert.setString(8, rollbackBackupOperationId.toString());
+        insert.setString(9, rollbackFileName);
+        insert.setLong(10, rollbackSizeBytes);
+        insert.setString(11, rollbackSha256);
+        insert.setString(12, reason);
+        insert.setLong(13, stagedAtEpochMillis);
+        insert.setLong(14, activatedAtEpochMillis);
+    }
+
+    private static void requireRestoreActivationPayload(
+            StoredDatabaseRestoreOperation existing,
+            String administratorIdentity,
+            String requestId,
+            UUID sourceBackupOperationId,
+            String sourceFileName,
+            long sourceSizeBytes,
+            String sourceSha256,
+            UUID rollbackBackupOperationId,
+            String rollbackFileName,
+            long rollbackSizeBytes,
+            String rollbackSha256,
+            String reason,
+            long stagedAtEpochMillis) {
+        boolean changed = !existing.administratorIdentity().equals(administratorIdentity)
+                || !existing.requestId().equals(requestId)
+                || !existing.sourceBackupOperationId().equals(sourceBackupOperationId)
+                || !existing.sourceFileName().equals(sourceFileName)
+                || existing.sourceSizeBytes() != sourceSizeBytes
+                || !existing.sourceSha256().equals(sourceSha256)
+                || !existing.reason().equals(reason)
+                || existing.stagedAtEpochMillis() != stagedAtEpochMillis;
+        if (rollbackBackupOperationId != null) {
+            changed = changed
+                    || !rollbackBackupOperationId.equals(existing.rollbackBackupOperationId())
+                    || !rollbackFileName.equals(existing.rollbackFileName())
+                    || rollbackSizeBytes != existing.rollbackSizeBytes()
+                    || !rollbackSha256.equals(existing.rollbackSha256());
+        }
+        if (changed) {
+            throw new IllegalArgumentException(
+                    "Database restore activation replay changed its immutable payload");
+        }
+    }
+
+    private StoredDatabaseRestoreOperation readDatabaseRestoreOperation(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? readDatabaseRestoreOperation(result) : null;
+        }
+    }
+
+    private static StoredDatabaseRestoreOperation readDatabaseRestoreOperation(ResultSet result)
+            throws SQLException {
+        String rollbackOperationId = result.getString("rollback_backup_operation_id");
+        long activatedAt = result.getLong("activated_at_epoch_millis");
+        Long optionalActivatedAt = result.wasNull() ? null : activatedAt;
+        long cancelledAt = result.getLong("cancelled_at_epoch_millis");
+        Long optionalCancelledAt = result.wasNull() ? null : cancelledAt;
+        return new StoredDatabaseRestoreOperation(
+                UUID.fromString(result.getString("operation_id")),
+                result.getString("administrator_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("source_backup_operation_id")),
+                result.getString("source_file_name"),
+                result.getLong("source_size_bytes"),
+                result.getString("source_sha256"),
+                rollbackOperationId == null ? null : UUID.fromString(rollbackOperationId),
+                result.getString("rollback_file_name"),
+                result.getLong("rollback_size_bytes"),
+                result.getString("rollback_sha256"),
+                result.getString("state"),
+                result.getString("reason"),
+                result.getLong("staged_at_epoch_millis"),
+                optionalActivatedAt,
+                result.getString("cancellation_administrator_identity"),
+                result.getString("cancellation_request_id"),
+                result.getString("cancellation_reason"),
+                optionalCancelledAt);
     }
 
     private List<StoredDatabaseBackupOperation> databaseBackupOperations(
