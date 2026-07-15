@@ -12,6 +12,7 @@ import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTerritoryFiscalAssessment;
 import org.civiceconomy.persistence.StoredTerritoryMaintenanceAssessmentBatch;
+import org.civiceconomy.persistence.StoredTerritoryMaintenanceAssessmentClaim;
 import org.civiceconomy.persistence.StoredTerritoryMaintenanceCycle;
 import org.civiceconomy.persistence.StoredTerritoryMaintenanceSettlement;
 
@@ -52,6 +53,19 @@ public final class TerritoryMaintenanceRegistry {
                 clock.millis()));
     }
 
+    public TerritoryMaintenanceCycle cycle(UUID cycleId) {
+        if (cycleId == null) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance Cycle ID cannot be null");
+        }
+        StoredTerritoryMaintenanceCycle stored = database.territoryMaintenanceCycle(cycleId);
+        if (stored == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Territory Maintenance Cycle " + cycleId);
+        }
+        return toCycle(stored);
+    }
+
     public TerritoryFiscalAssessment assess(AssessTerritoryFiscalValidity request) {
         StoredTerritoryFiscalAssessment replay = database.territoryFiscalAssessment(
                 request.serviceIdentity().value(), request.requestId());
@@ -84,30 +98,62 @@ public final class TerritoryMaintenanceRegistry {
                 clock.millis()));
     }
 
-    public void registerAssessmentBatch(
+    public StoredTerritoryMaintenanceAssessmentBatch registerAssessmentBatch(
             UUID cycleId,
             org.civiceconomy.fiscal.ServiceIdentity serviceIdentity,
             String requestId,
-            int claimCount,
+            List<TerritoryMaintenanceClaimSnapshot> claims,
             String snapshotSha256) {
         StoredTerritoryMaintenanceAssessmentBatch replay =
                 database.territoryMaintenanceAssessmentBatch(
                         serviceIdentity.value(), requestId);
         if (replay != null) {
             if (!replay.cycleId().equals(cycleId)
-                    || replay.claimCount() != claimCount
+                    || replay.claimCount() != claims.size()
                     || !replay.snapshotSha256().equals(snapshotSha256)) {
                 throw new IdempotencyConflictException(serviceIdentity, requestId);
             }
-            return;
+            return replay;
         }
-        database.registerTerritoryMaintenanceAssessmentBatch(
+        return database.registerTerritoryMaintenanceAssessmentBatch(
                 cycleId,
                 serviceIdentity.value(),
                 requestId,
-                claimCount,
+                java.util.stream.IntStream.range(0, claims.size())
+                        .mapToObj(index -> {
+                            TerritoryMaintenanceClaimSnapshot claim = claims.get(index);
+                            return new StoredTerritoryMaintenanceAssessmentClaim(
+                                    cycleId,
+                                    index,
+                                    claim.nationId().value(),
+                                    claim.ftbTeamId(),
+                                    claim.dimensionId(),
+                                    claim.chunkX(),
+                                    claim.chunkZ(),
+                                    claim.maintenanceDueMinorUnits(),
+                                    claim.priority().name());
+                        })
+                        .toList(),
                 snapshotSha256,
                 clock.millis());
+    }
+
+    public List<TerritoryMaintenanceClaimSnapshot> assessmentBatchClaims(UUID cycleId) {
+        return database.territoryMaintenanceAssessmentClaims(cycleId).stream()
+                .map(claim -> new TerritoryMaintenanceClaimSnapshot(
+                        new NationId(claim.nationId()),
+                        claim.ftbTeamId(),
+                        claim.dimensionId(),
+                        claim.chunkX(),
+                        claim.chunkZ(),
+                        claim.maintenanceDueMinorUnits(),
+                        TerritoryMaintenancePriority.valueOf(claim.priority())))
+                .toList();
+    }
+
+    public StoredTerritoryMaintenanceAssessmentBatch assessmentBatch(
+            org.civiceconomy.fiscal.ServiceIdentity serviceIdentity, String requestId) {
+        return database.territoryMaintenanceAssessmentBatch(serviceIdentity.value(), requestId);
     }
 
     public boolean isEffective(

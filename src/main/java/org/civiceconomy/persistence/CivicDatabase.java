@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 35;
+    private static final int SCHEMA_VERSION = 37;
 
     private final Connection connection;
 
@@ -1628,6 +1628,19 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredTerritoryMaintenancePolicy territoryMaintenancePolicy(
+            UUID policyId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_policy WHERE policy_id = ?
+                """)) {
+            query.setString(1, policyId.toString());
+            return readTerritoryMaintenancePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance policy ID", failure);
+        }
+    }
+
     public synchronized StoredTerritoryExpansionPricingPolicy territoryExpansionPricingPolicy(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -1664,6 +1677,35 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryMaintenanceCycle(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Maintenance Cycle ID", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceCycle latestTerritoryMaintenanceCycle() {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_cycle
+                ORDER BY ends_at_epoch_millis DESC, cycle_id DESC
+                LIMIT 1
+                """)) {
+            return readTerritoryMaintenanceCycle(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read latest Territory Maintenance Cycle", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceCycle territoryMaintenanceCycleAt(
+            long atEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_cycle
+                WHERE starts_at_epoch_millis <= ? AND ends_at_epoch_millis > ?
+                LIMIT 1
+                """)) {
+            query.setLong(1, atEpochMillis);
+            query.setLong(2, atEpochMillis);
+            return readTerritoryMaintenanceCycle(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read active Territory Maintenance Cycle", failure);
         }
     }
 
@@ -1713,6 +1755,20 @@ public final class CivicDatabase implements AutoCloseable {
     }
 
     public synchronized StoredTerritoryMaintenanceAssessmentBatch
+            territoryMaintenanceAssessmentBatch(UUID cycleId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_assessment_batch
+                WHERE cycle_id = ?
+                """)) {
+            query.setString(1, cycleId.toString());
+            return readTerritoryMaintenanceAssessmentBatch(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance Assessment Batch by Cycle", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceAssessmentBatch
             registerTerritoryMaintenanceAssessmentBatch(
                     UUID cycleId,
                     String serviceIdentity,
@@ -1720,28 +1776,118 @@ public final class CivicDatabase implements AutoCloseable {
                     int claimCount,
                     String snapshotSha256,
                     long recordedAtEpochMillis) {
+        if (claimCount != 0) {
+            throw new IllegalArgumentException(
+                    "Non-empty Territory Maintenance batches require persisted Claim Snapshots");
+        }
+        return registerTerritoryMaintenanceAssessmentBatch(
+                cycleId,
+                serviceIdentity,
+                requestId,
+                List.of(),
+                snapshotSha256,
+                recordedAtEpochMillis);
+    }
+
+    public synchronized StoredTerritoryMaintenanceAssessmentBatch
+            registerTerritoryMaintenanceAssessmentBatch(
+                    UUID cycleId,
+                    String serviceIdentity,
+                    String requestId,
+                    List<StoredTerritoryMaintenanceAssessmentClaim> claims,
+                    String snapshotSha256,
+                    long recordedAtEpochMillis) {
         StoredTerritoryMaintenanceAssessmentBatch replay =
                 territoryMaintenanceAssessmentBatch(serviceIdentity, requestId);
         if (replay != null) {
             return replay;
         }
-        try (PreparedStatement insert = connection.prepareStatement("""
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
                 INSERT INTO territory_maintenance_assessment_batch (
                     cycle_id, service_identity, request_id, claim_count,
                     snapshot_sha256, recorded_at_epoch_millis
                 ) VALUES (?, ?, ?, ?, ?, ?)
+                """);
+                    PreparedStatement claimInsert = connection.prepareStatement("""
+                INSERT INTO territory_maintenance_assessment_claim (
+                    cycle_id, ordinal, nation_id, ftb_team_id, dimension_id,
+                    chunk_x, chunk_z, maintenance_due_minor_units, priority
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
-            insert.setString(1, cycleId.toString());
-            insert.setString(2, serviceIdentity);
-            insert.setString(3, requestId);
-            insert.setInt(4, claimCount);
-            insert.setString(5, snapshotSha256);
-            insert.setLong(6, recordedAtEpochMillis);
-            insert.executeUpdate();
+                insert.setString(1, cycleId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setInt(4, claims.size());
+                insert.setString(5, snapshotSha256);
+                insert.setLong(6, recordedAtEpochMillis);
+                insert.executeUpdate();
+                for (int index = 0; index < claims.size(); index++) {
+                    StoredTerritoryMaintenanceAssessmentClaim claim = claims.get(index);
+                    if (!claim.cycleId().equals(cycleId) || claim.ordinal() != index) {
+                        throw new IllegalArgumentException(
+                                "Territory Maintenance Claim Snapshot order is invalid");
+                    }
+                    claimInsert.setString(1, cycleId.toString());
+                    claimInsert.setInt(2, index);
+                    claimInsert.setString(3, claim.nationId().toString());
+                    claimInsert.setString(4, claim.ftbTeamId().toString());
+                    claimInsert.setString(5, claim.dimensionId());
+                    claimInsert.setInt(6, claim.chunkX());
+                    claimInsert.setInt(7, claim.chunkZ());
+                    claimInsert.setLong(8, claim.maintenanceDueMinorUnits());
+                    claimInsert.setString(9, claim.priority());
+                    claimInsert.addBatch();
+                }
+                claimInsert.executeBatch();
+            }
+            connection.commit();
             return territoryMaintenanceAssessmentBatch(serviceIdentity, requestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtime
+                    ? runtime
+                    : new IllegalStateException(
+                            "Unable to register Territory Maintenance Assessment Batch", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Territory Maintenance Assessment Batch registration", primaryFailure);
+        }
+    }
+
+    public synchronized List<StoredTerritoryMaintenanceAssessmentClaim>
+            territoryMaintenanceAssessmentClaims(UUID cycleId) {
+        List<StoredTerritoryMaintenanceAssessmentClaim> claims = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_assessment_claim
+                WHERE cycle_id = ? ORDER BY ordinal
+                """)) {
+            query.setString(1, cycleId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    claims.add(new StoredTerritoryMaintenanceAssessmentClaim(
+                            UUID.fromString(result.getString("cycle_id")),
+                            result.getInt("ordinal"),
+                            UUID.fromString(result.getString("nation_id")),
+                            UUID.fromString(result.getString("ftb_team_id")),
+                            result.getString("dimension_id"),
+                            result.getInt("chunk_x"),
+                            result.getInt("chunk_z"),
+                            result.getLong("maintenance_due_minor_units"),
+                            result.getString("priority")));
+                }
+            }
+            return List.copyOf(claims);
         } catch (SQLException failure) {
             throw new IllegalStateException(
-                    "Unable to register Territory Maintenance Assessment Batch", failure);
+                    "Unable to read Territory Maintenance Claim Snapshots", failure);
         }
     }
 
@@ -5853,6 +5999,68 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 35");
+            }
+            if (version < 36) {
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_assessment_claim (
+                            cycle_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_assessment_batch(cycle_id)
+                                ON DELETE CASCADE,
+                            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ftb_team_id TEXT NOT NULL,
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            maintenance_due_minor_units INTEGER NOT NULL
+                                CHECK (maintenance_due_minor_units >= 0),
+                            priority TEXT NOT NULL CHECK (priority IN (
+                                'CAPITAL', 'CAPITAL_CONNECTED_CORE', 'VALID_INFRASTRUCTURE',
+                                'ORDINARY', 'ENCLAVE_OR_CROSS_DIMENSION'
+                            )),
+                            PRIMARY KEY (cycle_id, ordinal),
+                            UNIQUE (cycle_id, nation_id, dimension_id, chunk_x, chunk_z)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 36");
+            }
+            if (version < 37) {
+                statement.execute("""
+                        INSERT INTO territory_maintenance_assessment_claim (
+                            cycle_id, ordinal, nation_id, ftb_team_id, dimension_id,
+                            chunk_x, chunk_z, maintenance_due_minor_units, priority
+                        )
+                        SELECT assessment.cycle_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY assessment.cycle_id
+                                   ORDER BY CASE WHEN lower(substr(assessment.nation_id, 1, 1))
+                                                        IN ('8', '9', 'a', 'b', 'c', 'd', 'e', 'f')
+                                                 THEN 0 ELSE 1 END,
+                                            lower(substr(assessment.nation_id, 1, 18)),
+                                            CASE WHEN lower(substr(assessment.nation_id, 20, 1))
+                                                        IN ('8', '9', 'a', 'b', 'c', 'd', 'e', 'f')
+                                                 THEN 0 ELSE 1 END,
+                                            lower(substr(assessment.nation_id, 20)),
+                                            assessment.dimension_id,
+                                            assessment.chunk_x, assessment.chunk_z
+                               ) - 1,
+                               assessment.nation_id, assessment.ftb_team_id,
+                               assessment.dimension_id, assessment.chunk_x, assessment.chunk_z,
+                               assessment.maintenance_due_minor_units, assessment.priority
+                        FROM territory_fiscal_assessment assessment
+                        JOIN territory_maintenance_assessment_batch batch
+                          ON batch.cycle_id = assessment.cycle_id
+                        WHERE NOT EXISTS (
+                                  SELECT 1 FROM territory_maintenance_assessment_claim existing
+                                  WHERE existing.cycle_id = assessment.cycle_id
+                              )
+                          AND batch.claim_count = (
+                                  SELECT COUNT(*) FROM territory_fiscal_assessment counted
+                                  WHERE counted.cycle_id = assessment.cycle_id
+                              )
+                        """);
+                statement.execute("PRAGMA user_version = 37");
             }
             connection.commit();
         } catch (SQLException failure) {

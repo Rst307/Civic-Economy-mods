@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
+import java.sql.DriverManager;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -87,6 +88,68 @@ class TerritoryMaintenanceAssessmentProcessorTest {
         }
     }
 
+    @Test
+    void persistedSnapshotRecoversAssessmentsWithoutReadingLiveClaimsAgain() {
+        UUID cycleId;
+        List<TerritoryMaintenanceClaimSnapshot> claims =
+                List.of(capitalClaim(), ordinaryClaim());
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle cycle = registry.openCycle(
+                    new OpenTerritoryMaintenanceCycle(
+                            SERVICE,
+                            "crash-window:cycle",
+                            START,
+                            END));
+            cycleId = cycle.cycleId();
+            registry.registerAssessmentBatch(
+                    cycleId,
+                    SERVICE,
+                    "crash-window:batch",
+                    claims,
+                    TerritoryMaintenanceAssessmentProcessor.snapshotSha256(claims));
+            assertEquals(List.of(), registry.pendingCandidates(cycleId, NATION));
+        }
+
+        try (CivicDatabase database = database()) {
+            TerritoryMaintenanceAssessmentBatch recovered = processor(database)
+                    .recover(SERVICE, "crash-window", "Recovered automatic assessment")
+                    .orElseThrow();
+            assertEquals(cycleId, recovered.cycle().cycleId());
+            assertEquals(
+                    List.of(100L, 50L),
+                    recovered.assessments().stream()
+                            .map(assessment -> assessment.maintenanceDue().minorUnits())
+                            .toList());
+            assertEquals(
+                    List.of(TerritoryMaintenancePriority.CAPITAL, TerritoryMaintenancePriority.ORDINARY),
+                    recovered.assessments().stream()
+                            .map(TerritoryFiscalAssessment::priority)
+                            .toList());
+        }
+    }
+
+    @Test
+    void directReplayFailsClosedWhenPersistedClaimSnapshotIsMissing() throws Exception {
+        Path databaseFile = databaseFile();
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            processor(database).assess(request(List.of(capitalClaim())));
+        }
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var statement = connection.createStatement()) {
+            statement.execute("DELETE FROM territory_maintenance_assessment_claim");
+        }
+
+        try (CivicDatabase database = database()) {
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> processor(database).assess(request(List.of(capitalClaim()))));
+        }
+    }
+
     private AssessTerritoryMaintenanceCycle request(
             List<TerritoryMaintenanceClaimSnapshot> claims) {
         return new AssessTerritoryMaintenanceCycle(
@@ -131,12 +194,16 @@ class TerritoryMaintenanceAssessmentProcessorTest {
 
     private CivicDatabase database() {
         return CivicDatabase.open(
-                temporaryDirectory.resolve("automatic-maintenance.sqlite3"),
+                databaseFile(),
                 new DatabaseIdentity(
                         UUID.fromString("2a80643c-ecb4-4510-8f34-c32c05a34aef"),
                         "0.1.0-probe",
                         "1.21-2.3.0.5",
                         "2101.1.10",
                         "2101.1.20"));
+    }
+
+    private Path databaseFile() {
+        return temporaryDirectory.resolve("automatic-maintenance.sqlite3");
     }
 }

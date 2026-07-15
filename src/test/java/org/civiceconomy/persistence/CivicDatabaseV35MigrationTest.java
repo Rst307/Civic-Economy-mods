@@ -42,12 +42,13 @@ class CivicDatabaseV35MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE territory_maintenance_assessment_claim");
             statement.execute("DROP TABLE territory_maintenance_assessment_batch");
             statement.execute("PRAGMA user_version = 34");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(35, migrated.schemaVersion());
+            assertEquals(37, migrated.schemaVersion());
             assertEquals(
                     75L,
                     migrated.territoryMaintenancePolicy("migration", "maintenance-policy")

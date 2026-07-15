@@ -36,16 +36,72 @@ public final class TerritoryMaintenanceAssessmentProcessor {
                 request.requestId() + ":cycle",
                 request.startsAt(),
                 request.endsAt()));
-        registry.registerAssessmentBatch(
+        var stored = registry.registerAssessmentBatch(
                 cycle.cycleId(),
                 request.serviceIdentity(),
                 request.requestId() + ":batch",
-                claims.size(),
+                claims,
                 snapshotSha256(claims));
-        List<TerritoryFiscalAssessment> assessments = claims.stream()
+        List<TerritoryMaintenanceClaimSnapshot> persistedClaims =
+                registry.assessmentBatchClaims(cycle.cycleId());
+        requireCompletePersistedSnapshot(
+                stored.claimCount(), stored.snapshotSha256(), persistedClaims);
+        List<TerritoryFiscalAssessment> assessments = persistAssessments(
+                request.serviceIdentity(),
+                request.requestId(),
+                request.reason(),
+                cycle,
+                persistedClaims);
+        return new TerritoryMaintenanceAssessmentBatch(cycle, assessments);
+    }
+
+    public java.util.Optional<TerritoryMaintenanceAssessmentBatch> recover(
+            org.civiceconomy.fiscal.ServiceIdentity serviceIdentity,
+            String requestId,
+            String reason) {
+        if (serviceIdentity == null
+                || requestId == null
+                || requestId.isBlank()
+                || reason == null
+                || reason.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance Assessment recovery values are invalid");
+        }
+        var stored = registry.assessmentBatch(serviceIdentity, requestId + ":batch");
+        if (stored == null) {
+            return java.util.Optional.empty();
+        }
+        TerritoryMaintenanceCycle cycle = registry.cycle(stored.cycleId());
+        List<TerritoryMaintenanceClaimSnapshot> claims =
+                registry.assessmentBatchClaims(stored.cycleId());
+        requireCompletePersistedSnapshot(
+                stored.claimCount(), stored.snapshotSha256(), claims);
+        return java.util.Optional.of(new TerritoryMaintenanceAssessmentBatch(
+                cycle,
+                persistAssessments(serviceIdentity, requestId, reason, cycle, claims)));
+    }
+
+    private static void requireCompletePersistedSnapshot(
+            int expectedClaimCount,
+            String expectedSnapshotSha256,
+            List<TerritoryMaintenanceClaimSnapshot> claims) {
+        if (claims.size() != expectedClaimCount
+                || !snapshotSha256(claims).equals(expectedSnapshotSha256)) {
+            throw new IllegalStateException(
+                    "Territory Maintenance persisted Claim Snapshot is incomplete or corrupt");
+        }
+    }
+
+    private List<TerritoryFiscalAssessment> persistAssessments(
+            org.civiceconomy.fiscal.ServiceIdentity serviceIdentity,
+            String requestId,
+            String reason,
+            TerritoryMaintenanceCycle cycle,
+            List<TerritoryMaintenanceClaimSnapshot> claims) {
+        return claims.stream()
                 .map(claim -> registry.assess(new AssessTerritoryFiscalValidity(
-                        request.serviceIdentity(),
-                        assessmentRequestId(request.requestId(), claim),
+                        serviceIdentity,
+                        assessmentRequestId(requestId, claim),
                         cycle.cycleId(),
                         claim.nationId(),
                         claim.ftbTeamId(),
@@ -54,12 +110,11 @@ public final class TerritoryMaintenanceAssessmentProcessor {
                         claim.chunkZ(),
                         claim.maintenanceDueMinorUnits(),
                         claim.priority(),
-                        request.reason())))
+                        reason)))
                 .toList();
-        return new TerritoryMaintenanceAssessmentBatch(cycle, assessments);
     }
 
-    private static String snapshotSha256(List<TerritoryMaintenanceClaimSnapshot> claims) {
+    static String snapshotSha256(List<TerritoryMaintenanceClaimSnapshot> claims) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             for (TerritoryMaintenanceClaimSnapshot claim : claims) {

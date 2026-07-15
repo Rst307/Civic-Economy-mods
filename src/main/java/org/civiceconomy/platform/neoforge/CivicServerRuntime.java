@@ -37,6 +37,8 @@ import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
+import org.civiceconomy.integration.ftb.FtbChunksAdapter;
+import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CitizenshipReconciler;
 import org.civiceconomy.nation.CitizenshipReconciliationResult;
 import org.civiceconomy.nation.NationRegistry;
@@ -63,6 +65,18 @@ import org.civiceconomy.territory.TerritoryExpansionPricingPolicyRegistry;
 import org.civiceconomy.territory.TerritoryExpansionPricingPolicyVersion;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
+import org.civiceconomy.territory.AssessTerritoryMaintenanceCycle;
+import org.civiceconomy.territory.TerritoryClaimPosition;
+import org.civiceconomy.territory.TerritoryFreeAllocation;
+import org.civiceconomy.territory.TerritoryMaintenanceAssessmentBatch;
+import org.civiceconomy.territory.TerritoryMaintenanceAssessmentPlanner;
+import org.civiceconomy.territory.TerritoryMaintenanceAssessmentProcessor;
+import org.civiceconomy.territory.TerritoryMaintenanceCycleSchedule;
+import org.civiceconomy.territory.TerritoryMaintenanceCycleWindow;
+import org.civiceconomy.territory.TerritoryMaintenanceObservedClaim;
+import org.civiceconomy.territory.TerritoryMaintenancePolicyRegistry;
+import org.civiceconomy.territory.TerritoryMaintenancePolicyVersion;
+import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.slf4j.Logger;
 
@@ -73,6 +87,7 @@ public final class CivicServerRuntime {
     private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
+    private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
@@ -158,6 +173,7 @@ public final class CivicServerRuntime {
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
         schedulePermanentDestructionRecovery(state);
+        scheduleTerritoryMaintenanceAssessment(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
             LOGGER.warn(
@@ -225,6 +241,12 @@ public final class CivicServerRuntime {
                 >= PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS) {
             current.ticksSincePermanentDestructionRecovery = 0;
             schedulePermanentDestructionRecovery(current);
+        }
+        current.ticksSinceTerritoryMaintenanceAssessment++;
+        if (current.ticksSinceTerritoryMaintenanceAssessment
+                >= TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS) {
+            current.ticksSinceTerritoryMaintenanceAssessment = 0;
+            scheduleTerritoryMaintenanceAssessment(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -788,6 +810,225 @@ public final class CivicServerRuntime {
                 });
     }
 
+    void scheduleTerritoryMaintenanceAssessment() {
+        RuntimeState current = state;
+        if (current != null) {
+            scheduleTerritoryMaintenanceAssessment(current);
+        }
+    }
+
+    private void scheduleTerritoryMaintenanceAssessment(RuntimeState current) {
+        if (!current.territoryMaintenanceAssessmentQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Instant scanTime = clock.instant();
+        Clock scanClock = Clock.fixed(scanTime, ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> prepareTerritoryMaintenanceAssessment(
+                        database, scanTime, scanClock))
+                .whenComplete((preparation, failure) -> {
+                    if (failure != null) {
+                        finishTerritoryMaintenanceAssessment(current, null, failure);
+                    } else if (preparation == null) {
+                        current.territoryMaintenanceAssessmentQueued.set(false);
+                    } else if (preparation.recover()) {
+                        recoverTerritoryMaintenanceAssessment(current, preparation, scanClock);
+                    } else {
+                        current.server.execute(() -> snapshotTerritoryMaintenanceClaims(
+                                current, preparation, scanClock));
+                    }
+                });
+    }
+
+    private AutomaticMaintenancePreparation prepareTerritoryMaintenanceAssessment(
+            CivicDatabase database, Instant scanTime, Clock scanClock) {
+        TerritoryMaintenancePolicyRegistry policies =
+                new TerritoryMaintenancePolicyRegistry(database, scanClock);
+        TerritoryMaintenancePolicyVersion effectivePolicy;
+        TerritoryMaintenanceCycleWindow window;
+        var activeCycle = database.territoryMaintenanceCycleAt(scanTime.toEpochMilli());
+        if (activeCycle != null) {
+            if (!activeCycle.requestId().startsWith("automatic-maintenance:")
+                    || !activeCycle.requestId().endsWith(":cycle")) {
+                LOGGER.warn(
+                        "Automatic Territory Maintenance is waiting for non-automatic Cycle {} to end",
+                        activeCycle.cycleId());
+                return null;
+            }
+            String requestId = activeCycle.requestId().substring(
+                    0, activeCycle.requestId().length() - ":cycle".length());
+            window = new TerritoryMaintenanceCycleWindow(
+                    requestId,
+                    Instant.ofEpochMilli(activeCycle.startsAtEpochMillis()),
+                    Instant.ofEpochMilli(activeCycle.endsAtEpochMillis()));
+            var batch = database.territoryMaintenanceAssessmentBatch(activeCycle.cycleId());
+            if (batch != null) {
+                return new AutomaticMaintenancePreparation(null, window, List.of(), true);
+            }
+            effectivePolicy = policies.find(policyIdFromAutomaticRequest(requestId))
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Automatic Territory Maintenance Cycle policy is missing"));
+        } else {
+            Optional<TerritoryMaintenancePolicyVersion> policy = policies.current(scanTime);
+            if (policy.isEmpty()) {
+                return null;
+            }
+            effectivePolicy = policy.orElseThrow();
+            window = new TerritoryMaintenanceCycleSchedule()
+                    .current(effectivePolicy, scanTime)
+                    .orElse(null);
+            if (window == null) {
+                return null;
+            }
+        }
+        var citizenships = new org.civiceconomy.nation.CitizenshipRegistry(
+                database, CITIZENSHIP_TRANSFER_COOLDOWN, scanClock);
+        var grace = new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
+                database, scanClock);
+        var populations = new org.civiceconomy.nation.NationPopulationCalculator(
+                citizenships,
+                grace,
+                new org.civiceconomy.nation.OnlineTimeLedger(database),
+                NATION_APPLICATION_EVIDENCE_WINDOW,
+                Duration.ofHours(8));
+        var allocationPolicy = new TerritoryFreeAllocationPolicyRegistry(
+                        database,
+                        scanClock,
+                        TerritoryFreeAllocationPolicyVersion.defaultPolicy(0, 0))
+                .current(scanTime)
+                .policy();
+        List<AutomaticNationMaintenanceContext> nations = new java.util.ArrayList<>();
+        int missingCapitals = 0;
+        for (RegisteredNation nation
+                : new NationRegistry(database, NO_TEAM_LOOKUPS).registeredNations()) {
+            var storedCapital = database.nationCapital(nation.nationId().value());
+            if (storedCapital == null) {
+                missingCapitals++;
+                continue;
+            }
+            Capital capital = new Capital(
+                    storedCapital.dimensionId(),
+                    storedCapital.chunkX(),
+                    storedCapital.chunkZ());
+            TerritoryFreeAllocation allocation = allocationPolicy.calculate(
+                    populations.calculate(nation.nationId(), scanTime));
+            nations.add(new AutomaticNationMaintenanceContext(
+                    nation.nationId(), nation.ftbTeamId(), capital, allocation));
+        }
+        if (missingCapitals > 0) {
+            LOGGER.warn(
+                    "Skipped automatic Territory Maintenance for {} Nation(s) without a persistent Capital",
+                    missingCapitals);
+        }
+        return new AutomaticMaintenancePreparation(
+                effectivePolicy, window, List.copyOf(nations), false);
+    }
+
+    private static UUID policyIdFromAutomaticRequest(String requestId) {
+        String prefix = "automatic-maintenance:";
+        int finalSeparator = requestId.lastIndexOf(':');
+        if (!requestId.startsWith(prefix) || finalSeparator <= prefix.length()) {
+            throw new IllegalStateException(
+                    "Automatic Territory Maintenance request ID is invalid");
+        }
+        return UUID.fromString(requestId.substring(prefix.length(), finalSeparator));
+    }
+
+    private void snapshotTerritoryMaintenanceClaims(
+            RuntimeState current,
+            AutomaticMaintenancePreparation preparation,
+            Clock scanClock) {
+        if (state != current) {
+            current.territoryMaintenanceAssessmentQueued.set(false);
+            return;
+        }
+        try {
+            FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+            FtbChunksAdapter chunks = FtbChunksAdapter.live();
+            TerritoryMaintenanceAssessmentPlanner planner =
+                    new TerritoryMaintenanceAssessmentPlanner();
+            List<org.civiceconomy.territory.TerritoryMaintenanceClaimSnapshot> claims =
+                    preparation.nations().stream()
+                            .flatMap(nation -> {
+                                if (teams.find(nation.ftbTeamId()).isEmpty()) {
+                                    throw new IllegalStateException(
+                                            "FTB Team facts are unavailable for Nation "
+                                                    + nation.nationId().value());
+                                }
+                                List<TerritoryMaintenanceObservedClaim> observed = chunks
+                                        .claimsForTeam(nation.ftbTeamId()).stream()
+                                        .map(claim -> new TerritoryMaintenanceObservedClaim(
+                                                new TerritoryClaimPosition(
+                                                        claim.dimension().location().toString(),
+                                                        claim.chunkPos().x,
+                                                        claim.chunkPos().z),
+                                                claim.forceLoadRequested()))
+                                        .toList();
+                                return planner.plan(
+                                                nation.nationId(),
+                                                nation.ftbTeamId(),
+                                                nation.capital(),
+                                                observed,
+                                                nation.freeAllocation(),
+                                                preparation.policy())
+                                        .stream();
+                            })
+                            .toList();
+            persistTerritoryMaintenanceAssessment(
+                    current, preparation, claims, scanClock);
+        } catch (RuntimeException failure) {
+            finishTerritoryMaintenanceAssessment(current, null, failure);
+        }
+    }
+
+    private void persistTerritoryMaintenanceAssessment(
+            RuntimeState current,
+            AutomaticMaintenancePreparation preparation,
+            List<org.civiceconomy.territory.TerritoryMaintenanceClaimSnapshot> claims,
+            Clock scanClock) {
+        current.writer.submitDatabase(database -> new TerritoryMaintenanceAssessmentProcessor(
+                        new TerritoryMaintenanceRegistry(database, scanClock))
+                .assess(new AssessTerritoryMaintenanceCycle(
+                        TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                        preparation.window().requestId(),
+                        preparation.window().startsAt(),
+                        preparation.window().endsAt(),
+                        claims,
+                        "Automatic Territory Maintenance assessment")))
+                .whenComplete((batch, failure) ->
+                        finishTerritoryMaintenanceAssessment(current, batch, failure));
+    }
+
+    private void recoverTerritoryMaintenanceAssessment(
+            RuntimeState current,
+            AutomaticMaintenancePreparation preparation,
+            Clock scanClock) {
+        current.writer.submitDatabase(database -> new TerritoryMaintenanceAssessmentProcessor(
+                        new TerritoryMaintenanceRegistry(database, scanClock))
+                .recover(
+                        TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                        preparation.window().requestId(),
+                        "Automatic Territory Maintenance assessment")
+                .orElseThrow(() -> new IllegalStateException(
+                        "Territory Maintenance Assessment Batch disappeared during recovery")))
+                .whenComplete((batch, failure) ->
+                        finishTerritoryMaintenanceAssessment(current, batch, failure));
+    }
+
+    private static void finishTerritoryMaintenanceAssessment(
+            RuntimeState current,
+            TerritoryMaintenanceAssessmentBatch batch,
+            Throwable failure) {
+        current.territoryMaintenanceAssessmentQueued.set(false);
+        if (failure != null) {
+            LOGGER.error("Automatic Territory Maintenance assessment failed closed", failure);
+        } else if (batch != null) {
+            LOGGER.info(
+                    "Automatic Territory Maintenance Cycle {} has {} Assessment(s)",
+                    batch.cycle().cycleId(),
+                    batch.assessments().size());
+        }
+    }
+
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
         return mods.version(modId)
                 .orElseThrow(() -> new IllegalStateException("Loaded mod version is unavailable: " + modId));
@@ -801,11 +1042,13 @@ public final class CivicServerRuntime {
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
+        private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
         private int ticksSinceTerritoryPermitCompensation;
         private int ticksSincePermanentDestructionRecovery;
+        private int ticksSinceTerritoryMaintenanceAssessment;
         private boolean failureLogged;
 
         private RuntimeState(
@@ -821,6 +1064,22 @@ public final class CivicServerRuntime {
     private record TerritoryPermitMirrorSnapshot(
             List<org.civiceconomy.territory.TerritoryClaimPermit> permits,
             Map<UUID, org.civiceconomy.nation.NationId> nationByFtbTeam) {}
+
+    private record AutomaticNationMaintenanceContext(
+            org.civiceconomy.nation.NationId nationId,
+            UUID ftbTeamId,
+            Capital capital,
+            TerritoryFreeAllocation freeAllocation) {}
+
+    private record AutomaticMaintenancePreparation(
+            TerritoryMaintenancePolicyVersion policy,
+            TerritoryMaintenanceCycleWindow window,
+            List<AutomaticNationMaintenanceContext> nations,
+            boolean recover) {
+        private AutomaticMaintenancePreparation {
+            nations = List.copyOf(nations);
+        }
+    }
 
     record PreparedTerritoryClaim(
             TerritoryClaimPermit permit, FreeClaimAuthorization freeClaim) {

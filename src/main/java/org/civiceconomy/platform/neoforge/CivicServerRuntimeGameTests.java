@@ -169,6 +169,11 @@ public final class CivicServerRuntimeGameTests {
         String maintenanceRequestId = "territory-maintenance-command-" + UUID.randomUUID();
         long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
         var server = helper.getLevel().getServer();
+        Path databaseFile = server.getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        long maintenanceEffectiveAt = Math.max(
+                effectiveAt, nextTerritoryMaintenancePolicyBoundary(databaseFile));
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
                 "civic economy admin territory policy schedule 9 4 " + effectiveAt
@@ -180,18 +185,15 @@ public final class CivicServerRuntimeGameTests {
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
                 "civic economy admin territory maintenance schedule 604800000 75 15000 25 6000 "
-                        + effectiveAt + " " + maintenanceRequestId
+                        + maintenanceEffectiveAt + " " + maintenanceRequestId
                         + " GameTest territory maintenance");
-        Path databaseFile = server.getWorldPath(LevelResource.ROOT)
-                .resolve("civiceconomy")
-                .resolve("civic.sqlite3");
 
         helper.succeedWhen(() -> {
             assertTerritoryPolicyScheduled(helper, databaseFile, requestId, effectiveAt);
             assertTerritoryPricingScheduled(
                     helper, databaseFile, pricingRequestId, effectiveAt);
             assertTerritoryMaintenancePolicyScheduled(
-                    helper, databaseFile, maintenanceRequestId, effectiveAt);
+                    helper, databaseFile, maintenanceRequestId, maintenanceEffectiveAt);
         });
     }
 
@@ -1447,6 +1449,27 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect territory maintenance policy command result", failure);
+        }
+    }
+
+    private static long nextTerritoryMaintenancePolicyBoundary(Path databaseFile) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT MAX(boundary) FROM (
+                            SELECT COALESCE(MAX(ends_at_epoch_millis), 0) AS boundary
+                            FROM territory_maintenance_cycle
+                            UNION ALL
+                            SELECT COALESCE(MAX(effective_at_epoch_millis), 0) + 1 AS boundary
+                            FROM territory_maintenance_policy
+                        )
+                        """)) {
+            try (var result = query.executeQuery()) {
+                return result.getLong(1);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read next Territory Maintenance policy boundary", failure);
         }
     }
 

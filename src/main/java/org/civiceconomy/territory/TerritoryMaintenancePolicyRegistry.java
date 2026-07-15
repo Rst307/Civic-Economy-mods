@@ -34,6 +34,12 @@ public final class TerritoryMaintenancePolicyRegistry {
             throw new IllegalArgumentException(
                     "Territory Maintenance policy must take effect in the future");
         }
+        var latestCycle = database.latestTerritoryMaintenanceCycle();
+        if (latestCycle != null
+                && request.effectiveAt().toEpochMilli() < latestCycle.endsAtEpochMillis()) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance policy cannot take effect inside an existing Cycle");
+        }
         return toPolicy(database.scheduleTerritoryMaintenancePolicy(
                 UUID.randomUUID(),
                 request.serviceIdentity().value(),
@@ -54,6 +60,15 @@ public final class TerritoryMaintenancePolicyRegistry {
             throw new IllegalArgumentException("Territory Maintenance policy time cannot be null");
         }
         return Optional.ofNullable(database.currentTerritoryMaintenancePolicy(asOf.toEpochMilli()))
+                .map(TerritoryMaintenancePolicyRegistry::toPolicy);
+    }
+
+    public Optional<TerritoryMaintenancePolicyVersion> find(UUID policyId) {
+        if (policyId == null) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance policy ID cannot be null");
+        }
+        return Optional.ofNullable(database.territoryMaintenancePolicy(policyId))
                 .map(TerritoryMaintenancePolicyRegistry::toPolicy);
     }
 

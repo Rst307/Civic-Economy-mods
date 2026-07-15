@@ -82,6 +82,23 @@ class TerritoryMaintenancePolicyRegistryTest {
         }
     }
 
+    @Test
+    void policyCannotTakeEffectInsideAnExistingMaintenanceCycle() {
+        try (CivicDatabase database = database()) {
+            database.openTerritoryMaintenanceCycle(
+                    UUID.randomUUID(),
+                    "civiceconomy-territory",
+                    "existing-cycle",
+                    NOW.plusSeconds(30).toEpochMilli(),
+                    NOW.plusSeconds(120).toEpochMilli(),
+                    NOW.toEpochMilli());
+
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> registry(database).schedule(request(100L)));
+        }
+    }
+
     private ScheduleTerritoryMaintenancePolicy request(long baseMaintenance) {
         return new ScheduleTerritoryMaintenancePolicy(
                 new ServiceIdentity("civiceconomy-territory-maintenance-policy"),
