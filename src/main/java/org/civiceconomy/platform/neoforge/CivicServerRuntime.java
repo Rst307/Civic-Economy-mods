@@ -53,6 +53,7 @@ import org.civiceconomy.nation.NationTeamDirectory;
 import org.civiceconomy.nation.RegisteredNation;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
+import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
 import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
 import org.civiceconomy.territory.ConsumeTerritoryClaimPermit;
@@ -104,6 +105,8 @@ public final class CivicServerRuntime {
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
+    private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
+    private static final int DATABASE_BACKUP_RETENTION = 8;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
@@ -187,7 +190,13 @@ public final class CivicServerRuntime {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             sessions.login(player.getUUID(), now);
         }
-        state = new RuntimeState(server, sessions, writer);
+        OnlineDatabaseBackupManager backups = new OnlineDatabaseBackupManager(
+                database,
+                databaseDirectory.resolve("backups"),
+                clock,
+                DATABASE_BACKUP_RETENTION);
+        state = new RuntimeState(server, sessions, writer, backups, now);
+        scheduleDatabaseBackupRecovery(state);
         scheduleTerritoryPermitMirrorRefresh(state);
         scheduleTerritoryForceLoadRestrictionRefresh(state);
         scheduleNationApplicationExpiry(state);
@@ -272,6 +281,11 @@ public final class CivicServerRuntime {
             scheduleTerritoryForceLoadEnforcementRecovery(current);
             scheduleTerritoryForceLoadRestrictionRefresh(current);
         }
+        current.ticksSinceDatabaseBackup++;
+        if (current.ticksSinceDatabaseBackup >= DATABASE_BACKUP_INTERVAL_TICKS) {
+            current.ticksSinceDatabaseBackup = 0;
+            scheduleLifecycleDatabaseBackup(current, "scheduled");
+        }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
             current.failureLogged = true;
@@ -284,6 +298,7 @@ public final class CivicServerRuntime {
         if (current != null && current.server == event.getServer()) {
             List<RecordOnlineTime> finalIntervals = current.sessions.checkpoint(clock.millis());
             current.writer.submit(finalIntervals);
+            queueShutdownDatabaseBackup(current);
         }
     }
 
@@ -318,6 +333,88 @@ public final class CivicServerRuntime {
                     new IllegalStateException("Civic server runtime is not active"));
         }
         return current.writer.submitDatabase(operation);
+    }
+
+    CompletableFuture<StoredDatabaseBackupOperation> createDatabaseBackup(
+            String administratorIdentity, String requestId, String reason) {
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        return current.writer.submitDatabase(ignored ->
+                current.backups.create(administratorIdentity, requestId, reason));
+    }
+
+    CompletableFuture<List<StoredDatabaseBackupOperation>> databaseBackups() {
+        return submitDatabase(CivicDatabase::databaseBackupOperations);
+    }
+
+    private void scheduleDatabaseBackupRecovery(RuntimeState current) {
+        if (!current.databaseBackupQueued.compareAndSet(false, true)) {
+            return;
+        }
+        current.writer
+                .submitDatabase(ignored -> {
+                    int recovered = current.backups.recoverPending().size();
+                    StoredDatabaseBackupOperation startup = current.backups.create(
+                            "civic-backup-lifecycle",
+                            "startup-" + current.startedAtEpochMillis,
+                            "Lifecycle startup database backup");
+                    return new DatabaseBackupLifecycleResult(recovered, startup);
+                })
+                .whenComplete((result, failure) -> {
+                    current.databaseBackupQueued.set(false);
+                    if (failure == null) {
+                        LOGGER.info(
+                                "Civic database backup lifecycle recovered {} operation(s) and published {}",
+                                result.recovered(),
+                                result.backup().fileName());
+                    } else {
+                        LOGGER.error(
+                                "Civic database backup startup recovery failed; the durable operation remains recoverable",
+                                failure);
+                    }
+                });
+    }
+
+    private void scheduleLifecycleDatabaseBackup(RuntimeState current, String kind) {
+        if (!current.databaseBackupQueued.compareAndSet(false, true)) {
+            return;
+        }
+        long interval = Math.floorDiv(clock.millis(), Duration.ofMinutes(30).toMillis());
+        current.writer
+                .submitDatabase(ignored -> current.backups.create(
+                        "civic-backup-lifecycle",
+                        kind + "-" + interval,
+                        "Lifecycle scheduled database backup"))
+                .whenComplete((backup, failure) -> {
+                    current.databaseBackupQueued.set(false);
+                    if (failure == null) {
+                        LOGGER.info("Civic lifecycle database backup published {}", backup.fileName());
+                    } else {
+                        LOGGER.error(
+                                "Civic lifecycle database backup failed; the durable operation remains recoverable",
+                                failure);
+                    }
+                });
+    }
+
+    private void queueShutdownDatabaseBackup(RuntimeState current) {
+        current.writer
+                .submitDatabase(ignored -> current.backups.create(
+                        "civic-backup-lifecycle",
+                        "shutdown-" + current.startedAtEpochMillis,
+                        "Lifecycle shutdown database backup"))
+                .whenComplete((backup, failure) -> {
+                    if (failure == null) {
+                        LOGGER.info("Civic shutdown database backup published {}", backup.fileName());
+                    } else {
+                        LOGGER.error(
+                                "Civic shutdown database backup failed; the durable operation remains recoverable",
+                                failure);
+                    }
+                });
     }
 
     CompletableFuture<PreparedTerritoryClaim> prepareTerritoryClaim(
@@ -1527,6 +1624,8 @@ public final class CivicServerRuntime {
         private final MinecraftServer server;
         private final OnlineSessionAccumulator sessions;
         private final AsyncOnlineTimeWriter writer;
+        private final OnlineDatabaseBackupManager backups;
+        private final long startedAtEpochMillis;
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
@@ -1536,19 +1635,27 @@ public final class CivicServerRuntime {
         private final AtomicBoolean territoryForceLoadEnforcementQueued = new AtomicBoolean();
         private final AtomicBoolean territoryForceLoadRestrictionRefreshQueued =
                 new AtomicBoolean();
+        private final AtomicBoolean databaseBackupQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
         private int ticksSinceTerritoryPermitCompensation;
         private int ticksSincePermanentDestructionRecovery;
         private int ticksSinceTerritoryMaintenanceAssessment;
+        private int ticksSinceDatabaseBackup;
         private boolean failureLogged;
 
         private RuntimeState(
-                MinecraftServer server, OnlineSessionAccumulator sessions, AsyncOnlineTimeWriter writer) {
+                MinecraftServer server,
+                OnlineSessionAccumulator sessions,
+                AsyncOnlineTimeWriter writer,
+                OnlineDatabaseBackupManager backups,
+                long startedAtEpochMillis) {
             this.server = server;
             this.sessions = sessions;
             this.writer = writer;
+            this.backups = backups;
+            this.startedAtEpochMillis = startedAtEpochMillis;
         }
     }
 
@@ -1588,4 +1695,7 @@ public final class CivicServerRuntime {
 
     private record AutomaticMaintenanceSettlementResult(
             int nationCount, int fullyFunded, int partiallyFunded, int unfunded) {}
+
+    private record DatabaseBackupLifecycleResult(
+            int recovered, StoredDatabaseBackupOperation backup) {}
 }

@@ -74,7 +74,7 @@ class CivicDatabaseV41MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(44, migrated.schemaVersion());
+            assertEquals(45, migrated.schemaVersion());
             var enforcement = new TerritoryForceLoadEnforcementRegistry(migrated)
                     .prepare(SERVICE, "force-load", assessmentId, "Migration enforcement");
             assertEquals(TerritoryForceLoadEnforcementState.PREPARED, enforcement.state());

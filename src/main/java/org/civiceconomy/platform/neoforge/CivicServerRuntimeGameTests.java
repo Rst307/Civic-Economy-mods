@@ -111,12 +111,23 @@ public final class CivicServerRuntimeGameTests {
                 .getChild("economy")
                 .getChild("admin")
                 .getChild("service");
+        var backup = dispatcher.getRoot()
+                .getChild("civic")
+                .getChild("economy")
+                .getChild("admin")
+                .getChild("backup");
         helper.assertValueEqual(
                 Set.of("list", "show", "register", "grant", "revoke", "disable", "enable"),
                 service.getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "trusted fiscal administration command actions");
+        helper.assertValueEqual(
+                Set.of("status", "trigger"),
+                backup.getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted asynchronous database backup command actions");
         helper.assertValueEqual(
                 Set.of("apply", "status", "cancel", "activate", "population", "role", "territory"),
                 economy.getChild("nation").getChildren().stream()
@@ -166,6 +177,20 @@ public final class CivicServerRuntimeGameTests {
                 serviceIdentity,
                 "civiceconomy",
                 requestId));
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 300)
+    public static void consoleCreatesAuditedOnlineDatabaseBackupOffThread(GameTestHelper helper) {
+        String requestId = "backup-command-gametest-" + UUID.randomUUID();
+        var server = helper.getLevel().getServer();
+        Path civicDirectory = server.getWorldPath(LevelResource.ROOT).resolve("civiceconomy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin backup trigger " + requestId
+                        + " GameTest manual online backup");
+
+        helper.succeedWhen(() ->
+                assertDatabaseBackupCommitted(helper, civicDirectory, requestId));
     }
 
     @GameTest(template = "empty", timeoutTicks = 200)
@@ -2005,6 +2030,62 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect fiscal service command result", failure);
+        }
+    }
+
+    private static void assertDatabaseBackupCommitted(
+            GameTestHelper helper, Path civicDirectory, String requestId) {
+        Path databaseFile = civicDirectory.resolve("civic.sqlite3");
+        String fileName;
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT operation.file_name,
+                               operation.state,
+                               operation.size_bytes,
+                               operation.sha256,
+                               operation.administrator_identity,
+                               operation.reason,
+                               COUNT(audit.audit_id) AS committed_audit_count
+                        FROM database_backup_operation operation
+                        JOIN database_backup_audit audit
+                          ON audit.operation_id = operation.operation_id
+                         AND audit.action = 'COMMITTED'
+                        WHERE operation.request_id = ?
+                        GROUP BY operation.operation_id
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "committed manual database backup row");
+                fileName = result.getString(1);
+                helper.assertValueEqual("COMMITTED", result.getString(2), "backup state");
+                helper.assertTrue(result.getLong(3) > 0L, "backup size evidence");
+                helper.assertValueEqual(64, result.getString(4).length(), "backup SHA-256");
+                helper.assertTrue(
+                        result.getString(5).startsWith("civic-admin-console:"),
+                        "backup administrator identity");
+                helper.assertValueEqual(
+                        "GameTest manual online backup", result.getString(6), "backup reason");
+                helper.assertValueEqual(1L, result.getLong(7), "single commit audit entry");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect database backup command", failure);
+        }
+
+        Path backupFile = civicDirectory.resolve("backups").resolve(fileName);
+        helper.assertTrue(Files.isRegularFile(backupFile), "published database backup file");
+        try (var backup = DriverManager.getConnection(
+                        "jdbc:sqlite:" + backupFile.toAbsolutePath());
+                var statement = backup.createStatement();
+                var integrity = statement.executeQuery("PRAGMA integrity_check")) {
+            helper.assertTrue(integrity.next(), "backup integrity result");
+            helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
+            try (var version = statement.executeQuery("PRAGMA user_version")) {
+                helper.assertTrue(version.next(), "backup schema version result");
+                helper.assertValueEqual(45, version.getInt(1), "backup schema version");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to validate published database backup", failure);
         }
     }
 

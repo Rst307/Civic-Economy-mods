@@ -28,6 +28,7 @@ import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -60,6 +61,7 @@ public final class FiscalAdministrationCommands {
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service)
+                .then(databaseBackupCommand())
                 .then(territoryPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
@@ -74,6 +76,22 @@ public final class FiscalAdministrationCommands {
             civic.then(CivicDebugWorldCommands.command(dedicatedStartupPermit));
         }
         event.getDispatcher().register(civic);
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            databaseBackupCommand() {
+        return Commands.literal("backup")
+                .then(Commands.literal("status")
+                        .executes(context -> databaseBackupStatus(context.getSource())))
+                .then(Commands.literal("trigger")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                        .executes(context -> triggerDatabaseBackup(
+                                                context.getSource(),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"),
+                                                StringArgumentType.getString(
+                                                        context, "reason"))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -600,6 +618,57 @@ public final class FiscalAdministrationCommands {
                                 .map(service -> service.serviceIdentity().value()
                                         + "=" + service.ownerModId())
                                 .collect(Collectors.joining(", ")));
+    }
+
+    private static int triggerDatabaseBackup(
+            CommandSourceStack source, String requestId, String reason) {
+        CivicServerRuntime.current()
+                .createDatabaseBackup(administrator(source).value(), requestId, reason)
+                .whenComplete((backup, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Database backup "
+                                        + backup.state() + " " + backup.fileName()
+                                        + " size=" + backup.sizeBytes()
+                                        + " sha256=" + backup.sha256()),
+                                false);
+                    } else {
+                        sendFailure(source, failure);
+                    }
+                }));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int databaseBackupStatus(CommandSourceStack source) {
+        CivicServerRuntime.current()
+                .databaseBackups()
+                .whenComplete((backups, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        sendFailure(source, failure);
+                        return;
+                    }
+                    String status = backups.isEmpty()
+                            ? "No database backups have been requested"
+                            : backups.stream()
+                                    .limit(8)
+                                    .map(FiscalAdministrationCommands::formatBackup)
+                                    .collect(Collectors.joining(", "));
+                    source.sendSuccess(() -> Component.literal(status), false);
+                }));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatBackup(StoredDatabaseBackupOperation backup) {
+        return backup.operationId() + "=" + backup.state() + ":" + backup.fileName()
+                + ":size=" + backup.sizeBytes();
+    }
+
+    private static void sendFailure(CommandSourceStack source, Throwable failure) {
+        Throwable cause = failure instanceof CompletionException && failure.getCause() != null
+                ? failure.getCause()
+                : failure;
+        source.sendFailure(Component.literal("Civic database operation failed: "
+                + cause.getMessage()));
     }
 
     private static String format(FiscalServiceAuthorizationView view) {

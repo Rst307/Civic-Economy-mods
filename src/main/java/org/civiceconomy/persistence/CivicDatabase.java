@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 44;
+    private static final int SCHEMA_VERSION = 45;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -495,6 +495,236 @@ public final class CivicDatabase implements AutoCloseable {
             }
         } catch (SQLException | IOException failure) {
             throw new IllegalStateException("Unable to create Civic database backup " + destination, failure);
+        }
+    }
+
+    public synchronized StoredDatabaseBackupOperation prepareDatabaseBackupOperation(
+            UUID operationId,
+            String administratorIdentity,
+            String requestId,
+            String fileName,
+            String reason,
+            long preparedAtEpochMillis) {
+        StoredDatabaseBackupOperation replay =
+                databaseBackupOperation(administratorIdentity, requestId);
+        if (replay != null) {
+            if (!replay.fileName().equals(fileName) || !replay.reason().equals(reason)) {
+                throw new IllegalArgumentException(
+                        "Database backup request replay changed its immutable payload");
+            }
+            return replay;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO database_backup_operation (
+                            operation_id, administrator_identity, request_id,
+                            file_name, reason, state, prepared_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, 'PREPARED', ?)
+                        """);
+                    PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO database_backup_audit (
+                            audit_id, operation_id, action, detail,
+                            recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'PREPARED', ?, ?)
+                        """)) {
+                insert.setString(1, operationId.toString());
+                insert.setString(2, administratorIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, fileName);
+                insert.setString(5, reason);
+                insert.setLong(6, preparedAtEpochMillis);
+                insert.executeUpdate();
+                audit.setString(1, UUID.randomUUID().toString());
+                audit.setString(2, operationId.toString());
+                audit.setString(3, reason);
+                audit.setLong(4, preparedAtEpochMillis);
+                audit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return databaseBackupOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to prepare database backup", failure);
+        }
+    }
+
+    public synchronized StoredDatabaseBackupOperation commitDatabaseBackupOperation(
+            UUID operationId, long sizeBytes, String sha256, long committedAtEpochMillis) {
+        StoredDatabaseBackupOperation existing = requireDatabaseBackupOperation(operationId);
+        if (!"PREPARED".equals(existing.state())) {
+            if (existing.sizeBytes() != sizeBytes || !sha256.equals(existing.sha256())) {
+                throw new IllegalArgumentException(
+                        "Database backup commit replay changed its immutable file evidence");
+            }
+            return existing;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE database_backup_operation
+                        SET state = 'COMMITTED', size_bytes = ?, sha256 = ?,
+                            committed_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'PREPARED'
+                        """);
+                    PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO database_backup_audit (
+                            audit_id, operation_id, action, detail,
+                            recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'COMMITTED', ?, ?)
+                        """)) {
+                update.setLong(1, sizeBytes);
+                update.setString(2, sha256);
+                update.setLong(3, committedAtEpochMillis);
+                update.setString(4, operationId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Database backup state changed before commit " + operationId);
+                }
+                audit.setString(1, UUID.randomUUID().toString());
+                audit.setString(2, operationId.toString());
+                audit.setString(3, "size=" + sizeBytes + " sha256=" + sha256);
+                audit.setLong(4, committedAtEpochMillis);
+                audit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return databaseBackupOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to commit database backup " + operationId, failure);
+        }
+    }
+
+    public synchronized StoredDatabaseBackupOperation retireDatabaseBackupOperation(
+            UUID operationId, String detail, long retiredAtEpochMillis) {
+        StoredDatabaseBackupOperation existing = requireDatabaseBackupOperation(operationId);
+        if ("RETIRED".equals(existing.state())) {
+            return existing;
+        }
+        if (!"COMMITTED".equals(existing.state())) {
+            throw new IllegalStateException("Only a committed database backup may be retired");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE database_backup_operation
+                        SET state = 'RETIRED', retired_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'COMMITTED'
+                        """);
+                    PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO database_backup_audit (
+                            audit_id, operation_id, action, detail,
+                            recorded_at_epoch_millis
+                        ) VALUES (?, ?, 'RETIRED', ?, ?)
+                        """)) {
+                update.setLong(1, retiredAtEpochMillis);
+                update.setString(2, operationId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Database backup state changed before retirement " + operationId);
+                }
+                audit.setString(1, UUID.randomUUID().toString());
+                audit.setString(2, operationId.toString());
+                audit.setString(3, detail);
+                audit.setLong(4, retiredAtEpochMillis);
+                audit.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return databaseBackupOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to retire database backup " + operationId, failure);
+        }
+    }
+
+    public synchronized void recordDatabaseBackupFailure(
+            UUID operationId, String detail, long recordedAtEpochMillis) {
+        requireDatabaseBackupOperation(operationId);
+        try (PreparedStatement audit = connection.prepareStatement("""
+                INSERT INTO database_backup_audit (
+                    audit_id, operation_id, action, detail, recorded_at_epoch_millis
+                ) VALUES (?, ?, 'FAILED', ?, ?)
+                """)) {
+            audit.setString(1, UUID.randomUUID().toString());
+            audit.setString(2, operationId.toString());
+            audit.setString(3, detail);
+            audit.setLong(4, recordedAtEpochMillis);
+            audit.executeUpdate();
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to audit database backup failure", failure);
+        }
+    }
+
+    public synchronized StoredDatabaseBackupOperation databaseBackupOperation(
+            String administratorIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_backup_operation
+                WHERE administrator_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, administratorIdentity);
+            query.setString(2, requestId);
+            return readDatabaseBackupOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database backup request", failure);
+        }
+    }
+
+    public synchronized StoredDatabaseBackupOperation databaseBackupOperation(UUID operationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_backup_operation WHERE operation_id = ?
+                """)) {
+            query.setString(1, operationId.toString());
+            return readDatabaseBackupOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database backup " + operationId, failure);
+        }
+    }
+
+    public synchronized List<StoredDatabaseBackupOperation> pendingDatabaseBackupOperations() {
+        return databaseBackupOperations("PREPARED", true);
+    }
+
+    public synchronized List<StoredDatabaseBackupOperation> committedDatabaseBackupOperations() {
+        return databaseBackupOperations("COMMITTED", true);
+    }
+
+    public synchronized List<StoredDatabaseBackupOperation> databaseBackupOperations() {
+        return databaseBackupOperations(null, false);
+    }
+
+    public synchronized List<StoredDatabaseBackupAuditEntry> databaseBackupAudit(UUID operationId) {
+        List<StoredDatabaseBackupAuditEntry> entries = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM database_backup_audit
+                WHERE operation_id = ?
+                ORDER BY recorded_at_epoch_millis, rowid
+                """)) {
+            query.setString(1, operationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    entries.add(new StoredDatabaseBackupAuditEntry(
+                            UUID.fromString(result.getString("audit_id")),
+                            UUID.fromString(result.getString("operation_id")),
+                            result.getString("action"),
+                            result.getString("detail"),
+                            result.getLong("recorded_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(entries);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read database backup audit", failure);
         }
     }
 
@@ -7271,6 +7501,61 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 44");
             }
+            if (version < 45) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS database_backup_operation (
+                            operation_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            file_name TEXT NOT NULL UNIQUE,
+                            reason TEXT NOT NULL,
+                            state TEXT NOT NULL
+                                CHECK (state IN ('PREPARED', 'COMMITTED', 'RETIRED')),
+                            size_bytes INTEGER NOT NULL DEFAULT 0
+                                CHECK (size_bytes >= 0),
+                            sha256 TEXT,
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            committed_at_epoch_millis INTEGER,
+                            retired_at_epoch_millis INTEGER,
+                            UNIQUE (administrator_identity, request_id),
+                            CHECK ((state = 'PREPARED'
+                                    AND size_bytes = 0
+                                    AND sha256 IS NULL
+                                    AND committed_at_epoch_millis IS NULL
+                                    AND retired_at_epoch_millis IS NULL)
+                                OR (state = 'COMMITTED'
+                                    AND size_bytes > 0
+                                    AND length(sha256) = 64
+                                    AND committed_at_epoch_millis IS NOT NULL
+                                    AND retired_at_epoch_millis IS NULL)
+                                OR (state = 'RETIRED'
+                                    AND size_bytes > 0
+                                    AND length(sha256) = 64
+                                    AND committed_at_epoch_millis IS NOT NULL
+                                    AND retired_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS database_backup_audit (
+                            audit_id TEXT PRIMARY KEY,
+                            operation_id TEXT NOT NULL
+                                REFERENCES database_backup_operation(operation_id),
+                            action TEXT NOT NULL
+                                CHECK (action IN ('PREPARED', 'FAILED', 'COMMITTED', 'RETIRED')),
+                            detail TEXT NOT NULL,
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS database_backup_operation_state_time
+                        ON database_backup_operation (
+                            state, committed_at_epoch_millis, prepared_at_epoch_millis
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 45");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -7308,6 +7593,64 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("reason"),
                     result.getLong("granted_at_epoch_millis"));
         }
+    }
+
+    private StoredDatabaseBackupOperation requireDatabaseBackupOperation(UUID operationId) {
+        StoredDatabaseBackupOperation operation = databaseBackupOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException("Unknown database backup operation " + operationId);
+        }
+        return operation;
+    }
+
+    private List<StoredDatabaseBackupOperation> databaseBackupOperations(
+            String state, boolean ascending) {
+        List<StoredDatabaseBackupOperation> operations = new ArrayList<>();
+        String sql = "SELECT * FROM database_backup_operation"
+                + (state == null ? "" : " WHERE state = ?")
+                + " ORDER BY COALESCE(committed_at_epoch_millis, prepared_at_epoch_millis) "
+                + (ascending ? "ASC" : "DESC")
+                + ", rowid " + (ascending ? "ASC" : "DESC");
+        try (PreparedStatement query = connection.prepareStatement(sql)) {
+            if (state != null) {
+                query.setString(1, state);
+            }
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    operations.add(readDatabaseBackupOperation(result));
+                }
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list database backup operations", failure);
+        }
+    }
+
+    private StoredDatabaseBackupOperation readDatabaseBackupOperation(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? readDatabaseBackupOperation(result) : null;
+        }
+    }
+
+    private static StoredDatabaseBackupOperation readDatabaseBackupOperation(ResultSet result)
+            throws SQLException {
+        long committedAt = result.getLong("committed_at_epoch_millis");
+        Long optionalCommittedAt = result.wasNull() ? null : committedAt;
+        long retiredAt = result.getLong("retired_at_epoch_millis");
+        Long optionalRetiredAt = result.wasNull() ? null : retiredAt;
+        return new StoredDatabaseBackupOperation(
+                UUID.fromString(result.getString("operation_id")),
+                result.getString("administrator_identity"),
+                result.getString("request_id"),
+                result.getString("file_name"),
+                result.getString("reason"),
+                result.getString("state"),
+                result.getLong("size_bytes"),
+                result.getString("sha256"),
+                result.getLong("prepared_at_epoch_millis"),
+                optionalCommittedAt,
+                optionalRetiredAt);
     }
 
     private StoredNationFiscalPermissionGrant readNationFiscalPermissionGrant(
@@ -8356,7 +8699,8 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getString("state"));
     }
 
-    private static void validateBackup(Path backupFile, DatabaseIdentity expectedIdentity) {
+    public static void validateBackup(Path backupFile, DatabaseIdentity expectedIdentity) {
+        loadSqliteDriver();
         String readOnlyUrl = "jdbc:sqlite:" + backupFile.toUri() + "?mode=ro";
         try (Connection validation = DriverManager.getConnection(readOnlyUrl);
                 Statement statement = validation.createStatement()) {
