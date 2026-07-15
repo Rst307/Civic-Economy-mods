@@ -11,6 +11,7 @@ import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTerritoryFiscalAssessment;
+import org.civiceconomy.persistence.StoredTerritoryMaintenanceAssessmentBatch;
 import org.civiceconomy.persistence.StoredTerritoryMaintenanceCycle;
 import org.civiceconomy.persistence.StoredTerritoryMaintenanceSettlement;
 
@@ -81,6 +82,32 @@ public final class TerritoryMaintenanceRegistry {
                 request.priority().name(),
                 request.reason(),
                 clock.millis()));
+    }
+
+    public void registerAssessmentBatch(
+            UUID cycleId,
+            org.civiceconomy.fiscal.ServiceIdentity serviceIdentity,
+            String requestId,
+            int claimCount,
+            String snapshotSha256) {
+        StoredTerritoryMaintenanceAssessmentBatch replay =
+                database.territoryMaintenanceAssessmentBatch(
+                        serviceIdentity.value(), requestId);
+        if (replay != null) {
+            if (!replay.cycleId().equals(cycleId)
+                    || replay.claimCount() != claimCount
+                    || !replay.snapshotSha256().equals(snapshotSha256)) {
+                throw new IdempotencyConflictException(serviceIdentity, requestId);
+            }
+            return;
+        }
+        database.registerTerritoryMaintenanceAssessmentBatch(
+                cycleId,
+                serviceIdentity.value(),
+                requestId,
+                claimCount,
+                snapshotSha256,
+                clock.millis());
     }
 
     public boolean isEffective(

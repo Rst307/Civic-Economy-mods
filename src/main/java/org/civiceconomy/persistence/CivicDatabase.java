@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 33;
+    private static final int SCHEMA_VERSION = 35;
 
     private final Connection connection;
 
@@ -1214,6 +1214,27 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredNationCapital nationCapital(UUID nationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_capital WHERE nation_id = ?
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredNationCapital(
+                        UUID.fromString(result.getString("nation_id")),
+                        result.getString("dimension_id"),
+                        result.getInt("chunk_x"),
+                        result.getInt("chunk_z"),
+                        result.getLong("established_at_epoch_millis"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Nation Capital " + nationId, failure);
+        }
+    }
+
     public synchronized StoredCitizenship joinCitizenship(
             UUID citizenshipId,
             String serviceIdentity,
@@ -1592,6 +1613,21 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredTerritoryMaintenancePolicy territoryMaintenancePolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryMaintenancePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance policy request", failure);
+        }
+    }
+
     public synchronized StoredTerritoryExpansionPricingPolicy territoryExpansionPricingPolicy(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -1658,6 +1694,54 @@ public final class CivicDatabase implements AutoCloseable {
             return territoryMaintenanceCycle(serviceIdentity, requestId);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to open Territory Maintenance Cycle", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceAssessmentBatch
+            territoryMaintenanceAssessmentBatch(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_assessment_batch
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryMaintenanceAssessmentBatch(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance Assessment Batch", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceAssessmentBatch
+            registerTerritoryMaintenanceAssessmentBatch(
+                    UUID cycleId,
+                    String serviceIdentity,
+                    String requestId,
+                    int claimCount,
+                    String snapshotSha256,
+                    long recordedAtEpochMillis) {
+        StoredTerritoryMaintenanceAssessmentBatch replay =
+                territoryMaintenanceAssessmentBatch(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_maintenance_assessment_batch (
+                    cycle_id, service_identity, request_id, claim_count,
+                    snapshot_sha256, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, cycleId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setInt(4, claimCount);
+            insert.setString(5, snapshotSha256);
+            insert.setLong(6, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return territoryMaintenanceAssessmentBatch(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to register Territory Maintenance Assessment Batch", failure);
         }
     }
 
@@ -2827,6 +2911,67 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryExpansionPricingPolicy(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read current Territory Expansion pricing", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenancePolicy currentTerritoryMaintenancePolicy(
+            long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readTerritoryMaintenancePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Territory Maintenance policy", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenancePolicy scheduleTerritoryMaintenancePolicy(
+            UUID policyId,
+            String serviceIdentity,
+            String requestId,
+            String actorIdentity,
+            long cycleDurationMillis,
+            long baseMaintenancePerChargeableClaimMinorUnits,
+            int enclaveAndCrossDimensionMultiplierBasisPoints,
+            long forceLoadSurchargeMinorUnits,
+            int destructionBasisPoints,
+            long effectiveAtEpochMillis,
+            String reason,
+            long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_maintenance_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    cycle_duration_millis,
+                    base_maintenance_per_chargeable_claim_minor_units,
+                    enclave_cross_dimension_multiplier_basis_points,
+                    force_load_surcharge_minor_units, destruction_basis_points,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setLong(5, cycleDurationMillis);
+            insert.setLong(6, baseMaintenancePerChargeableClaimMinorUnits);
+            insert.setInt(7, enclaveAndCrossDimensionMultiplierBasisPoints);
+            insert.setLong(8, forceLoadSurchargeMinorUnits);
+            insert.setInt(9, destructionBasisPoints);
+            insert.setLong(10, effectiveAtEpochMillis);
+            insert.setString(11, reason);
+            insert.setLong(12, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return territoryMaintenancePolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to schedule Territory Maintenance policy", failure);
         }
     }
 
@@ -5663,6 +5808,52 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 33");
             }
+            if (version < 34) {
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            cycle_duration_millis INTEGER NOT NULL
+                                CHECK (cycle_duration_millis > 0),
+                            base_maintenance_per_chargeable_claim_minor_units INTEGER NOT NULL
+                                CHECK (base_maintenance_per_chargeable_claim_minor_units >= 0),
+                            enclave_cross_dimension_multiplier_basis_points INTEGER NOT NULL
+                                CHECK (enclave_cross_dimension_multiplier_basis_points >= 10000),
+                            force_load_surcharge_minor_units INTEGER NOT NULL
+                                CHECK (force_load_surcharge_minor_units >= 0),
+                            destruction_basis_points INTEGER NOT NULL
+                                CHECK (destruction_basis_points BETWEEN 3000 AND 8000),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (effective_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 34");
+            }
+            if (version < 35) {
+                statement.execute("""
+                        CREATE TABLE territory_maintenance_assessment_batch (
+                            cycle_id TEXT PRIMARY KEY
+                                REFERENCES territory_maintenance_cycle(cycle_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            claim_count INTEGER NOT NULL CHECK (claim_count >= 0),
+                            snapshot_sha256 TEXT NOT NULL
+                                CHECK (length(snapshot_sha256) = 64),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 35");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -5728,6 +5919,28 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    private StoredTerritoryMaintenancePolicy readTerritoryMaintenancePolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredTerritoryMaintenancePolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getLong("cycle_duration_millis"),
+                    result.getLong("base_maintenance_per_chargeable_claim_minor_units"),
+                    result.getInt("enclave_cross_dimension_multiplier_basis_points"),
+                    result.getLong("force_load_surcharge_minor_units"),
+                    result.getInt("destruction_basis_points"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
     private StoredTerritoryExpansionPricingPolicy readTerritoryExpansionPricingPolicy(
             PreparedStatement query) throws SQLException {
         try (ResultSet result = query.executeQuery()) {
@@ -5760,6 +5973,22 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getLong("starts_at_epoch_millis"),
                     result.getLong("ends_at_epoch_millis"),
                     result.getLong("opened_at_epoch_millis"));
+        }
+    }
+
+    private StoredTerritoryMaintenanceAssessmentBatch readTerritoryMaintenanceAssessmentBatch(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredTerritoryMaintenanceAssessmentBatch(
+                    UUID.fromString(result.getString("cycle_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getInt("claim_count"),
+                    result.getString("snapshot_sha256"),
+                    result.getLong("recorded_at_epoch_millis"));
         }
     }
 

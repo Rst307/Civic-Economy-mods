@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
@@ -29,16 +30,21 @@ import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
+import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
 import org.civiceconomy.territory.TerritoryExpansionPricingPolicyRegistry;
 import org.civiceconomy.territory.TerritoryExpansionPricingPolicyVersion;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
+import org.civiceconomy.territory.TerritoryMaintenancePolicyRegistry;
+import org.civiceconomy.territory.TerritoryMaintenancePolicyVersion;
 
 public final class FiscalAdministrationCommands {
     private static final ServiceIdentity TERRITORY_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-territory-policy");
     private static final ServiceIdentity TERRITORY_PRICING_SERVICE =
             new ServiceIdentity("civiceconomy-territory-pricing");
+    private static final ServiceIdentity TERRITORY_MAINTENANCE_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-territory-maintenance-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -73,81 +79,189 @@ public final class FiscalAdministrationCommands {
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             territoryPolicyCommand() {
         return Commands.literal("territory")
-                .then(Commands.literal("policy")
-                        .then(Commands.literal("show")
-                                .executes(context -> showTerritoryPolicy(context.getSource())))
-                        .then(Commands.literal("schedule")
+                .then(territoryFreeAllocationPolicyCommand())
+                .then(territoryPricingPolicyCommand())
+                .then(territoryMaintenancePolicyCommand());
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            territoryFreeAllocationPolicyCommand() {
+        return Commands.literal("policy")
+                .then(Commands.literal("show")
+                        .executes(context -> showTerritoryPolicy(context.getSource())))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument("baseChunks", IntegerArgumentType.integer(0))
                                 .then(Commands.argument(
-                                                "baseChunks", IntegerArgumentType.integer(0))
+                                                "chunksPerEffectiveCitizen",
+                                                IntegerArgumentType.integer(0))
                                         .then(Commands.argument(
-                                                        "chunksPerEffectiveCitizen",
-                                                        IntegerArgumentType.integer(0))
-                                                .then(Commands.argument(
-                                                                "effectiveAtEpochMillis",
-                                                                LongArgumentType.longArg(0L))
-                                                        .then(Commands.argument(
-                                                                        "requestId",
-                                                                        StringArgumentType.word())
-                                                                .then(Commands.argument(
-                                                                                "reason",
-                                                                                StringArgumentType
-                                                                                        .greedyString())
-                                                                        .executes(context ->
-                                                                                scheduleTerritoryPolicy(
-                                                                                        context.getSource(),
-                                                                                        IntegerArgumentType.getInteger(
-                                                                                                context,
-                                                                                                "baseChunks"),
-                                                                                        IntegerArgumentType.getInteger(
-                                                                                                context,
-                                                                                                "chunksPerEffectiveCitizen"),
-                                                                                        LongArgumentType.getLong(
-                                                                                                context,
-                                                                                                "effectiveAtEpochMillis"),
-                                                                                        StringArgumentType.getString(
-                                                                                                context,
-                                                                                                "requestId"),
-                                                                                        StringArgumentType.getString(
-                                                                                                context,
-                                                                                                "reason"))))))))))
-                .then(Commands.literal("pricing")
-                        .then(Commands.literal("show")
-                                .executes(context -> showTerritoryPricing(context.getSource())))
-                        .then(Commands.literal("schedule")
-                                .then(Commands.argument(
-                                                "firstOverageChunkCost",
-                                                LongArgumentType.longArg(0L))
-                                        .then(Commands.argument(
-                                                        "additionalMarginalCost",
+                                                        "effectiveAtEpochMillis",
                                                         LongArgumentType.longArg(0L))
                                                 .then(Commands.argument(
-                                                                "effectiveAtEpochMillis",
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleTerritoryPolicy(
+                                                                                context.getSource(),
+                                                                                IntegerArgumentType.getInteger(context, "baseChunks"),
+                                                                                IntegerArgumentType.getInteger(context, "chunksPerEffectiveCitizen"),
+                                                                                LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(context, "requestId"),
+                                                                                StringArgumentType.getString(context, "reason")))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            territoryPricingPolicyCommand() {
+        return Commands.literal("pricing")
+                .then(Commands.literal("show")
+                        .executes(context -> showTerritoryPricing(context.getSource())))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument(
+                                        "firstOverageChunkCost", LongArgumentType.longArg(0L))
+                                .then(Commands.argument(
+                                                "additionalMarginalCost",
+                                                LongArgumentType.longArg(0L))
+                                        .then(Commands.argument(
+                                                        "effectiveAtEpochMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleTerritoryPricing(
+                                                                                context.getSource(),
+                                                                                LongArgumentType.getLong(context, "firstOverageChunkCost"),
+                                                                                LongArgumentType.getLong(context, "additionalMarginalCost"),
+                                                                                LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(context, "requestId"),
+                                                                                StringArgumentType.getString(context, "reason")))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            territoryMaintenancePolicyCommand() {
+        return Commands.literal("maintenance")
+                .then(Commands.literal("show")
+                        .executes(context -> showTerritoryMaintenancePolicy(context.getSource())))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument(
+                                        "cycleDurationMillis", LongArgumentType.longArg(1L))
+                                .then(Commands.argument(
+                                                "baseMaintenancePerClaim",
+                                                LongArgumentType.longArg(0L))
+                                        .then(Commands.argument(
+                                                        "enclaveMultiplierBasisPoints",
+                                                        IntegerArgumentType.integer(10_000))
+                                                .then(Commands.argument(
+                                                                "forceLoadSurcharge",
                                                                 LongArgumentType.longArg(0L))
                                                         .then(Commands.argument(
-                                                                        "requestId",
-                                                                        StringArgumentType.word())
+                                                                        "destructionBasisPoints",
+                                                                        IntegerArgumentType.integer(3_000, 8_000))
                                                                 .then(Commands.argument(
-                                                                                "reason",
-                                                                                StringArgumentType
-                                                                                        .greedyString())
-                                                                        .executes(context ->
-                                                                                scheduleTerritoryPricing(
-                                                                                        context.getSource(),
-                                                                                        LongArgumentType.getLong(
-                                                                                                context,
-                                                                                                "firstOverageChunkCost"),
-                                                                                        LongArgumentType.getLong(
-                                                                                                context,
-                                                                                                "additionalMarginalCost"),
-                                                                                        LongArgumentType.getLong(
-                                                                                                context,
-                                                                                                "effectiveAtEpochMillis"),
-                                                                                        StringArgumentType.getString(
-                                                                                                context,
-                                                                                                "requestId"),
-                                                                                        StringArgumentType.getString(
-                                                                                                context,
-                                                                                                "reason"))))))))));
+                                                                                "effectiveAtEpochMillis",
+                                                                                LongArgumentType.longArg(0L))
+                                                                        .then(Commands.argument(
+                                                                                        "requestId",
+                                                                                        StringArgumentType.word())
+                                                                                .then(Commands.argument(
+                                                                                                "reason",
+                                                                                                StringArgumentType.greedyString())
+                                                                                        .executes(context ->
+                                                                                                scheduleTerritoryMaintenancePolicy(
+                                                                                                        context.getSource(),
+                                                                                                        LongArgumentType.getLong(context, "cycleDurationMillis"),
+                                                                                                        LongArgumentType.getLong(context, "baseMaintenancePerClaim"),
+                                                                                                        IntegerArgumentType.getInteger(context, "enclaveMultiplierBasisPoints"),
+                                                                                                        LongArgumentType.getLong(context, "forceLoadSurcharge"),
+                                                                                                        IntegerArgumentType.getInteger(context, "destructionBasisPoints"),
+                                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                                        StringArgumentType.getString(context, "reason"))))))))))));
+    }
+
+    private static int showTerritoryMaintenancePolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new TerritoryMaintenancePolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Territory maintenance policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Territory Maintenance policy is not configured; automatic maintenance is disabled"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatTerritoryMaintenancePolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Territory maintenance policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleTerritoryMaintenancePolicy(
+            CommandSourceStack source,
+            long cycleDurationMillis,
+            long baseMaintenancePerClaim,
+            int enclaveMultiplierBasisPoints,
+            long forceLoadSurcharge,
+            int destructionBasisPoints,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new TerritoryMaintenancePolicyRegistry(database, clock)
+                        .schedule(new ScheduleTerritoryMaintenancePolicy(
+                                TERRITORY_MAINTENANCE_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                Duration.ofMillis(cycleDurationMillis),
+                                baseMaintenancePerClaim,
+                                enclaveMultiplierBasisPoints,
+                                forceLoadSurcharge,
+                                destructionBasisPoints,
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatTerritoryMaintenancePolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Territory maintenance policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Territory maintenance policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatTerritoryMaintenancePolicy(
+            TerritoryMaintenancePolicyVersion policy) {
+        return "Territory Maintenance policy " + policy.policyId()
+                + " cycleDurationMillis=" + policy.cycleDuration().toMillis()
+                + " baseMaintenancePerClaim="
+                + policy.baseMaintenancePerChargeableClaimMinorUnits()
+                + " enclaveMultiplierBasisPoints="
+                + policy.enclaveAndCrossDimensionMultiplierBasisPoints()
+                + " forceLoadSurcharge=" + policy.forceLoadSurchargeMinorUnits()
+                + " destructionBasisPoints=" + policy.destructionBasisPoints()
+                + " effectiveAt=" + policy.effectiveAt()
+                + " actor=" + policy.actorIdentity();
     }
 
     private static int showTerritoryPricing(CommandSourceStack source) {

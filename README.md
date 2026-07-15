@@ -116,6 +116,8 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin territory policy schedule <baseChunks> <chunksPerEffectiveCitizen> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin territory pricing show
 /civic economy admin territory pricing schedule <firstOverageChunkCost> <additionalMarginalCost> <effectiveAtEpochMillis> <requestId> <reason>
+/civic economy admin territory maintenance show
+/civic economy admin territory maintenance schedule <cycleDurationMillis> <baseMaintenancePerClaim> <enclaveMultiplierBasisPoints> <forceLoadSurcharge> <destructionBasisPoints> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
 领土政策命令仅允许 OP/控制台。免费额度与凸性扩张定价都必须安排在未来时刻生效，并持久化操作者、稳定 request ID、参数、理由和生效时间；在管理员安排首个版本前，两者均使用保守的零值默认，因此不会自动产生收费或免费扩张权。

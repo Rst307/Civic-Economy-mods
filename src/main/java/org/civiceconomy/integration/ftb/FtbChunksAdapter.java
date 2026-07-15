@@ -5,7 +5,10 @@ import dev.ftb.mods.ftbchunks.api.ClaimedChunkManager;
 import dev.ftb.mods.ftbchunks.api.FTBChunksAPI;
 import dev.ftb.mods.ftblibrary.math.ChunkDimPos;
 import dev.ftb.mods.ftbteams.api.Team;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
@@ -41,5 +44,27 @@ public final class FtbChunksAdapter {
                 claimed.getTimeClaimed(),
                 claimed.isForceLoaded(),
                 claimed.isActuallyForceLoaded()));
+    }
+
+    public List<FtbClaimFacts> claimsForTeam(UUID ftbTeamId) {
+        if (ftbTeamId == null) {
+            throw new IllegalArgumentException("FTB Team ID cannot be null");
+        }
+        return manager.getAllClaimedChunks().stream()
+                .filter(claimed -> claimed.getTeamData().getTeam() != null)
+                .filter(claimed -> claimed.getTeamData().getTeam().isValid())
+                .filter(claimed -> claimed.getTeamData().getTeam().getId().equals(ftbTeamId))
+                .map(claimed -> new FtbClaimFacts(
+                        ftbTeamId,
+                        claimed.getPos().dimension(),
+                        claimed.getPos().chunkPos(),
+                        claimed.getTimeClaimed(),
+                        claimed.isForceLoaded(),
+                        claimed.isActuallyForceLoaded()))
+                .sorted(Comparator
+                        .comparing((FtbClaimFacts claim) -> claim.dimension().location().toString())
+                        .thenComparingInt(claim -> claim.chunkPos().x)
+                        .thenComparingInt(claim -> claim.chunkPos().z))
+                .toList();
     }
 }

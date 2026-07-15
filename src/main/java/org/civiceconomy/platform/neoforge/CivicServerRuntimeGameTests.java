@@ -166,6 +166,7 @@ public final class CivicServerRuntimeGameTests {
     public static void consoleSchedulesTerritoryPolicyOffThread(GameTestHelper helper) {
         String requestId = "territory-policy-command-" + UUID.randomUUID();
         String pricingRequestId = "territory-pricing-command-" + UUID.randomUUID();
+        String maintenanceRequestId = "territory-maintenance-command-" + UUID.randomUUID();
         long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
         var server = helper.getLevel().getServer();
         server.getCommands().performPrefixedCommand(
@@ -176,6 +177,11 @@ public final class CivicServerRuntimeGameTests {
                 server.createCommandSourceStack(),
                 "civic economy admin territory pricing schedule 100 50 " + effectiveAt
                         + " " + pricingRequestId + " GameTest territory pricing");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin territory maintenance schedule 604800000 75 15000 25 6000 "
+                        + effectiveAt + " " + maintenanceRequestId
+                        + " GameTest territory maintenance");
         Path databaseFile = server.getWorldPath(LevelResource.ROOT)
                 .resolve("civiceconomy")
                 .resolve("civic.sqlite3");
@@ -184,6 +190,8 @@ public final class CivicServerRuntimeGameTests {
             assertTerritoryPolicyScheduled(helper, databaseFile, requestId, effectiveAt);
             assertTerritoryPricingScheduled(
                     helper, databaseFile, pricingRequestId, effectiveAt);
+            assertTerritoryMaintenancePolicyScheduled(
+                    helper, databaseFile, maintenanceRequestId, effectiveAt);
         });
     }
 
@@ -1400,6 +1408,45 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect territory pricing command result", failure);
+        }
+    }
+
+    private static void assertTerritoryMaintenancePolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, cycle_duration_millis,
+                               base_maintenance_per_chargeable_claim_minor_units,
+                               enclave_cross_dimension_multiplier_basis_points,
+                               force_load_surcharge_minor_units, destruction_basis_points,
+                               effective_at_epoch_millis, reason
+                        FROM territory_maintenance_policy
+                        WHERE service_identity = 'civiceconomy-territory-maintenance-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Territory Maintenance policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived maintenance policy administrator");
+                helper.assertValueEqual(604_800_000L, result.getLong(2), "maintenance cycle duration");
+                helper.assertValueEqual(75L, result.getLong(3), "base maintenance per claim");
+                helper.assertValueEqual(15_000, result.getInt(4), "enclave multiplier");
+                helper.assertValueEqual(25L, result.getLong(5), "force-load surcharge");
+                helper.assertValueEqual(6_000, result.getInt(6), "destruction basis points");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis, result.getLong(7), "maintenance policy effective time");
+                helper.assertValueEqual(
+                        "GameTest territory maintenance", result.getString(8), "maintenance policy reason");
+                helper.assertFalse(result.next(), "duplicate Territory Maintenance policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect territory maintenance policy command result", failure);
         }
     }
 

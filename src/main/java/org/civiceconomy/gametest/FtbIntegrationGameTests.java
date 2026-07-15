@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.List;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
@@ -100,6 +101,52 @@ public final class FtbIntegrationGameTests {
             ClaimedChunk claimed = FTBChunksAPI.api().getManager().getChunk(chunkDimPos);
             if (claimed != null) {
                 claimed.unclaim(source, true);
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void ftbChunksAdapterSnapshotsOneTeamsClaimsInStableOrder(
+            GameTestHelper helper) {
+        Team team = FTBTeamsAPI.api()
+                .getManager()
+                .getTeamByID(TEST_SERVER_TEAM_ID)
+                .orElseGet(() -> createServerTeam(helper));
+        ChunkPos first = new ChunkPos(1200, 1201);
+        ChunkPos second = new ChunkPos(1202, 1201);
+        var source = helper.getLevel().getServer().createCommandSourceStack();
+        var teamData = FTBChunksAPI.api().getManager().getOrCreateData(team);
+        List<ChunkDimPos> positions = List.of(
+                new ChunkDimPos(helper.getLevel().dimension(), second),
+                new ChunkDimPos(helper.getLevel().dimension(), first));
+        for (ChunkDimPos position : positions) {
+            ClaimedChunk existing = FTBChunksAPI.api().getManager().getChunk(position);
+            if (existing != null) {
+                existing.unclaim(source, true);
+            }
+            helper.assertTrue(
+                    teamData.claim(source, position, false).isSuccess(),
+                    "real FTB Team snapshot claim fixture");
+        }
+
+        try {
+            List<FtbClaimFacts> snapshot = FtbChunksAdapter.live().claimsForTeam(team.getId());
+            List<FtbClaimFacts> fixtureClaims = snapshot.stream()
+                    .filter(claim -> claim.chunkPos().equals(first) || claim.chunkPos().equals(second))
+                    .toList();
+            helper.assertValueEqual(2, fixtureClaims.size(), "Team claim snapshot size");
+            helper.assertValueEqual(first, fixtureClaims.get(0).chunkPos(), "first stable Team claim");
+            helper.assertValueEqual(second, fixtureClaims.get(1).chunkPos(), "second stable Team claim");
+            helper.assertTrue(
+                    fixtureClaims.stream().allMatch(claim -> claim.teamId().equals(team.getId())),
+                    "Team claim snapshot identity");
+        } finally {
+            for (ChunkDimPos position : positions) {
+                ClaimedChunk claimed = FTBChunksAPI.api().getManager().getChunk(position);
+                if (claimed != null) {
+                    claimed.unclaim(source, true);
+                }
             }
         }
         helper.succeed();
