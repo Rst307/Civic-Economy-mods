@@ -343,6 +343,152 @@ public final class LightmansCurrencyPermanentDestructionsGameTests {
         helper.succeed();
     }
 
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 100,
+            batch = "territory-restoration-payment")
+    public static void realTerritoryRestorationChargesFeeAndNextFullCycleMaintenanceExactlyOnce(
+            GameTestHelper helper) {
+        UUID fundingPlayerId = UUID.randomUUID();
+        UUID cleanupPlayerId = UUID.randomUUID();
+        NationId nationId = NationId.create();
+        UUID cycleId = UUID.randomUUID();
+        UUID teamId = UUID.randomUUID();
+        UUID assessmentId = UUID.randomUUID();
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        AccountId fundingAccount = new AccountId("player:" + fundingPlayerId);
+        AccountId cleanupAccount = new AccountId("player:" + cleanupPlayerId);
+        AccountId treasury = new AccountId("nation:" + nationId.value() + ":treasury");
+        AccountId publicFund = LightmansCurrencyPublicMaintenanceFundProvisioner.ACCOUNT_ID;
+        LightmansCurrencyFiscalAccounts accounts =
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel());
+        accounts.create(treasury, FiscalAccountKind.NATIONAL_TREASURY, "Restoration GameTest Treasury");
+        new LightmansCurrencyPublicMaintenanceFundProvisioner(accounts).ensureExists();
+        long publicFundBefore = accounts.balance(publicFund).minorUnits();
+        reset(bankData, fundingPlayerId, 1_000L);
+        reset(bankData, cleanupPlayerId, 0L);
+        LightmansCurrencyPayments payments = LightmansCurrencyPayments.live(helper.getLevel());
+        payments.apply(new ExternalPayment(
+                UUID.randomUUID(), fundingAccount, treasury, MoneyAmount.ofMinorUnits(130L)));
+        Path temporaryDirectory = createTemporaryDirectory();
+        Path databaseFile = temporaryDirectory.resolve("restoration-payment.sqlite3");
+        DatabaseIdentity identity = new DatabaseIdentity(
+                UUID.randomUUID(),
+                "0.1.0-probe",
+                "1.21-2.3.0.5",
+                "2101.1.10",
+                "2101.1.20");
+        try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
+            FiscalAuthorization authorization = new FiscalAuthorization(database);
+            new TerritoryFiscalServiceProvisioner(authorization).ensureAuthorized(treasury);
+            long now = System.currentTimeMillis();
+            database.registerNation(
+                    nationId.value(), "restoration-gametest", "register-nation", teamId, now);
+            database.openTerritoryMaintenanceCycle(
+                    cycleId,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "open-real-restoration-cycle",
+                    now,
+                    now + 3_600_000L,
+                    now);
+            database.assessTerritoryFiscalValidity(
+                    assessmentId,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "assess-real-restoration",
+                    cycleId,
+                    nationId.value(),
+                    teamId,
+                    "minecraft:overworld",
+                    40,
+                    50,
+                    100L,
+                    30L,
+                    org.civiceconomy.territory.TerritoryMaintenanceRestorationEligibility.ELIGIBLE
+                            .name(),
+                    now + 1_209_600_000L,
+                    org.civiceconomy.territory.TerritoryMaintenancePriority.ORDINARY.name(),
+                    "Real Restoration GameTest assessment",
+                    now);
+            database.confirmMonetarySupplyChange(
+                    cycleId,
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "seed-real-restoration-issuance",
+                    MonetarySupplyChange.ISSUANCE.name(),
+                    130L,
+                    "mint-batch:real-restoration",
+                    "Seed real Restoration issuance",
+                    now,
+                    2_000L);
+            var session = authorization.openSession(TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+            TerritoryMaintenancePaymentCoordinator coordinator =
+                    TerritoryMaintenancePaymentCoordinator.live(
+                            database, session, Clock.systemUTC(), helper.getLevel());
+            SettleAvailableTerritoryMaintenance request = new SettleAvailableTerritoryMaintenance(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "real-restoration-cycle",
+                    cycleId,
+                    nationId,
+                    treasury,
+                    6_000,
+                    "Real Restoration GameTest");
+            var first = coordinator.settleAvailable(request);
+            var replay = coordinator.settleAvailable(request);
+            var restoration = first.payment().orElseThrow();
+            var replayPayment = replay.payment().orElseThrow();
+
+            helper.assertValueEqual(
+                    org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED,
+                    restoration.settlement().outcome(),
+                    "Restoration Settlement outcome");
+            helper.assertValueEqual(
+                    java.util.List.of(assessmentId),
+                    restoration.settlement().fundedAssessmentIds(),
+                    "funded Restoration Assessment");
+            helper.assertValueEqual(
+                    78L, restoration.destroyedAmount().minorUnits(), "destroyed Restoration share");
+            helper.assertValueEqual(
+                    52L,
+                    restoration.publicFundAmount().minorUnits(),
+                    "public-fund Restoration share");
+            helper.assertValueEqual(
+                    restoration.publicFundPayment().transactionId(),
+                    replayPayment.publicFundPayment().transactionId(),
+                    "Restoration payment replay transaction");
+            helper.assertValueEqual(
+                    0L, accounts.balance(treasury).minorUnits(), "real Treasury after Restoration");
+            helper.assertValueEqual(
+                    publicFundBefore + 52L,
+                    accounts.balance(publicFund).minorUnits(),
+                    "real Public Maintenance Fund after Restoration");
+            helper.assertValueEqual(
+                    52L,
+                    database.cumulativeNetIssuanceMinorUnits(),
+                    "net issuance after Restoration");
+            var stored = database.territoryFiscalAssessment(
+                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "assess-real-restoration");
+            helper.assertValueEqual(100L, stored.maintenanceDueMinorUnits(), "next full Cycle due");
+            helper.assertValueEqual(30L, stored.restorationFeeMinorUnits(), "Restoration fee");
+            helper.assertValueEqual("EFFECTIVE", stored.validity(), "Restoration fiscal validity");
+        } finally {
+            MoneyAmount treasuryBalance = accounts.balance(treasury);
+            if (!treasuryBalance.equals(MoneyAmount.ZERO)) {
+                payments.apply(new ExternalPayment(
+                        UUID.randomUUID(), treasury, cleanupAccount, treasuryBalance));
+            }
+            MoneyAmount publicFundDelta = MoneyAmount.ofMinorUnits(
+                    accounts.balance(publicFund).minorUnits() - publicFundBefore);
+            if (!publicFundDelta.equals(MoneyAmount.ZERO)) {
+                payments.apply(new ExternalPayment(
+                        UUID.randomUUID(), publicFund, cleanupAccount, publicFundDelta));
+            }
+            bankData.deleteAccount(fundingPlayerId);
+            bankData.deleteAccount(cleanupPlayerId);
+            deleteTemporaryDirectory(temporaryDirectory);
+        }
+        helper.succeed();
+    }
+
     private static void authorize(
             CivicDatabase database, ServiceIdentity service, AccountId treasury) {
         FiscalAuthorization authorization = new FiscalAuthorization(database);
