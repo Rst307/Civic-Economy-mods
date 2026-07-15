@@ -10,9 +10,11 @@ import org.civiceconomy.compat.CompatibilityReport;
 import org.civiceconomy.compat.CompatibilityScanner;
 import org.civiceconomy.gametest.FtbIntegrationGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyFiscalAccountsGameTests;
+import org.civiceconomy.gametest.LightmansCurrencyMonetaryGuardGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPermanentDestructionsGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyPlayerPaymentsGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMonetaryGuard;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
 import org.civiceconomy.platform.neoforge.CivicServerRuntime;
 import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
@@ -40,6 +42,7 @@ public final class CivicEconomy {
         }
 
         compatibilityReport = report;
+        LightmansCurrencyMonetaryGuard.install();
         LightmansCurrencyFiscalAccounts.registerWithLightmansCurrency();
         NeoForge.EVENT_BUS.addListener(runtime::onServerStarted);
         NeoForge.EVENT_BUS.addListener(runtime::onPlayerLoggedIn);
@@ -72,6 +75,7 @@ public final class CivicEconomy {
         event.register(FtbIntegrationGameTests.class);
         event.register(CivicServerRuntimeGameTests.class);
         event.register(LightmansCurrencyFiscalAccountsGameTests.class);
+        event.register(LightmansCurrencyMonetaryGuardGameTests.class);
         event.register(LightmansCurrencyPermanentDestructionsGameTests.class);
         event.register(LightmansCurrencyPlayerPaymentsGameTests.class);
     }

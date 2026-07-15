@@ -4,7 +4,16 @@
   "package": "org.civiceconomy.mixin.lightmanscurrency",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "BankDataCacheMixin"
+    "BankAccountMixin",
+    "BankDataCacheMixin",
+    "CoinMintBlockEntityMixin",
+    "CoinsInChestsModifierMixin",
+    "CommandBankMixin",
+    "ConfigOptionMixin",
+    "GiveCommandMixin",
+    "LootManagerMixin",
+    "SeasonalEventManagerMixin",
+    "VillagerTradeManagerMixin"
   ],
   "injectors": {
     "defaultRequire": 1
