@@ -75,7 +75,14 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮。第一轮预期以进程退出码 `86` 终止，不能当作普通测试失败；第二轮必须完整通过：
 
 ```powershell
-.\gradlew.bat runGameTestServer -PmintRestartDrill=prepare --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PmintRestartDrill=prepare-external --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PmintRestartDrill=verify --no-daemon --console=plain
+```
+
+`prepare-external` 预期退出码为 `86`。另起一个干净世界后，可验证材料消费刷盘窗口；第一轮预期退出码为 `87`：
+
+```powershell
+.\gradlew.bat runGameTestServer -PmintRestartDrill=prepare-materials --no-daemon --console=plain
 .\gradlew.bat runGameTestServer -PmintRestartDrill=verify --no-daemon --console=plain
 ```
 

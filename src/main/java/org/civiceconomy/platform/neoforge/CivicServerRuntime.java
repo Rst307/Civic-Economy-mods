@@ -1632,7 +1632,7 @@ public final class CivicServerRuntime {
                     operation.apply(
                             LightmansCurrencyMintIssuances.live(current.server.overworld()),
                             current.mintCustody);
-                    MintProcessRestartDrill.crashAfterExternalApplied(
+                    MintProcessRestartDrill.crashAfterAppliedStep(
                             current.server, operation);
                     return operation;
                 })

@@ -10,6 +10,7 @@ import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 import org.civiceconomy.mint.PendingMintIssuanceStep;
+import org.civiceconomy.mint.PendingMintMaterialConsumption;
 import org.civiceconomy.mint.PendingMintTreasuryCredit;
 
 final class MintProcessRestartDrill {
@@ -24,20 +25,38 @@ final class MintProcessRestartDrill {
         return "verify".equals(System.getProperty(PROPERTY));
     }
 
-    static void crashAfterExternalApplied(
+    static void crashAfterAppliedStep(
             MinecraftServer server, PendingMintIssuanceStep operation) {
-        if (!"prepare".equals(System.getProperty(PROPERTY))
-                || !GAME_TEST_SERVER.equals(server.getClass().getName())
-                || !(operation instanceof PendingMintTreasuryCredit credit)) {
+        String mode = System.getProperty(PROPERTY);
+        if (!GAME_TEST_SERVER.equals(server.getClass().getName())) {
             return;
         }
-        server.overworld().getDataStorage().save();
-        writeMarker(server, new Marker(
-                credit.batchId(),
-                credit.operationId(),
-                credit.issuance().treasuryAccount().value(),
-                credit.issuance().amount().minorUnits()));
-        Runtime.getRuntime().halt(86);
+        if (operation instanceof PendingMintTreasuryCredit credit
+                && ("prepare".equals(mode)
+                        || "prepare-external".equals(mode)
+                        || "prepare-materials".equals(mode))) {
+            server.overworld().getDataStorage().save();
+            writeMarker(server, new Marker(
+                    credit.batchId(),
+                    credit.operationId(),
+                    credit.issuance().treasuryAccount().value(),
+                    credit.issuance().amount().minorUnits()));
+            if ("prepare".equals(mode) || "prepare-external".equals(mode)) {
+                Runtime.getRuntime().halt(86);
+            }
+            return;
+        }
+        if (operation instanceof PendingMintMaterialConsumption consumption
+                && "prepare-materials".equals(mode)) {
+            server.overworld().getDataStorage().save();
+            Marker marker = readMarker(server);
+            if (!marker.batchId().equals(consumption.batchId())
+                    || !marker.operationId().equals(consumption.operationId())) {
+                throw new IllegalStateException(
+                        "Mint material restart step does not match its external marker");
+            }
+            Runtime.getRuntime().halt(87);
+        }
     }
 
     static Marker readMarker(MinecraftServer server) {
