@@ -3,6 +3,7 @@ package org.civiceconomy.territory;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -93,6 +94,11 @@ public final class TerritoryMaintenanceRegistry {
                 request.chunkX(),
                 request.chunkZ(),
                 request.maintenanceDueMinorUnits(),
+                request.restorationFeeMinorUnits(),
+                request.restorationEligibility().name(),
+                request.restorationCooldownEndsAt()
+                        .map(Instant::toEpochMilli)
+                        .orElse(null),
                 request.priority().name(),
                 request.reason(),
                 clock.millis()));
@@ -131,6 +137,11 @@ public final class TerritoryMaintenanceRegistry {
                                     claim.chunkX(),
                                     claim.chunkZ(),
                                     claim.maintenanceDueMinorUnits(),
+                                    claim.restorationFeeMinorUnits(),
+                                    claim.restorationEligibility().name(),
+                                    claim.restorationCooldownEndsAt()
+                                            .map(Instant::toEpochMilli)
+                                            .orElse(null),
                                     claim.priority().name());
                         })
                         .toList(),
@@ -147,6 +158,11 @@ public final class TerritoryMaintenanceRegistry {
                         claim.chunkX(),
                         claim.chunkZ(),
                         claim.maintenanceDueMinorUnits(),
+                        claim.restorationFeeMinorUnits(),
+                        TerritoryMaintenanceRestorationEligibility.valueOf(
+                                claim.restorationEligibility()),
+                        Optional.ofNullable(claim.restorationCooldownEndsAtEpochMillis())
+                                .map(Instant::ofEpochMilli),
                         TerritoryMaintenancePriority.valueOf(claim.priority())))
                 .toList();
     }
@@ -204,13 +220,37 @@ public final class TerritoryMaintenanceRegistry {
                         stored.dimensionId(),
                         stored.chunkX(),
                         stored.chunkZ(),
-                        MoneyAmount.ofMinorUnits(stored.maintenanceDueMinorUnits())))
+                        MoneyAmount.ofMinorUnits(Math.addExact(
+                                stored.maintenanceDueMinorUnits(),
+                                stored.restorationFeeMinorUnits())),
+                        !stored.restorationEligibility().equals(
+                                TerritoryMaintenanceRestorationEligibility.COOLDOWN_BLOCKED.name())))
                 .sorted(Comparator.comparing(TerritoryMaintenanceCandidate::priority)
                         .thenComparing(TerritoryMaintenanceCandidate::dimensionId)
                         .thenComparingInt(TerritoryMaintenanceCandidate::chunkX)
                         .thenComparingInt(TerritoryMaintenanceCandidate::chunkZ)
                         .thenComparing(TerritoryMaintenanceCandidate::assessmentId))
                 .toList();
+    }
+
+    public Map<TerritoryClaimPosition, TerritoryMaintenanceRestorationHistory>
+            restorationHistory(NationId nationId, UUID ftbTeamId, Instant before) {
+        if (nationId == null || ftbTeamId == null || before == null) {
+            throw new IllegalArgumentException(
+                    "Territory Maintenance Restoration history query cannot contain null values");
+        }
+        return database.territoryMaintenanceRestorationHistory(
+                        nationId.value(), ftbTeamId, before.toEpochMilli())
+                .stream()
+                .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                        stored -> new TerritoryClaimPosition(
+                                stored.dimensionId(), stored.chunkX(), stored.chunkZ()),
+                        stored -> new TerritoryMaintenanceRestorationHistory(
+                                stored.previousValidity().equals(
+                                        TerritoryFiscalValidity.SUSPENDED.name()),
+                                Optional.ofNullable(
+                                                stored.lastSuccessfulRestorationCooldownEndsAtEpochMillis())
+                                        .map(Instant::ofEpochMilli))));
     }
 
     public TerritoryMaintenanceSettlement confirmSettlement(
@@ -312,6 +352,13 @@ public final class TerritoryMaintenanceRegistry {
                 || stored.chunkX() != request.chunkX()
                 || stored.chunkZ() != request.chunkZ()
                 || stored.maintenanceDueMinorUnits() != request.maintenanceDueMinorUnits()
+                || stored.restorationFeeMinorUnits() != request.restorationFeeMinorUnits()
+                || !stored.restorationEligibility().equals(request.restorationEligibility().name())
+                || !java.util.Objects.equals(
+                        stored.restorationCooldownEndsAtEpochMillis(),
+                        request.restorationCooldownEndsAt()
+                                .map(Instant::toEpochMilli)
+                                .orElse(null))
                 || !stored.priority().equals(request.priority().name())
                 || !stored.reason().equals(request.reason())) {
             throw new IdempotencyConflictException(
@@ -357,6 +404,11 @@ public final class TerritoryMaintenanceRegistry {
                 stored.chunkX(),
                 stored.chunkZ(),
                 MoneyAmount.ofMinorUnits(stored.maintenanceDueMinorUnits()),
+                MoneyAmount.ofMinorUnits(stored.restorationFeeMinorUnits()),
+                TerritoryMaintenanceRestorationEligibility.valueOf(
+                        stored.restorationEligibility()),
+                Optional.ofNullable(stored.restorationCooldownEndsAtEpochMillis())
+                        .map(Instant::ofEpochMilli),
                 TerritoryMaintenancePriority.valueOf(stored.priority()),
                 TerritoryFiscalValidity.valueOf(stored.validity()),
                 stored.reason(),

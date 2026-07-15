@@ -46,13 +46,16 @@ class CivicDatabaseV35MigrationTest {
                 var statement = connection.createStatement()) {
             statement.execute("DROP TABLE territory_maintenance_assessment_claim");
             statement.execute("DROP TABLE territory_maintenance_assessment_batch");
+            statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_cooldown_ends_at_epoch_millis");
+            statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_eligibility");
+            statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_fee_minor_units");
             statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_fee_minor_units");
             statement.execute("ALTER TABLE territory_maintenance_policy DROP COLUMN restoration_cooldown_millis");
             statement.execute("PRAGMA user_version = 34");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(39, migrated.schemaVersion());
+            assertEquals(40, migrated.schemaVersion());
             assertEquals(
                     75L,
                     migrated.territoryMaintenancePolicy("migration", "maintenance-policy")

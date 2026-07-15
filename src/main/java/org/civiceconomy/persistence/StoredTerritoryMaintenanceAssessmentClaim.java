@@ -11,4 +11,7 @@ public record StoredTerritoryMaintenanceAssessmentClaim(
         int chunkX,
         int chunkZ,
         long maintenanceDueMinorUnits,
+        long restorationFeeMinorUnits,
+        String restorationEligibility,
+        Long restorationCooldownEndsAtEpochMillis,
         String priority) {}

@@ -78,6 +78,7 @@ import org.civiceconomy.territory.TerritoryMaintenanceObservedClaim;
 import org.civiceconomy.territory.TerritoryMaintenancePolicyRegistry;
 import org.civiceconomy.territory.TerritoryMaintenancePolicyVersion;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
+import org.civiceconomy.territory.TerritoryMaintenanceRestorationHistory;
 import org.civiceconomy.territory.SettleAvailableTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryFiscalValidity;
 import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
@@ -901,6 +902,7 @@ public final class CivicServerRuntime {
                         TerritoryFreeAllocationPolicyVersion.defaultPolicy(0, 0))
                 .current(scanTime)
                 .policy();
+        var maintenance = new TerritoryMaintenanceRegistry(database, scanClock);
         List<AutomaticNationMaintenanceContext> nations = new java.util.ArrayList<>();
         int missingCapitals = 0;
         for (RegisteredNation nation
@@ -917,7 +919,12 @@ public final class CivicServerRuntime {
             TerritoryFreeAllocation allocation = allocationPolicy.calculate(
                     populations.calculate(nation.nationId(), scanTime));
             nations.add(new AutomaticNationMaintenanceContext(
-                    nation.nationId(), nation.ftbTeamId(), capital, allocation));
+                    nation.nationId(),
+                    nation.ftbTeamId(),
+                    capital,
+                    allocation,
+                    maintenance.restorationHistory(
+                            nation.nationId(), nation.ftbTeamId(), window.startsAt())));
         }
         if (missingCapitals > 0) {
             LOGGER.warn(
@@ -972,10 +979,12 @@ public final class CivicServerRuntime {
                                                 nation.nationId(),
                                                 nation.ftbTeamId(),
                                                 nation.capital(),
-                                                observed,
-                                                nation.freeAllocation(),
-                                                preparation.policy())
-                                        .stream();
+                                                 observed,
+                                                 nation.freeAllocation(),
+                                                 preparation.policy(),
+                                                 preparation.window().startsAt(),
+                                                 nation.restorationHistory())
+                                         .stream();
                             })
                             .toList();
             persistTerritoryMaintenanceAssessment(
@@ -1185,7 +1194,9 @@ public final class CivicServerRuntime {
             org.civiceconomy.nation.NationId nationId,
             UUID ftbTeamId,
             Capital capital,
-            TerritoryFreeAllocation freeAllocation) {}
+            TerritoryFreeAllocation freeAllocation,
+            Map<TerritoryClaimPosition, TerritoryMaintenanceRestorationHistory>
+                    restorationHistory) {}
 
     private record AutomaticMaintenancePreparation(
             TerritoryMaintenancePolicyVersion policy,

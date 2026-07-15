@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 39;
+    private static final int SCHEMA_VERSION = 40;
 
     private final Connection connection;
 
@@ -1814,8 +1814,10 @@ public final class CivicDatabase implements AutoCloseable {
                     PreparedStatement claimInsert = connection.prepareStatement("""
                 INSERT INTO territory_maintenance_assessment_claim (
                     cycle_id, ordinal, nation_id, ftb_team_id, dimension_id,
-                    chunk_x, chunk_z, maintenance_due_minor_units, priority
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    chunk_x, chunk_z, maintenance_due_minor_units,
+                    restoration_fee_minor_units, restoration_eligibility,
+                    restoration_cooldown_ends_at_epoch_millis, priority
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
                 insert.setString(1, cycleId.toString());
                 insert.setString(2, serviceIdentity);
@@ -1838,7 +1840,14 @@ public final class CivicDatabase implements AutoCloseable {
                     claimInsert.setInt(6, claim.chunkX());
                     claimInsert.setInt(7, claim.chunkZ());
                     claimInsert.setLong(8, claim.maintenanceDueMinorUnits());
-                    claimInsert.setString(9, claim.priority());
+                    claimInsert.setLong(9, claim.restorationFeeMinorUnits());
+                    claimInsert.setString(10, claim.restorationEligibility());
+                    if (claim.restorationCooldownEndsAtEpochMillis() == null) {
+                        claimInsert.setNull(11, java.sql.Types.INTEGER);
+                    } else {
+                        claimInsert.setLong(11, claim.restorationCooldownEndsAtEpochMillis());
+                    }
+                    claimInsert.setString(12, claim.priority());
                     claimInsert.addBatch();
                 }
                 claimInsert.executeBatch();
@@ -1881,6 +1890,11 @@ public final class CivicDatabase implements AutoCloseable {
                             result.getInt("chunk_x"),
                             result.getInt("chunk_z"),
                             result.getLong("maintenance_due_minor_units"),
+                            result.getLong("restoration_fee_minor_units"),
+                            result.getString("restoration_eligibility"),
+                            result.getObject("restoration_cooldown_ends_at_epoch_millis") == null
+                                    ? null
+                                    : result.getLong("restoration_cooldown_ends_at_epoch_millis"),
                             result.getString("priority")));
                 }
             }
@@ -1943,6 +1957,42 @@ public final class CivicDatabase implements AutoCloseable {
             String priority,
             String reason,
             long assessedAtEpochMillis) {
+        return assessTerritoryFiscalValidity(
+                assessmentId,
+                serviceIdentity,
+                requestId,
+                cycleId,
+                nationId,
+                ftbTeamId,
+                dimensionId,
+                chunkX,
+                chunkZ,
+                maintenanceDueMinorUnits,
+                0L,
+                "NOT_REQUIRED",
+                null,
+                priority,
+                reason,
+                assessedAtEpochMillis);
+    }
+
+    public synchronized StoredTerritoryFiscalAssessment assessTerritoryFiscalValidity(
+            UUID assessmentId,
+            String serviceIdentity,
+            String requestId,
+            UUID cycleId,
+            UUID nationId,
+            UUID ftbTeamId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ,
+            long maintenanceDueMinorUnits,
+            long restorationFeeMinorUnits,
+            String restorationEligibility,
+            Long restorationCooldownEndsAtEpochMillis,
+            String priority,
+            String reason,
+            long assessedAtEpochMillis) {
         StoredTerritoryFiscalAssessment replay = territoryFiscalAssessment(serviceIdentity, requestId);
         if (replay != null) {
             return replay;
@@ -1951,8 +2001,10 @@ public final class CivicDatabase implements AutoCloseable {
                 INSERT INTO territory_fiscal_assessment (
                     assessment_id, service_identity, request_id, cycle_id,
                     nation_id, ftb_team_id, dimension_id, chunk_x, chunk_z,
-                    maintenance_due_minor_units, priority, validity, reason, assessed_at_epoch_millis
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    maintenance_due_minor_units, restoration_fee_minor_units,
+                    restoration_eligibility, restoration_cooldown_ends_at_epoch_millis,
+                    priority, validity, reason, assessed_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             insert.setString(1, assessmentId.toString());
             insert.setString(2, serviceIdentity);
@@ -1964,10 +2016,17 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setInt(8, chunkX);
             insert.setInt(9, chunkZ);
             insert.setLong(10, maintenanceDueMinorUnits);
-            insert.setString(11, priority);
-            insert.setString(12, "PENDING");
-            insert.setString(13, reason);
-            insert.setLong(14, assessedAtEpochMillis);
+            insert.setLong(11, restorationFeeMinorUnits);
+            insert.setString(12, restorationEligibility);
+            if (restorationCooldownEndsAtEpochMillis == null) {
+                insert.setNull(13, java.sql.Types.INTEGER);
+            } else {
+                insert.setLong(13, restorationCooldownEndsAtEpochMillis);
+            }
+            insert.setString(14, priority);
+            insert.setString(15, "PENDING");
+            insert.setString(16, reason);
+            insert.setLong(17, assessedAtEpochMillis);
             insert.executeUpdate();
             return territoryFiscalAssessment(serviceIdentity, requestId);
         } catch (SQLException failure) {
@@ -1977,7 +2036,9 @@ public final class CivicDatabase implements AutoCloseable {
 
     public synchronized long territoryMaintenanceDueMinorUnits(UUID cycleId, UUID nationId) {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT COALESCE(SUM(maintenance_due_minor_units), 0)
+                SELECT COALESCE(SUM(
+                    maintenance_due_minor_units + restoration_fee_minor_units
+                ), 0)
                 FROM territory_fiscal_assessment
                 WHERE cycle_id = ? AND nation_id = ?
                 """)) {
@@ -2010,6 +2071,76 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to list pending Territory Fiscal Assessments", failure);
+        }
+    }
+
+    public synchronized List<StoredTerritoryMaintenanceRestorationHistory>
+            territoryMaintenanceRestorationHistory(
+                    UUID nationId, UUID ftbTeamId, long beforeEpochMillis) {
+        List<StoredTerritoryMaintenanceRestorationHistory> history = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                WITH ranked AS (
+                    SELECT assessment.*,
+                           cycle.ends_at_epoch_millis,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY assessment.dimension_id,
+                                            assessment.chunk_x,
+                                            assessment.chunk_z
+                               ORDER BY cycle.ends_at_epoch_millis DESC,
+                                        assessment.assessed_at_epoch_millis DESC,
+                                        assessment.assessment_id DESC
+                           ) AS conclusion_rank
+                    FROM territory_fiscal_assessment assessment
+                    JOIN territory_maintenance_cycle cycle
+                      ON cycle.cycle_id = assessment.cycle_id
+                    WHERE assessment.nation_id = ?
+                      AND assessment.ftb_team_id = ?
+                      AND cycle.ends_at_epoch_millis <= ?
+                      AND assessment.validity IN ('EFFECTIVE', 'SUSPENDED')
+                )
+                SELECT latest.nation_id, latest.ftb_team_id,
+                       latest.dimension_id, latest.chunk_x, latest.chunk_z,
+                       latest.validity,
+                       (
+                           SELECT MAX(restored.restoration_cooldown_ends_at_epoch_millis)
+                           FROM territory_fiscal_assessment restored
+                           JOIN territory_maintenance_cycle restored_cycle
+                             ON restored_cycle.cycle_id = restored.cycle_id
+                           WHERE restored.nation_id = latest.nation_id
+                             AND restored.ftb_team_id = latest.ftb_team_id
+                             AND restored.dimension_id = latest.dimension_id
+                             AND restored.chunk_x = latest.chunk_x
+                             AND restored.chunk_z = latest.chunk_z
+                             AND restored_cycle.ends_at_epoch_millis <= ?
+                             AND restored.validity = 'EFFECTIVE'
+                             AND restored.restoration_eligibility = 'ELIGIBLE'
+                       ) AS last_restoration_cooldown
+                FROM ranked latest
+                WHERE latest.conclusion_rank = 1
+                ORDER BY latest.dimension_id, latest.chunk_x, latest.chunk_z
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setString(2, ftbTeamId.toString());
+            query.setLong(3, beforeEpochMillis);
+            query.setLong(4, beforeEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    history.add(new StoredTerritoryMaintenanceRestorationHistory(
+                            UUID.fromString(result.getString("nation_id")),
+                            UUID.fromString(result.getString("ftb_team_id")),
+                            result.getString("dimension_id"),
+                            result.getInt("chunk_x"),
+                            result.getInt("chunk_z"),
+                            result.getString("validity"),
+                            result.getObject("last_restoration_cooldown") == null
+                                    ? null
+                                    : result.getLong("last_restoration_cooldown")));
+                }
+            }
+            return List.copyOf(history);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance Restoration history", failure);
         }
     }
 
@@ -2113,7 +2244,10 @@ public final class CivicDatabase implements AutoCloseable {
                             assessment.dimensionId(),
                             assessment.chunkX(),
                             assessment.chunkZ(),
-                            MoneyAmount.ofMinorUnits(assessment.maintenanceDueMinorUnits())))
+                            MoneyAmount.ofMinorUnits(Math.addExact(
+                                    assessment.maintenanceDueMinorUnits(),
+                                    assessment.restorationFeeMinorUnits())),
+                            !assessment.restorationEligibility().equals("COOLDOWN_BLOCKED")))
                     .toList();
             TerritoryMaintenancePriorityDecision expected =
                     new TerritoryMaintenancePriorityPolicy().select(
@@ -2312,7 +2446,10 @@ public final class CivicDatabase implements AutoCloseable {
                             assessment.dimensionId(),
                             assessment.chunkX(),
                             assessment.chunkZ(),
-                            MoneyAmount.ofMinorUnits(assessment.maintenanceDueMinorUnits())))
+                            MoneyAmount.ofMinorUnits(Math.addExact(
+                                    assessment.maintenanceDueMinorUnits(),
+                                    assessment.restorationFeeMinorUnits())),
+                            !assessment.restorationEligibility().equals("COOLDOWN_BLOCKED")))
                     .toList();
             TerritoryMaintenancePriorityDecision decision =
                     new TerritoryMaintenancePriorityPolicy().select(candidates, MoneyAmount.ZERO);
@@ -6250,6 +6387,45 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 39");
             }
+            if (version < 40) {
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_assessment_claim
+                        ADD COLUMN restoration_fee_minor_units INTEGER NOT NULL DEFAULT 0
+                        CHECK (restoration_fee_minor_units >= 0)
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_assessment_claim
+                        ADD COLUMN restoration_eligibility TEXT NOT NULL DEFAULT 'NOT_REQUIRED'
+                        CHECK (restoration_eligibility IN (
+                            'NOT_REQUIRED', 'ELIGIBLE', 'COOLDOWN_BLOCKED'
+                        ))
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_maintenance_assessment_claim
+                        ADD COLUMN restoration_cooldown_ends_at_epoch_millis INTEGER
+                        CHECK (restoration_cooldown_ends_at_epoch_millis IS NULL
+                            OR restoration_cooldown_ends_at_epoch_millis >= 0)
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_fiscal_assessment
+                        ADD COLUMN restoration_fee_minor_units INTEGER NOT NULL DEFAULT 0
+                        CHECK (restoration_fee_minor_units >= 0)
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_fiscal_assessment
+                        ADD COLUMN restoration_eligibility TEXT NOT NULL DEFAULT 'NOT_REQUIRED'
+                        CHECK (restoration_eligibility IN (
+                            'NOT_REQUIRED', 'ELIGIBLE', 'COOLDOWN_BLOCKED'
+                        ))
+                        """);
+                statement.execute("""
+                        ALTER TABLE territory_fiscal_assessment
+                        ADD COLUMN restoration_cooldown_ends_at_epoch_millis INTEGER
+                        CHECK (restoration_cooldown_ends_at_epoch_millis IS NULL
+                            OR restoration_cooldown_ends_at_epoch_millis >= 0)
+                        """);
+                statement.execute("PRAGMA user_version = 40");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -6410,6 +6586,11 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getInt("chunk_x"),
                 result.getInt("chunk_z"),
                 result.getLong("maintenance_due_minor_units"),
+                result.getLong("restoration_fee_minor_units"),
+                result.getString("restoration_eligibility"),
+                result.getObject("restoration_cooldown_ends_at_epoch_millis") == null
+                        ? null
+                        : result.getLong("restoration_cooldown_ends_at_epoch_millis"),
                 result.getString("priority"),
                 result.getString("validity"),
                 result.getString("reason"),

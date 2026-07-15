@@ -32,7 +32,9 @@ public final class TerritoryMaintenancePriorityPolicy {
         MoneyAmount remaining = available;
         boolean budgetExhausted = false;
         for (TerritoryMaintenanceCandidate candidate : ordered) {
-            if ((budgetExhausted && !candidate.maintenanceDue().equals(MoneyAmount.ZERO))
+            if (!candidate.fundingEligible()) {
+                suspended.add(candidate);
+            } else if ((budgetExhausted && !candidate.maintenanceDue().equals(MoneyAmount.ZERO))
                     || candidate.maintenanceDue().minorUnits() > remaining.minorUnits()) {
                 budgetExhausted = true;
                 suspended.add(candidate);

@@ -7,6 +7,8 @@ import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.IdempotencyConflictException;
 import org.civiceconomy.fiscal.ServiceIdentity;
@@ -131,6 +133,55 @@ class TerritoryMaintenanceAssessmentProcessorTest {
     }
 
     @Test
+    void persistedSnapshotAndAssessmentPreserveRestorationProvenance() {
+        Instant cooldownEndsAt = END.plusSeconds(86_400L);
+        TerritoryMaintenanceClaimSnapshot restoration =
+                new TerritoryMaintenanceClaimSnapshot(
+                        NATION,
+                        TEAM,
+                        "minecraft:overworld",
+                        0,
+                        0,
+                        100L,
+                        30L,
+                        TerritoryMaintenanceRestorationEligibility.ELIGIBLE,
+                        Optional.of(cooldownEndsAt),
+                        TerritoryMaintenancePriority.CAPITAL);
+
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryFiscalAssessment assessment =
+                    processor(database).assess(request(List.of(restoration)))
+                            .assessments()
+                            .getFirst();
+
+            assertEquals(100L, assessment.maintenanceDue().minorUnits());
+            assertEquals(30L, assessment.restorationFee().minorUnits());
+            assertEquals(130L, assessment.totalDue().minorUnits());
+            assertEquals(
+                    TerritoryMaintenanceRestorationEligibility.ELIGIBLE,
+                    assessment.restorationEligibility());
+            assertEquals(Optional.of(cooldownEndsAt), assessment.restorationCooldownEndsAt());
+        }
+
+        try (CivicDatabase database = database()) {
+            TerritoryMaintenanceClaimSnapshot replay =
+                    new TerritoryMaintenanceRegistry(database)
+                            .assessmentBatchClaims(
+                                    database.territoryMaintenanceCycle(
+                                                    SERVICE.value(),
+                                                    "maintenance-2026-09:cycle")
+                                            .cycleId())
+                            .getFirst();
+            assertEquals(30L, replay.restorationFeeMinorUnits());
+            assertEquals(
+                    TerritoryMaintenanceRestorationEligibility.ELIGIBLE,
+                    replay.restorationEligibility());
+            assertEquals(Optional.of(cooldownEndsAt), replay.restorationCooldownEndsAt());
+        }
+    }
+
+    @Test
     void directReplayFailsClosedWhenPersistedClaimSnapshotIsMissing() throws Exception {
         Path databaseFile = databaseFile();
         try (CivicDatabase database = database()) {
@@ -147,6 +198,126 @@ class TerritoryMaintenanceAssessmentProcessorTest {
             assertThrows(
                     IllegalStateException.class,
                     () -> processor(database).assess(request(List.of(capitalClaim()))));
+        }
+    }
+
+    @Test
+    void restorationHistoryUsesTheLatestExactTeamOwnedClaimConclusion() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceAssessmentBatch batch =
+                    processor(database).assess(request(List.of(capitalClaim())));
+            new TerritoryMaintenanceRegistry(database).suspend(
+                    new SuspendTerritoryMaintenance(
+                            SERVICE,
+                            "maintenance-2026-09:unfunded",
+                            batch.cycle().cycleId(),
+                            NATION,
+                            "No available maintenance funds"));
+
+            Map<TerritoryClaimPosition, TerritoryMaintenanceRestorationHistory> history =
+                    new TerritoryMaintenanceRegistry(database).restorationHistory(
+                            NATION, TEAM, END.plusSeconds(1));
+
+            assertEquals(
+                    new TerritoryMaintenanceRestorationHistory(true, Optional.empty()),
+                    history.get(new TerritoryClaimPosition("minecraft:overworld", 0, 0)));
+            assertEquals(
+                    Map.of(),
+                    new TerritoryMaintenanceRegistry(database).restorationHistory(
+                            NATION, UUID.randomUUID(), END.plusSeconds(1)));
+        }
+    }
+
+    @Test
+    void successfulRestorationCooldownSurvivesALaterSuspension() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            Instant firstStart = Instant.ofEpochMilli(10_000L);
+            Instant firstEnd = Instant.ofEpochMilli(20_000L);
+            TerritoryMaintenanceCycle first = registry.openCycle(
+                    new OpenTerritoryMaintenanceCycle(
+                            SERVICE, "history-first", firstStart, firstEnd));
+            registry.assess(new AssessTerritoryFiscalValidity(
+                    SERVICE,
+                    "history-first-assessment",
+                    first.cycleId(),
+                    NATION,
+                    TEAM,
+                    "minecraft:overworld",
+                    0,
+                    0,
+                    1L,
+                    TerritoryMaintenancePriority.CAPITAL,
+                    "Initial suspension"));
+            registry.suspend(new SuspendTerritoryMaintenance(
+                    SERVICE,
+                    "history-first-settlement",
+                    first.cycleId(),
+                    NATION,
+                    "Initial suspension"));
+
+            Instant cooldownEndsAt = Instant.ofEpochMilli(50_000L);
+            TerritoryMaintenanceCycle restored = registry.openCycle(
+                    new OpenTerritoryMaintenanceCycle(
+                            SERVICE,
+                            "history-restored",
+                            firstEnd,
+                            Instant.ofEpochMilli(30_000L)));
+            registry.assess(new AssessTerritoryFiscalValidity(
+                    SERVICE,
+                    "history-restored-assessment",
+                    restored.cycleId(),
+                    NATION,
+                    TEAM,
+                    "minecraft:overworld",
+                    0,
+                    0,
+                    0L,
+                    0L,
+                    TerritoryMaintenanceRestorationEligibility.ELIGIBLE,
+                    Optional.of(cooldownEndsAt),
+                    TerritoryMaintenancePriority.CAPITAL,
+                    "Successful Restoration"));
+            registry.settleZeroCostAssessments(new SuspendTerritoryMaintenance(
+                    SERVICE,
+                    "history-restored-settlement",
+                    restored.cycleId(),
+                    NATION,
+                    "Successful Restoration"));
+
+            TerritoryMaintenanceCycle suspendedAgain = registry.openCycle(
+                    new OpenTerritoryMaintenanceCycle(
+                            SERVICE,
+                            "history-suspended-again",
+                            Instant.ofEpochMilli(30_000L),
+                            Instant.ofEpochMilli(40_000L)));
+            registry.assess(new AssessTerritoryFiscalValidity(
+                    SERVICE,
+                    "history-suspended-again-assessment",
+                    suspendedAgain.cycleId(),
+                    NATION,
+                    TEAM,
+                    "minecraft:overworld",
+                    0,
+                    0,
+                    1L,
+                    TerritoryMaintenancePriority.CAPITAL,
+                    "Suspended again"));
+            registry.suspend(new SuspendTerritoryMaintenance(
+                    SERVICE,
+                    "history-suspended-again-settlement",
+                    suspendedAgain.cycleId(),
+                    NATION,
+                    "Suspended again"));
+
+            assertEquals(
+                    new TerritoryMaintenanceRestorationHistory(
+                            true, Optional.of(cooldownEndsAt)),
+                    registry.restorationHistory(
+                                    NATION, TEAM, Instant.ofEpochMilli(45_000L))
+                            .get(new TerritoryClaimPosition("minecraft:overworld", 0, 0)));
         }
     }
 

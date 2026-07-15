@@ -109,6 +109,9 @@ public final class TerritoryMaintenanceAssessmentProcessor {
                         claim.chunkX(),
                         claim.chunkZ(),
                         claim.maintenanceDueMinorUnits(),
+                        claim.restorationFeeMinorUnits(),
+                        claim.restorationEligibility(),
+                        claim.restorationCooldownEndsAt(),
                         claim.priority(),
                         reason)))
                 .toList();
@@ -124,6 +127,16 @@ public final class TerritoryMaintenanceAssessmentProcessor {
                 update(digest, Integer.toString(claim.chunkX()));
                 update(digest, Integer.toString(claim.chunkZ()));
                 update(digest, Long.toString(claim.maintenanceDueMinorUnits()));
+                if (claim.restorationEligibility()
+                        != TerritoryMaintenanceRestorationEligibility.NOT_REQUIRED) {
+                    update(digest, Long.toString(claim.restorationFeeMinorUnits()));
+                    update(digest, claim.restorationEligibility().name());
+                    update(
+                            digest,
+                            claim.restorationCooldownEndsAt()
+                                    .map(value -> Long.toString(value.toEpochMilli()))
+                                    .orElse(""));
+                }
                 update(digest, claim.priority().name());
             }
             return java.util.HexFormat.of().formatHex(digest.digest());

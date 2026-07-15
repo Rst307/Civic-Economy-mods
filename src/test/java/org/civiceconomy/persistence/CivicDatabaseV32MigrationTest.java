@@ -36,6 +36,9 @@ class CivicDatabaseV32MigrationTest {
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
             statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN priority");
+            statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_cooldown_ends_at_epoch_millis");
+            statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_eligibility");
+            statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_fee_minor_units");
             statement.execute("DROP TABLE territory_maintenance_policy");
             statement.execute("DROP TABLE territory_maintenance_assessment_claim");
             statement.execute("DROP TABLE territory_maintenance_assessment_batch");
@@ -68,7 +71,7 @@ class CivicDatabaseV32MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(39, migrated.schemaVersion());
+            assertEquals(40, migrated.schemaVersion());
             assertEquals(
                     "ORDINARY",
                     migrated.territoryFiscalAssessment("migration", "assessment").priority());

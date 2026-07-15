@@ -3,6 +3,7 @@ package org.civiceconomy.territory;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.time.Instant;
 import java.util.UUID;
 import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.NationId;
@@ -30,12 +31,37 @@ public final class TerritoryMaintenanceAssessmentPlanner {
             List<TerritoryMaintenanceObservedClaim> claims,
             TerritoryFreeAllocation freeAllocation,
             TerritoryMaintenancePolicyVersion policy) {
+        return plan(
+                nationId,
+                ftbTeamId,
+                capital,
+                claims,
+                freeAllocation,
+                policy,
+                policy.effectiveAt(),
+                Map.of());
+    }
+
+    public List<TerritoryMaintenanceClaimSnapshot> plan(
+            NationId nationId,
+            UUID ftbTeamId,
+            Capital capital,
+            List<TerritoryMaintenanceObservedClaim> claims,
+            TerritoryFreeAllocation freeAllocation,
+            TerritoryMaintenancePolicyVersion policy,
+            Instant cycleStartsAt,
+            Map<TerritoryClaimPosition, TerritoryMaintenanceRestorationHistory>
+                    restorationHistory) {
         if (nationId == null
                 || ftbTeamId == null
                 || capital == null
                 || claims == null
                 || freeAllocation == null
                 || policy == null
+                || cycleStartsAt == null
+                || restorationHistory == null
+                || restorationHistory.entrySet().stream()
+                        .anyMatch(entry -> entry.getKey() == null || entry.getValue() == null)
                 || claims.stream().anyMatch(java.util.Objects::isNull)) {
             throw new IllegalArgumentException(
                     "Territory Maintenance Assessment planning cannot contain null values");
@@ -64,7 +90,9 @@ public final class TerritoryMaintenanceAssessmentPlanner {
                         ordered.get(index),
                         priorities.get(ordered.get(index).position()),
                         index < freeClaims,
-                        policy))
+                        policy,
+                        cycleStartsAt,
+                        restorationHistory.get(ordered.get(index).position())))
                 .toList();
     }
 
@@ -74,7 +102,9 @@ public final class TerritoryMaintenanceAssessmentPlanner {
             TerritoryMaintenanceObservedClaim claim,
             TerritoryMaintenancePriority priority,
             boolean free,
-            TerritoryMaintenancePolicyVersion policy) {
+            TerritoryMaintenancePolicyVersion policy,
+            Instant cycleStartsAt,
+            TerritoryMaintenanceRestorationHistory restorationHistory) {
         long due = free ? 0L : policy.baseMaintenancePerChargeableClaimMinorUnits();
         if (!free && priority == TerritoryMaintenancePriority.ENCLAVE_OR_CROSS_DIMENSION) {
             due = multiplyBasisPoints(
@@ -84,6 +114,24 @@ public final class TerritoryMaintenanceAssessmentPlanner {
             due = Math.addExact(due, policy.forceLoadSurchargeMinorUnits());
         }
         TerritoryClaimPosition position = claim.position();
+        long restorationFee = 0L;
+        TerritoryMaintenanceRestorationEligibility restorationEligibility =
+                TerritoryMaintenanceRestorationEligibility.NOT_REQUIRED;
+        java.util.Optional<Instant> restorationCooldownEndsAt = java.util.Optional.empty();
+        if (restorationHistory != null && restorationHistory.previouslySuspended()) {
+            java.util.Optional<Instant> activeCooldown = restorationHistory.cooldownEndsAt()
+                    .filter(eligibleAt -> cycleStartsAt.isBefore(eligibleAt));
+            if (activeCooldown.isPresent()) {
+                restorationEligibility =
+                        TerritoryMaintenanceRestorationEligibility.COOLDOWN_BLOCKED;
+                restorationCooldownEndsAt = activeCooldown;
+            } else {
+                restorationEligibility = TerritoryMaintenanceRestorationEligibility.ELIGIBLE;
+                restorationFee = policy.restorationFeeMinorUnits();
+                restorationCooldownEndsAt =
+                        java.util.Optional.of(cycleStartsAt.plus(policy.restorationCooldown()));
+            }
+        }
         return new TerritoryMaintenanceClaimSnapshot(
                 nationId,
                 ftbTeamId,
@@ -91,6 +139,9 @@ public final class TerritoryMaintenanceAssessmentPlanner {
                 position.chunkX(),
                 position.chunkZ(),
                 due,
+                restorationFee,
+                restorationEligibility,
+                restorationCooldownEndsAt,
                 priority);
     }
 

@@ -9,7 +9,8 @@ public record TerritoryMaintenanceCandidate(
         String dimensionId,
         int chunkX,
         int chunkZ,
-        MoneyAmount maintenanceDue) {
+        MoneyAmount maintenanceDue,
+        boolean fundingEligible) {
     public TerritoryMaintenanceCandidate {
         if (assessmentId == null || priority == null || maintenanceDue == null) {
             throw new IllegalArgumentException(
@@ -19,5 +20,15 @@ public record TerritoryMaintenanceCandidate(
             throw new IllegalArgumentException(
                     "Territory Maintenance candidate dimension cannot be blank");
         }
+    }
+
+    public TerritoryMaintenanceCandidate(
+            UUID assessmentId,
+            TerritoryMaintenancePriority priority,
+            String dimensionId,
+            int chunkX,
+            int chunkZ,
+            MoneyAmount maintenanceDue) {
+        this(assessmentId, priority, dimensionId, chunkX, chunkZ, maintenanceDue, true);
     }
 }

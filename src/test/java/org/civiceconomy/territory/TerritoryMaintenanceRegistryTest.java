@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.NationId;
@@ -469,6 +470,112 @@ class TerritoryMaintenanceRegistryTest {
                     null,
                     database.territoryMaintenanceSettlement(
                             "civiceconomy-territory", "forged-settlement"));
+        }
+    }
+
+    @Test
+    void settlementCannotReactivateCooldownBlockedRestorationEvenWithFunds() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle cycle = registry.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "cycle-restoration-cooldown",
+                    START,
+                    END));
+            TerritoryFiscalAssessment blockedCapital = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "blocked-capital",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            0,
+                            0,
+                            100L,
+                            0L,
+                            TerritoryMaintenanceRestorationEligibility.COOLDOWN_BLOCKED,
+                            Optional.of(END.plusSeconds(86_400L)),
+                            TerritoryMaintenancePriority.CAPITAL,
+                            "Capital restoration is cooling down"));
+            TerritoryFiscalAssessment ordinary = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "cooldown-ordinary",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            9,
+                            0,
+                            50L,
+                            TerritoryMaintenancePriority.ORDINARY,
+                            "Ordinary claim"));
+            SettlementEvidence evidence = committedSettlementEvidence(
+                    database, cycle.cycleId(), "cooldown", 50L, 20L, 30L);
+
+            TerritoryMaintenanceSettlement settlement = registry.confirmSettlement(
+                    new ConfirmTerritoryMaintenanceSettlement(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "cooldown-settlement",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            evidence.reservationId(),
+                            evidence.publicFundPaymentId(),
+                            evidence.destructionOperationId(),
+                            "Respect Restoration cooldown"));
+
+            assertEquals(List.of(ordinary.assessmentId()), settlement.fundedAssessmentIds());
+            assertEquals(
+                    List.of(blockedCapital.assessmentId()),
+                    settlement.suspendedAssessmentIds());
+        }
+    }
+
+    @Test
+    void eligibleRestorationRequiresExactFeePlusCurrentCycleMaintenance() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TerritoryMaintenanceRegistry registry = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle cycle = registry.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "cycle-restoration-eligible",
+                    START,
+                    END));
+            TerritoryFiscalAssessment restoration = registry.assess(
+                    new AssessTerritoryFiscalValidity(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "eligible-restoration",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            TEAM_ID,
+                            "minecraft:overworld",
+                            0,
+                            0,
+                            100L,
+                            30L,
+                            TerritoryMaintenanceRestorationEligibility.ELIGIBLE,
+                            Optional.of(END.plusSeconds(86_400L)),
+                            TerritoryMaintenancePriority.CAPITAL,
+                            "Restore Capital"));
+            SettlementEvidence evidence = committedSettlementEvidence(
+                    database, cycle.cycleId(), "eligible-restoration", 130L, 52L, 78L);
+
+            TerritoryMaintenanceSettlement settlement = registry.confirmSettlement(
+                    new ConfirmTerritoryMaintenanceSettlement(
+                            new ServiceIdentity("civiceconomy-territory"),
+                            "eligible-restoration-settlement",
+                            cycle.cycleId(),
+                            NATION_ID,
+                            evidence.reservationId(),
+                            evidence.publicFundPaymentId(),
+                            evidence.destructionOperationId(),
+                            "Restore Capital"));
+
+            assertEquals(TerritoryMaintenanceSettlementOutcome.FULLY_FUNDED, settlement.outcome());
+            assertEquals(List.of(restoration.assessmentId()), settlement.fundedAssessmentIds());
+            assertEquals(130L, restoration.totalDue().minorUnits());
         }
     }
 

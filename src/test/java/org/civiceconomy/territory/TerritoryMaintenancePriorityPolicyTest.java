@@ -102,6 +102,33 @@ class TerritoryMaintenancePriorityPolicyTest {
         assertEquals(MoneyAmount.ZERO, decision.unspentAmount());
     }
 
+    @Test
+    void cooldownBlockedRestorationCannotConsumeFundsOrActivate() {
+        TerritoryMaintenanceCandidate blockedCapital = new TerritoryMaintenanceCandidate(
+                UUID.fromString("b0000000-0000-0000-0000-000000000009"),
+                TerritoryMaintenancePriority.CAPITAL,
+                "minecraft:overworld",
+                0,
+                0,
+                MoneyAmount.ofMinorUnits(130L),
+                false);
+        TerritoryMaintenanceCandidate ordinary = candidate(
+                "b0000000-0000-0000-0000-000000000010",
+                TerritoryMaintenancePriority.ORDINARY,
+                "minecraft:overworld",
+                3,
+                0,
+                50L);
+
+        TerritoryMaintenancePriorityDecision decision =
+                new TerritoryMaintenancePriorityPolicy().select(
+                        List.of(blockedCapital, ordinary), MoneyAmount.ofMinorUnits(50L));
+
+        assertEquals(List.of(ordinary), decision.funded());
+        assertEquals(List.of(blockedCapital), decision.suspended());
+        assertEquals(MoneyAmount.ofMinorUnits(50L), decision.fundedAmount());
+    }
+
     private static TerritoryMaintenanceCandidate candidate(
             String assessmentId,
             TerritoryMaintenancePriority priority,
