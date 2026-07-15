@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 42;
+    private static final int SCHEMA_VERSION = 43;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2101,20 +2101,41 @@ public final class CivicDatabase implements AutoCloseable {
                 )
                 SELECT latest.nation_id, latest.ftb_team_id,
                        latest.dimension_id, latest.chunk_x, latest.chunk_z,
-                       latest.validity,
+                       CASE WHEN EXISTS (
+                           SELECT 1
+                           FROM territory_maintenance_restoration restoration
+                           WHERE restoration.source_suspended_assessment_id =
+                                   latest.assessment_id
+                             AND restoration.state = 'CIVIC_COMMITTED'
+                             AND restoration.committed_at_epoch_millis <= ?
+                       ) THEN 'EFFECTIVE' ELSE latest.validity END AS validity,
                        (
-                           SELECT MAX(restored.restoration_cooldown_ends_at_epoch_millis)
-                           FROM territory_fiscal_assessment restored
-                           JOIN territory_maintenance_cycle restored_cycle
-                             ON restored_cycle.cycle_id = restored.cycle_id
-                           WHERE restored.nation_id = latest.nation_id
-                             AND restored.ftb_team_id = latest.ftb_team_id
-                             AND restored.dimension_id = latest.dimension_id
-                             AND restored.chunk_x = latest.chunk_x
-                             AND restored.chunk_z = latest.chunk_z
-                             AND restored_cycle.ends_at_epoch_millis <= ?
-                             AND restored.validity = 'EFFECTIVE'
-                             AND restored.restoration_eligibility = 'ELIGIBLE'
+                           SELECT MAX(cooldown_ends_at_epoch_millis)
+                           FROM (
+                               SELECT restored.restoration_cooldown_ends_at_epoch_millis
+                                      AS cooldown_ends_at_epoch_millis
+                               FROM territory_fiscal_assessment restored
+                               JOIN territory_maintenance_cycle restored_cycle
+                                 ON restored_cycle.cycle_id = restored.cycle_id
+                               WHERE restored.nation_id = latest.nation_id
+                                 AND restored.ftb_team_id = latest.ftb_team_id
+                                 AND restored.dimension_id = latest.dimension_id
+                                 AND restored.chunk_x = latest.chunk_x
+                                 AND restored.chunk_z = latest.chunk_z
+                                 AND restored_cycle.ends_at_epoch_millis <= ?
+                                 AND restored.validity = 'EFFECTIVE'
+                                 AND restored.restoration_eligibility = 'ELIGIBLE'
+                               UNION ALL
+                               SELECT restoration.cooldown_ends_at_epoch_millis
+                               FROM territory_maintenance_restoration restoration
+                               WHERE restoration.nation_id = latest.nation_id
+                                 AND restoration.ftb_team_id = latest.ftb_team_id
+                                 AND restoration.dimension_id = latest.dimension_id
+                                 AND restoration.chunk_x = latest.chunk_x
+                                 AND restoration.chunk_z = latest.chunk_z
+                                 AND restoration.state = 'CIVIC_COMMITTED'
+                                 AND restoration.committed_at_epoch_millis <= ?
+                           )
                        ) AS last_restoration_cooldown
                 FROM ranked latest
                 WHERE latest.conclusion_rank = 1
@@ -2124,6 +2145,8 @@ public final class CivicDatabase implements AutoCloseable {
             query.setString(2, ftbTeamId.toString());
             query.setLong(3, beforeEpochMillis);
             query.setLong(4, beforeEpochMillis);
+            query.setLong(5, beforeEpochMillis);
+            query.setLong(6, beforeEpochMillis);
             try (ResultSet result = query.executeQuery()) {
                 while (result.next()) {
                     history.add(new StoredTerritoryMaintenanceRestorationHistory(
@@ -2515,6 +2538,305 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredTerritoryMaintenanceRestoration
+            prepareTerritoryMaintenanceRestoration(
+                    UUID restorationId,
+                    String serviceIdentity,
+                    String requestId,
+                    UUID nationId,
+                    UUID ftbTeamId,
+                    UUID actorPlayerId,
+                    String dimensionId,
+                    int chunkX,
+                    int chunkZ,
+                    UUID policyId,
+                    long nextFullCycleStartsAtEpochMillis,
+                    long nextCyclePrepaymentMinorUnits,
+                    long restorationFeeMinorUnits,
+                    long totalDueMinorUnits,
+                    long cooldownEndsAtEpochMillis,
+                    int destructionBasisPoints,
+                    String reason,
+                    long preparedAtEpochMillis) {
+        StoredTerritoryMaintenanceRestoration replay =
+                territoryMaintenanceRestoration(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_maintenance_restoration (
+                    restoration_id, service_identity, request_id, nation_id,
+                    ftb_team_id, actor_player_id, dimension_id, chunk_x, chunk_z,
+                    source_suspended_assessment_id, policy_id,
+                    next_full_cycle_starts_at_epoch_millis,
+                    next_cycle_prepayment_minor_units, restoration_fee_minor_units,
+                    total_due_minor_units, remaining_next_cycle_credit_minor_units,
+                    cooldown_ends_at_epoch_millis, destruction_basis_points,
+                    state, reason, prepared_at_epoch_millis
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, assessment.assessment_id, ?,
+                       ?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?, ?
+                FROM territory_fiscal_assessment assessment
+                JOIN territory_maintenance_cycle cycle
+                  ON cycle.cycle_id = assessment.cycle_id
+                WHERE assessment.service_identity = ?
+                  AND assessment.nation_id = ?
+                  AND assessment.ftb_team_id = ?
+                  AND assessment.dimension_id = ?
+                  AND assessment.chunk_x = ?
+                  AND assessment.chunk_z = ?
+                  AND assessment.validity = 'SUSPENDED'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM territory_fiscal_assessment newer
+                      JOIN territory_maintenance_cycle newer_cycle
+                        ON newer_cycle.cycle_id = newer.cycle_id
+                      WHERE newer.nation_id = assessment.nation_id
+                        AND newer.ftb_team_id = assessment.ftb_team_id
+                        AND newer.dimension_id = assessment.dimension_id
+                        AND newer.chunk_x = assessment.chunk_x
+                        AND newer.chunk_z = assessment.chunk_z
+                        AND newer.validity IN ('EFFECTIVE', 'SUSPENDED')
+                        AND (newer_cycle.ends_at_epoch_millis > cycle.ends_at_epoch_millis
+                            OR (newer_cycle.ends_at_epoch_millis = cycle.ends_at_epoch_millis
+                                AND newer.assessed_at_epoch_millis
+                                    > assessment.assessed_at_epoch_millis))
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM territory_maintenance_restoration committed
+                      WHERE committed.nation_id = assessment.nation_id
+                        AND committed.ftb_team_id = assessment.ftb_team_id
+                        AND committed.dimension_id = assessment.dimension_id
+                        AND committed.chunk_x = assessment.chunk_x
+                        AND committed.chunk_z = assessment.chunk_z
+                        AND committed.state = 'CIVIC_COMMITTED'
+                  )
+                """)) {
+            insert.setString(1, restorationId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, nationId.toString());
+            insert.setString(5, ftbTeamId.toString());
+            insert.setString(6, actorPlayerId.toString());
+            insert.setString(7, dimensionId);
+            insert.setInt(8, chunkX);
+            insert.setInt(9, chunkZ);
+            insert.setString(10, policyId.toString());
+            insert.setLong(11, nextFullCycleStartsAtEpochMillis);
+            insert.setLong(12, nextCyclePrepaymentMinorUnits);
+            insert.setLong(13, restorationFeeMinorUnits);
+            insert.setLong(14, totalDueMinorUnits);
+            insert.setLong(15, nextCyclePrepaymentMinorUnits);
+            insert.setLong(16, cooldownEndsAtEpochMillis);
+            insert.setInt(17, destructionBasisPoints);
+            insert.setString(18, reason);
+            insert.setLong(19, preparedAtEpochMillis);
+            insert.setString(20, serviceIdentity);
+            insert.setString(21, nationId.toString());
+            insert.setString(22, ftbTeamId.toString());
+            insert.setString(23, dimensionId);
+            insert.setInt(24, chunkX);
+            insert.setInt(25, chunkZ);
+            if (insert.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Territory Maintenance Restoration requires the exact latest suspended target");
+            }
+            return territoryMaintenanceRestoration(restorationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to prepare Territory Maintenance Restoration", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceRestoration
+            territoryMaintenanceRestoration(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_restoration
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryMaintenanceRestoration(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance Restoration replay", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceRestoration
+            territoryMaintenanceRestoration(UUID restorationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_maintenance_restoration WHERE restoration_id = ?
+                """)) {
+            query.setString(1, restorationId.toString());
+            return readTerritoryMaintenanceRestoration(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Maintenance Restoration", failure);
+        }
+    }
+
+    public synchronized boolean hasCommittedTerritoryMaintenanceRestoration(
+            UUID sourceSuspendedAssessmentId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1
+                FROM territory_maintenance_restoration
+                WHERE source_suspended_assessment_id = ?
+                  AND state = 'CIVIC_COMMITTED'
+                """)) {
+            query.setString(1, sourceSuspendedAssessmentId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read committed Territory Maintenance Restoration", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryMaintenanceRestoration
+            confirmTerritoryMaintenanceRestoration(
+                    UUID restorationId,
+                    String serviceIdentity,
+                    UUID reservationId,
+                    UUID publicFundPaymentId,
+                    UUID destructionOperationId,
+                    long committedAtEpochMillis) {
+        StoredTerritoryMaintenanceRestoration existing =
+                territoryMaintenanceRestoration(restorationId);
+        if (existing == null
+                || !existing.serviceIdentity().equals(serviceIdentity)) {
+            throw new SecurityException(
+                    "Territory Maintenance Restoration requires its exact service identity");
+        }
+        if (existing.state().equals("CIVIC_COMMITTED")) {
+            return existing;
+        }
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            if (existing.totalDueMinorUnits() == 0L) {
+                if (reservationId != null
+                        || publicFundPaymentId != null
+                        || destructionOperationId != null) {
+                    throw new IllegalStateException(
+                            "Zero-cost Territory Maintenance Restoration cannot cite fiscal effects");
+                }
+            } else {
+                if (reservationId == null || publicFundPaymentId == null) {
+                    throw new IllegalStateException(
+                            "Funded Territory Maintenance Restoration requires exact evidence");
+                }
+                long evidenceAmount = territoryMaintenanceSettlementEvidenceAmount(
+                        serviceIdentity,
+                        existing.nationId(),
+                        reservationId,
+                        publicFundPaymentId,
+                        destructionOperationId);
+                if (evidenceAmount != existing.totalDueMinorUnits()) {
+                    throw new IllegalStateException(
+                            "Territory Maintenance Restoration evidence must fund its exact total");
+                }
+                StoredPaymentTransaction payment = paymentTransaction(publicFundPaymentId);
+                StoredPermanentDestructionOperation destruction = destructionOperationId == null
+                        ? null
+                        : permanentDestructionOperation(destructionOperationId);
+                long expectedDestroyed = Math.multiplyExact(
+                                existing.totalDueMinorUnits(), existing.destructionBasisPoints())
+                        / 10_000L;
+                long actualDestroyed = destruction == null ? 0L : destruction.amountMinorUnits();
+                if (actualDestroyed != expectedDestroyed
+                        || payment.amountMinorUnits()
+                                != Math.subtractExact(
+                                        existing.totalDueMinorUnits(), expectedDestroyed)) {
+                    throw new IllegalStateException(
+                            "Territory Maintenance Restoration evidence uses the wrong policy split");
+                }
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE territory_maintenance_restoration AS restoration
+                    SET state = 'CIVIC_COMMITTED',
+                        reservation_id = ?,
+                        public_fund_payment_id = ?,
+                        destruction_operation_id = ?,
+                        committed_at_epoch_millis = ?
+                    WHERE restoration.restoration_id = ?
+                      AND restoration.service_identity = ?
+                      AND restoration.state = 'PREPARED'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM territory_fiscal_assessment assessment
+                          JOIN territory_maintenance_cycle cycle
+                            ON cycle.cycle_id = assessment.cycle_id
+                          WHERE assessment.assessment_id =
+                                  restoration.source_suspended_assessment_id
+                            AND assessment.service_identity = restoration.service_identity
+                            AND assessment.nation_id = restoration.nation_id
+                            AND assessment.ftb_team_id = restoration.ftb_team_id
+                            AND assessment.dimension_id = restoration.dimension_id
+                            AND assessment.chunk_x = restoration.chunk_x
+                            AND assessment.chunk_z = restoration.chunk_z
+                            AND assessment.validity = 'SUSPENDED'
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM territory_fiscal_assessment newer
+                                JOIN territory_maintenance_cycle newer_cycle
+                                  ON newer_cycle.cycle_id = newer.cycle_id
+                                WHERE newer.nation_id = assessment.nation_id
+                                  AND newer.ftb_team_id = assessment.ftb_team_id
+                                  AND newer.dimension_id = assessment.dimension_id
+                                  AND newer.chunk_x = assessment.chunk_x
+                                  AND newer.chunk_z = assessment.chunk_z
+                                  AND newer.validity IN ('EFFECTIVE', 'SUSPENDED')
+                                  AND (newer_cycle.ends_at_epoch_millis
+                                            > cycle.ends_at_epoch_millis
+                                      OR (newer_cycle.ends_at_epoch_millis
+                                                = cycle.ends_at_epoch_millis
+                                          AND newer.assessed_at_epoch_millis
+                                                > assessment.assessed_at_epoch_millis))
+                            )
+                      )
+                    """)) {
+                if (reservationId == null) {
+                    update.setNull(1, java.sql.Types.VARCHAR);
+                    update.setNull(2, java.sql.Types.VARCHAR);
+                } else {
+                    update.setString(1, reservationId.toString());
+                    update.setString(2, publicFundPaymentId.toString());
+                }
+                if (destructionOperationId == null) {
+                    update.setNull(3, java.sql.Types.VARCHAR);
+                } else {
+                    update.setString(3, destructionOperationId.toString());
+                }
+                update.setLong(4, committedAtEpochMillis);
+                update.setString(5, restorationId.toString());
+                update.setString(6, serviceIdentity);
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Territory Maintenance Restoration target changed before commit");
+                }
+            }
+            connection.commit();
+            return territoryMaintenanceRestoration(restorationId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException(
+                            "Unable to confirm Territory Maintenance Restoration", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Territory Maintenance Restoration confirmation", primaryFailure);
+        }
+    }
+
     public synchronized StoredTerritoryForceLoadEnforcement territoryForceLoadEnforcement(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -2600,6 +2922,12 @@ public final class CivicDatabase implements AutoCloseable {
                 FROM concluded
                 WHERE current_rank = 1
                   AND validity = 'SUSPENDED'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM territory_maintenance_restoration restoration
+                      WHERE restoration.source_suspended_assessment_id = assessment_id
+                        AND restoration.state = 'CIVIC_COMMITTED'
+                  )
                   AND ends_at_epoch_millis <= 9223372036854775807 - ?
                   AND ends_at_epoch_millis + ? <= ?
                 ORDER BY ftb_team_id, dimension_id, chunk_x, chunk_z, assessment_id
@@ -6731,6 +7059,84 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 42");
             }
+            if (version < 43) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS territory_maintenance_restoration (
+                            restoration_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ftb_team_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            source_suspended_assessment_id TEXT NOT NULL UNIQUE
+                                REFERENCES territory_fiscal_assessment(assessment_id),
+                            policy_id TEXT NOT NULL
+                                REFERENCES territory_maintenance_policy(policy_id),
+                            next_full_cycle_starts_at_epoch_millis INTEGER NOT NULL
+                                CHECK (next_full_cycle_starts_at_epoch_millis >= 0),
+                            next_cycle_prepayment_minor_units INTEGER NOT NULL
+                                CHECK (next_cycle_prepayment_minor_units >= 0),
+                            restoration_fee_minor_units INTEGER NOT NULL
+                                CHECK (restoration_fee_minor_units >= 0),
+                            total_due_minor_units INTEGER NOT NULL
+                                CHECK (total_due_minor_units >= 0),
+                            remaining_next_cycle_credit_minor_units INTEGER NOT NULL
+                                CHECK (remaining_next_cycle_credit_minor_units >= 0
+                                    AND remaining_next_cycle_credit_minor_units
+                                        <= next_cycle_prepayment_minor_units),
+                            cooldown_ends_at_epoch_millis INTEGER NOT NULL
+                                CHECK (cooldown_ends_at_epoch_millis >= 0),
+                            destruction_basis_points INTEGER NOT NULL
+                                CHECK (destruction_basis_points BETWEEN 3000 AND 8000),
+                            state TEXT NOT NULL
+                                CHECK (state IN ('PREPARED', 'CIVIC_COMMITTED')),
+                            reservation_id TEXT UNIQUE
+                                REFERENCES fiscal_reservation(reservation_id),
+                            public_fund_payment_id TEXT UNIQUE
+                                REFERENCES payment_transaction(transaction_id),
+                            destruction_operation_id TEXT UNIQUE
+                                REFERENCES permanent_destruction_operation(operation_id),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            committed_at_epoch_millis INTEGER
+                                CHECK (committed_at_epoch_millis IS NULL
+                                    OR committed_at_epoch_millis >= prepared_at_epoch_millis),
+                            UNIQUE (service_identity, request_id),
+                            CHECK (total_due_minor_units =
+                                next_cycle_prepayment_minor_units
+                                    + restoration_fee_minor_units),
+                            CHECK ((state = 'PREPARED'
+                                    AND reservation_id IS NULL
+                                    AND public_fund_payment_id IS NULL
+                                    AND destruction_operation_id IS NULL
+                                    AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'CIVIC_COMMITTED'
+                                    AND committed_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS territory_maintenance_restoration_target
+                        ON territory_maintenance_restoration (
+                            nation_id, ftb_team_id, dimension_id, chunk_x, chunk_z,
+                            state, prepared_at_epoch_millis
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS territory_maintenance_restoration_credit
+                        ON territory_maintenance_restoration (
+                            next_full_cycle_starts_at_epoch_millis,
+                            remaining_next_cycle_credit_minor_units
+                        )
+                        WHERE state = 'CIVIC_COMMITTED'
+                          AND remaining_next_cycle_credit_minor_units > 0
+                        """);
+                statement.execute("PRAGMA user_version = 43");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -6929,6 +7335,48 @@ public final class CivicDatabase implements AutoCloseable {
                             UUID.fromString(result.getString("settlement_id")), "SUSPENDED"),
                     result.getString("reason"),
                     result.getLong("settled_at_epoch_millis"));
+        }
+    }
+
+    private StoredTerritoryMaintenanceRestoration readTerritoryMaintenanceRestoration(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            String reservationId = result.getString("reservation_id");
+            String publicFundPaymentId = result.getString("public_fund_payment_id");
+            String destructionOperationId = result.getString("destruction_operation_id");
+            long committedAt = result.getLong("committed_at_epoch_millis");
+            Long committedAtEpochMillis = result.wasNull() ? null : committedAt;
+            return new StoredTerritoryMaintenanceRestoration(
+                    UUID.fromString(result.getString("restoration_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("dimension_id"),
+                    result.getInt("chunk_x"),
+                    result.getInt("chunk_z"),
+                    UUID.fromString(result.getString("source_suspended_assessment_id")),
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getLong("next_full_cycle_starts_at_epoch_millis"),
+                    result.getLong("next_cycle_prepayment_minor_units"),
+                    result.getLong("restoration_fee_minor_units"),
+                    result.getLong("total_due_minor_units"),
+                    result.getLong("remaining_next_cycle_credit_minor_units"),
+                    result.getLong("cooldown_ends_at_epoch_millis"),
+                    result.getInt("destruction_basis_points"),
+                    result.getString("state"),
+                    reservationId == null ? null : UUID.fromString(reservationId),
+                    publicFundPaymentId == null ? null : UUID.fromString(publicFundPaymentId),
+                    destructionOperationId == null
+                            ? null
+                            : UUID.fromString(destructionOperationId),
+                    result.getString("reason"),
+                    result.getLong("prepared_at_epoch_millis"),
+                    committedAtEpochMillis);
         }
     }
 

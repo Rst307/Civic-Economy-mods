@@ -169,8 +169,12 @@ _Avoid_: 取消领土、调用方提供目标、批量关闭其他 Team 区块
 _Avoid_: 全服 force-load 开关、调用方声明的财政状态、恢复后自动 force-load
 
 **领土恢复（Territory Maintenance Restoration）**:
-先前因维护不足而 SUSPENDED 的区块重新取得财政有效性的过程；只收配置的恢复费和下一个完整周期维护费，不追缴历史欠费，并在成功恢复后进入冷却。每条后续评估明确记录恢复资格：无需恢复（NOT_REQUIRED）、可恢复（ELIGIBLE）或冷却阻止（COOLDOWN_BLOCKED）；冷却阻止的区块不能因余额充足而重新生效。
-_Avoid_: 补缴全部欠费、重新占领 FTB 区块、无冷却反复恢复
+先前因维护不足而 SUSPENDED 的精确区块重新取得财政有效性的独立、持久化结论；它引用但不改写来源 Territory Fiscal Assessment，只收配置的恢复费和下一个完整周期维护预付，不追缴历史欠费，并在成功恢复后进入冷却。每条后续评估明确记录恢复资格：无需恢复（NOT_REQUIRED）、可恢复（ELIGIBLE）或冷却阻止（COOLDOWN_BLOCKED）；冷却阻止的区块不能因余额充足而重新生效。
+_Avoid_: 改写旧 Assessment、补缴全部欠费、重新占领 FTB 区块、无冷却反复恢复
+
+**领土恢复预付抵扣（Territory Restoration Prepayment Credit）**:
+一次已提交 Territory Maintenance Restoration 为一个精确 Nation、FTB Team 和区块支付的下一个完整周期维护金额；它只能抵扣该目标后续维护 Assessment，不能提取为 LC、转移给其他区块或被同一 Assessment 重复消费。
+_Avoid_: 虚拟余额、现金退款、全国家通用抵扣、调用方声明的已付款
 
 **领土维护优先级（Territory Maintenance Priority）**:
 国家在维护资金不足时用于选择续费区块的五级顺序：首都、首都连接核心、有效基础设施、普通领土、飞地或跨维度领地；低级别不能挤占高级别。

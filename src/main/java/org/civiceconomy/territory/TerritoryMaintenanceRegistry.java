@@ -189,7 +189,10 @@ public final class TerritoryMaintenanceRegistry {
         StoredTerritoryFiscalAssessment assessment = database.territoryFiscalAssessment(
                 cycleId, nationId.value(), ftbTeamId, dimensionId, chunkX, chunkZ);
         return assessment != null
-                && assessment.validity().equals(TerritoryFiscalValidity.EFFECTIVE.name());
+                && (assessment.validity().equals(TerritoryFiscalValidity.EFFECTIVE.name())
+                        || (assessment.validity().equals(TerritoryFiscalValidity.SUSPENDED.name())
+                                && database.hasCommittedTerritoryMaintenanceRestoration(
+                                        assessment.assessmentId())));
     }
 
     public TerritoryFiscalAssessment assessment(

@@ -1,0 +1,5 @@
+# Out-of-Cycle Restoration preserves Assessment history
+
+Territory Maintenance Restoration is persisted as an independent aggregate that cites one exact latest `SUSPENDED` Territory Fiscal Assessment. A successful Restoration becomes the newer fiscal-validity conclusion for that Nation, FTB Team, dimension, and chunk without reopening or rewriting the source Assessment or its Settlement. Its configured Restoration fee is consumed immediately; its next-full-Cycle maintenance amount remains a target-scoped, non-withdrawable prepayment credit for a later Assessment.
+
+Rewriting the old Assessment would make a previously correct all-Nation Settlement internally contradictory and would erase the reason enforcement occurred. Waiting for the next automatic Cycle would preserve history but would not provide the specified player-triggered Restoration flow. The independent aggregate costs an additional precedence rule and explicit prepayment consumption, but keeps historical Settlement evidence immutable, supports idempotent LC recovery, and prevents the next Cycle from charging the same target twice.
