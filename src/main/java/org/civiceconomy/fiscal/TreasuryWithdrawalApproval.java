@@ -16,10 +16,11 @@ public record TreasuryWithdrawalApproval(
         String reason,
         UUID policyId,
         int requiredApprovals,
-        List<UUID> approverPlayerIds,
+        List<TreasuryWithdrawalApprovalVote> votes,
         String state,
         Instant initiatedAt,
-        Instant approvedAt) {
+        Instant approvedAt,
+        Instant executedAt) {
     public TreasuryWithdrawalApproval {
         if (approvalRequestId == null
                 || serviceIdentity == null
@@ -38,7 +39,11 @@ public record TreasuryWithdrawalApproval(
             throw new IllegalArgumentException(
                     "Treasury Withdrawal approval values are invalid");
         }
-        approverPlayerIds = List.copyOf(approverPlayerIds);
+        votes = List.copyOf(votes);
+    }
+
+    public List<UUID> approverPlayerIds() {
+        return votes.stream().map(TreasuryWithdrawalApprovalVote::approverPlayerId).toList();
     }
 
     public ConfirmTreasuryWithdrawal withdrawal() {

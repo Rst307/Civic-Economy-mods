@@ -23,6 +23,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
+import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
 import org.civiceconomy.integration.ftb.FtbChunksAdapter;
 import dev.ftb.mods.ftbchunks.api.FTBChunksAPI;
 import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
@@ -116,6 +118,7 @@ final class NationApplicationCommands {
     private static LiteralArgumentBuilder<CommandSourceStack> withdrawCommand() {
         return Commands.literal("withdraw")
                 .then(withdrawApprovalCommand())
+                .then(withdrawApprovalInspectionCommand())
                 .then(withdrawPolicyCommand())
                 .then(Commands.argument("requestId", StringArgumentType.word())
                         .then(Commands.argument(
@@ -151,6 +154,20 @@ final class NationApplicationCommands {
                                                         context, "reason"))))));
     }
 
+    private static LiteralArgumentBuilder<CommandSourceStack>
+            withdrawApprovalInspectionCommand() {
+        return Commands.literal("approval")
+                .then(Commands.literal("list")
+                        .executes(context -> listTreasuryWithdrawalApprovals(
+                                context.getSource())))
+                .then(Commands.literal("status")
+                        .then(Commands.argument("approvalRequestId", UuidArgument.uuid())
+                                .executes(context -> treasuryWithdrawalApprovalStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(
+                                                context, "approvalRequestId")))));
+    }
+
     private static LiteralArgumentBuilder<CommandSourceStack> withdrawPolicyCommand() {
         var reason = Commands.argument("reason", StringArgumentType.greedyString())
                 .executes(context -> scheduleTreasuryWithdrawalPolicy(
@@ -172,7 +189,107 @@ final class NationApplicationCommands {
         var request = Commands.argument("requestId", StringArgumentType.word())
                 .then(effective);
         return Commands.literal("policy")
+                .then(Commands.literal("status")
+                        .executes(context -> treasuryWithdrawalPolicyStatus(
+                                context.getSource())))
                 .then(Commands.literal("schedule").then(request));
+    }
+
+    private static int treasuryWithdrawalPolicyStatus(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .withdrawalApprovalPolicy(player)
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Treasury Withdrawal approval policy status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatWithdrawalPolicy(policy)), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Treasury Withdrawal approval policy status queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listTreasuryWithdrawalApprovals(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .withdrawalApprovalStatuses(player)
+                .whenComplete((statuses, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Treasury Withdrawal approval list", failure);
+                    } else {
+                        String result = statuses.isEmpty()
+                                ? "No Treasury Withdrawal approvals exist for your current Nation"
+                                : statuses.stream()
+                                        .limit(20)
+                                        .map(NationApplicationCommands::formatWithdrawalApprovalStatus)
+                                        .collect(Collectors.joining("; "));
+                        source.sendSuccess(() -> Component.literal(result), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Treasury Withdrawal approval list queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int treasuryWithdrawalApprovalStatus(
+            CommandSourceStack source, UUID approvalRequestId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .withdrawalApprovalStatus(player, approvalRequestId)
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Treasury Withdrawal approval status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        formatWithdrawalApprovalStatus(status)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Treasury Withdrawal approval status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    static String formatWithdrawalPolicy(WithdrawalApprovalPolicyVersion policy) {
+        return "Withdrawal Approval Policy " + policy.policyId()
+                + " nation=" + policy.nationId().value()
+                + " effectiveAt=" + policy.effectiveAt()
+                + " actor=" + policy.actorPlayerId()
+                + " reason=\"" + policy.reason() + "\""
+                + " tiers=" + policy.tiers()
+                + (policy.defaultPolicy() ? " [CONSERVATIVE DEFAULT]" : "");
+    }
+
+    static String formatWithdrawalApprovalStatus(
+            TreasuryWithdrawalApprovalStatus status) {
+        var approval = status.approval();
+        String votes = approval.votes().stream()
+                .map(vote -> vote.approverPlayerId()
+                        + "@" + vote.approvedAt()
+                        + " reason=\"" + vote.reason() + "\"")
+                .collect(Collectors.joining(", "));
+        return "Withdrawal Approval " + approval.approvalRequestId()
+                + " state=" + approval.state()
+                + " canApprove=" + status.canApprove()
+                + " nation=" + approval.nationId().value()
+                + " amount=" + approval.amount().minorUnits()
+                + " initiator=" + approval.actorPlayerId()
+                + " reason=\"" + approval.reason() + "\""
+                + " policy=" + approval.policyId()
+                + " approvals=" + approval.approverPlayerIds().size()
+                + "/" + approval.requiredApprovals()
+                + " initiatedAt=" + approval.initiatedAt()
+                + " approvedAt=" + approval.approvedAt()
+                + " executedAt=" + approval.executedAt()
+                + " votes=[" + votes + "]";
     }
 
     private static int withdrawTreasury(

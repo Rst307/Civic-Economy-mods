@@ -483,6 +483,19 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "trusted Monetary Stock Correction command actions");
         helper.assertValueEqual(
+                Set.of("recovery"),
+                economy.getChild("admin").getChild("withdrawal").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted Treasury Withdrawal inspection actions");
+        helper.assertValueEqual(
+                Set.of("status"),
+                economy.getChild("admin").getChild("withdrawal")
+                        .getChild("recovery").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "read-only Treasury Withdrawal recovery actions");
+        helper.assertValueEqual(
                 Set.of("status", "trigger", "restore"),
                 backup.getChildren().stream()
                         .map(node -> node.getName())
@@ -534,7 +547,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative National Treasury command actions");
         helper.assertValueEqual(
-                Set.of("approve", "policy", "requestId"),
+                Set.of("approve", "approval", "policy", "requestId"),
                 economy.getChild("nation")
                         .getChild("treasury")
                         .getChild("withdraw")
@@ -543,7 +556,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Treasury Withdrawal approval actions");
         helper.assertValueEqual(
-                Set.of("schedule"),
+                Set.of("schedule", "status"),
                 economy.getChild("nation")
                         .getChild("treasury")
                         .getChild("withdraw")
@@ -552,6 +565,16 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "future-effective Treasury Withdrawal policy actions");
+        helper.assertValueEqual(
+                Set.of("list", "status"),
+                economy.getChild("nation")
+                        .getChild("treasury")
+                        .getChild("withdraw")
+                        .getChild("approval")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "Nation-scoped Treasury Withdrawal approval inspection actions");
         if (CivicDebugWorldCommands.dedicatedStartupPermit()) {
             helper.assertValueEqual(
                     Set.of("status", "enable"),
@@ -1546,7 +1569,9 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean policyCommandStarted = new AtomicBoolean();
         AtomicBoolean withdrawalCommandStarted = new AtomicBoolean();
+        AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean approvalCommandStarted = new AtomicBoolean();
+        AtomicBoolean recoveryInspectionStarted = new AtomicBoolean();
         AtomicBoolean replayCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -1713,6 +1738,52 @@ public final class CivicServerRuntimeGameTests {
                                     .minorUnits(),
                             "pending approval does not debit real LC");
                 })
+                .thenExecute(() -> {
+                    try {
+                        TreasuryWithdrawalApprovalRow approval =
+                                treasuryWithdrawalApprovalByRequest(
+                                        databaseFile, withdrawalRequestId);
+                        var dispatcher = helper.getLevel().getServer()
+                                .getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation treasury withdraw policy status",
+                                        initiator.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Withdrawal policy status command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation treasury withdraw approval list",
+                                        approver.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Withdrawal approval list command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation treasury withdraw approval status "
+                                                + approval.approvalRequestId(),
+                                        approver.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Withdrawal approval status command result");
+                        inspectionCommandsStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Withdrawal inspection commands");
+                    helper.assertTrue(
+                            inspectionCommandsStarted.get(),
+                            "Withdrawal inspection commands started");
+                    TreasuryWithdrawalApprovalRow approval =
+                            treasuryWithdrawalApprovalByRequest(
+                                    databaseFile, withdrawalRequestId);
+                    helper.assertValueEqual(
+                            "PENDING", approval.state(),
+                            "read-only player inspection preserves pending state");
+                })
                 .thenExecute(() -> runtime.submitDatabase(database ->
                                 new org.civiceconomy.fiscal
                                                 .TreasuryWithdrawalApprovalRegistry(
@@ -1754,6 +1825,38 @@ public final class CivicServerRuntimeGameTests {
                                             "nation:" + nationId.get().value() + ":treasury"))
                                     .minorUnits(),
                             "approval alone does not debit real LC");
+                })
+                .thenExecute(() -> {
+                    try {
+                        helper.assertValueEqual(
+                                1,
+                                helper.getLevel().getServer().getCommands().getDispatcher()
+                                        .execute(
+                                                "civic economy admin withdrawal recovery status",
+                                                helper.getLevel().getServer()
+                                                        .createCommandSourceStack()
+                                                        .withSuppressedOutput()),
+                                "Withdrawal recovery inspection command result");
+                        recoveryInspectionStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Withdrawal recovery inspection");
+                    helper.assertTrue(
+                            recoveryInspectionStarted.get(),
+                            "Withdrawal recovery inspection started");
+                    TreasuryWithdrawalApprovalRow approval =
+                            treasuryWithdrawalApprovalByRequest(
+                                    databaseFile, withdrawalRequestId);
+                    helper.assertValueEqual(
+                            "APPROVED", approval.state(),
+                            "read-only OP inspection preserves approved state");
+                    helper.assertTrue(
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId) == null,
+                            "OP inspection does not prepare a Withdrawal operation");
                 })
                 .thenExecute(() -> {
                     try {

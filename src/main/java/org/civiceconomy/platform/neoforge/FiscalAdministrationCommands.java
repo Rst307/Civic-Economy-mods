@@ -28,6 +28,8 @@ import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.RevokeFiscalCapability;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
+import org.civiceconomy.fiscal.TreasuryWithdrawalRecoveryStatus;
 import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
@@ -70,10 +72,16 @@ public final class FiscalAdministrationCommands {
                                         context.getSource(),
                                         UuidArgument.getUuid(context, "batchId")))))
                 .then(monetaryStockCorrectionCommand());
+        var withdrawal = Commands.literal("withdrawal")
+                .then(Commands.literal("recovery")
+                        .then(Commands.literal("status")
+                                .executes(context -> withdrawalRecoveryStatus(
+                                        context.getSource()))));
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service)
                 .then(mint)
+                .then(withdrawal)
                 .then(databaseBackupCommand())
                 .then(territoryPolicyCommand());
         var civic = Commands.literal("civic")
@@ -100,6 +108,47 @@ public final class FiscalAdministrationCommands {
             source.sendFailure(Component.literal("Mint recovery rejected: " + failure.getMessage()));
         }
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int withdrawalRecoveryStatus(CommandSourceStack source) {
+        CivicServerRuntime.current().withdrawalRecoveryStatus()
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        sendFailure(source, failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatWithdrawalRecovery(status)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Treasury Withdrawal recovery status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatWithdrawalRecovery(
+            TreasuryWithdrawalRecoveryStatus status) {
+        String approved = status.approvedWithoutOperation().isEmpty()
+                ? "none"
+                : status.approvedWithoutOperation().stream()
+                        .map(approval -> NationApplicationCommands
+                                .formatWithdrawalApprovalStatus(
+                                        new TreasuryWithdrawalApprovalStatus(approval, false)))
+                        .collect(Collectors.joining("; "));
+        String prepared = status.preparedOperations().isEmpty()
+                ? "none"
+                : status.preparedOperations().stream()
+                        .map(operation -> operation.withdrawalId()
+                                + "=" + operation.state()
+                                + ":approval=" + operation.approvalRequestId()
+                                + ":nation=" + operation.nationId().value()
+                                + ":actor=" + operation.actorPlayerId()
+                                + ":amount=" + operation.amount().minorUnits()
+                                + ":preparedAt=" + operation.preparedAt())
+                        .collect(Collectors.joining("; "));
+        return "Treasury Withdrawal recovery approvedWithoutOperation=[" + approved
+                + "] preparedOperations=[" + prepared
+                + "]; inspection is read-only and automatic recovery remains authoritative";
     }
 
     private static int mintRecoveryStatus(CommandSourceStack source) {

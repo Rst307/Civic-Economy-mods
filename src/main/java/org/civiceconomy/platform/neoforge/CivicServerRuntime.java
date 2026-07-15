@@ -48,7 +48,11 @@ import org.civiceconomy.fiscal.TreasuryWithdrawal;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApproval;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalOutcome;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalRegistry;
+import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.TreasuryWithdrawalFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.TreasuryWithdrawalInspection;
+import org.civiceconomy.fiscal.TreasuryWithdrawalRecoveryInspection;
+import org.civiceconomy.fiscal.TreasuryWithdrawalRecoveryStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyRegistry;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
 import org.civiceconomy.fiscal.WithdrawalApprovalTier;
@@ -721,6 +725,47 @@ public final class CivicServerRuntime {
                                     Instant.ofEpochMilli(effectiveAtEpochMillis),
                                     reason));
                 }));
+    }
+
+    CompletableFuture<WithdrawalApprovalPolicyVersion> withdrawalApprovalPolicy(
+            ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        withdrawalInspection(database, team, commandClock)
+                                .currentPolicy(actorPlayerId)));
+    }
+
+    CompletableFuture<List<TreasuryWithdrawalApprovalStatus>>
+            withdrawalApprovalStatuses(ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        withdrawalInspection(database, team, commandClock)
+                                .approvalStatuses(actorPlayerId)));
+    }
+
+    CompletableFuture<TreasuryWithdrawalApprovalStatus> withdrawalApprovalStatus(
+            ServerPlayer actor, UUID approvalRequestId) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        withdrawalInspection(database, team, commandClock)
+                                .approvalStatus(actorPlayerId, approvalRequestId)));
+    }
+
+    CompletableFuture<TreasuryWithdrawalRecoveryStatus> withdrawalRecoveryStatus() {
+        RuntimeState current = requireState();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return current.writer.submitDatabase(database ->
+                new TreasuryWithdrawalRecoveryInspection(database, commandClock)
+                        .status(TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY));
     }
 
     CompletableFuture<MintBatch> startMintBatch(
@@ -2529,6 +2574,24 @@ public final class CivicServerRuntime {
 
     private static AccountId nationalTreasury(org.civiceconomy.nation.NationId nationId) {
         return new AccountId("nation:" + nationId.value() + ":treasury");
+    }
+
+    private static TreasuryWithdrawalInspection withdrawalInspection(
+            CivicDatabase database, NationTeam team, Clock commandClock) {
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        NationRegistry nations = new NationRegistry(database, teams);
+        var provider = new FtbTeamsNationProvider(
+                nations,
+                new CitizenshipRegistry(
+                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                teams);
+        return new TreasuryWithdrawalInspection(
+                provider,
+                new NationFiscalAuthorityRegistry(database, provider, commandClock),
+                new WithdrawalApprovalPolicyRegistry(database, commandClock),
+                new TreasuryWithdrawalApprovalRegistry(database, commandClock),
+                commandClock);
     }
 
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {

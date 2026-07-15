@@ -7195,6 +7195,31 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredTreasuryWithdrawalApproval>
+            treasuryWithdrawalApprovals(UUID nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal approval Nation cannot be null");
+        }
+        List<StoredTreasuryWithdrawalApproval> approvals = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_approval_request
+                WHERE nation_id = ?
+                ORDER BY initiated_at_epoch_millis DESC, approval_request_id DESC
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    approvals.add(storedTreasuryWithdrawalApproval(result));
+                }
+            }
+            return List.copyOf(approvals);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list Nation Treasury Withdrawal approvals", failure);
+        }
+    }
+
     public synchronized StoredTreasuryWithdrawalApproval treasuryWithdrawalApprovalVote(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -11745,6 +11770,8 @@ public final class CivicDatabase implements AutoCloseable {
         }
         long approvedAtValue = result.getLong("approved_at_epoch_millis");
         Long approvedAt = result.wasNull() ? null : approvedAtValue;
+        long executedAtValue = result.getLong("executed_at_epoch_millis");
+        Long executedAt = result.wasNull() ? null : executedAtValue;
         return new StoredTreasuryWithdrawalApproval(
                 approvalRequestId,
                 result.getString("service_identity"),
@@ -11759,7 +11786,8 @@ public final class CivicDatabase implements AutoCloseable {
                 votes,
                 result.getString("state"),
                 result.getLong("initiated_at_epoch_millis"),
-                approvedAt);
+                approvedAt,
+                executedAt);
     }
 
     private StoredTerritoryMaintenancePolicy readTerritoryMaintenancePolicy(

@@ -2,6 +2,7 @@ package org.civiceconomy.fiscal;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -94,6 +95,44 @@ public final class TreasuryWithdrawalApprovalRegistry {
         return toApproval(stored);
     }
 
+    public TreasuryWithdrawalApproval findForNation(
+            UUID approvalRequestId, NationId nationId) {
+        if (approvalRequestId == null || nationId == null) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal approval lookup cannot contain null values");
+        }
+        StoredTreasuryWithdrawalApproval stored =
+                database.treasuryWithdrawalApproval(approvalRequestId);
+        if (stored == null || !stored.nationId().equals(nationId.value())) {
+            throw new SecurityException(
+                    "Treasury Withdrawal approval is unavailable for the current Nation");
+        }
+        return toApproval(stored);
+    }
+
+    public List<TreasuryWithdrawalApproval> listForNation(NationId nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal approval Nation cannot be null");
+        }
+        return database.treasuryWithdrawalApprovals(nationId.value()).stream()
+                .map(TreasuryWithdrawalApprovalRegistry::toApproval)
+                .toList();
+    }
+
+    public List<TreasuryWithdrawalApproval> approvedWithoutOperation(
+            ServiceIdentity serviceIdentity) {
+        if (serviceIdentity == null) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal recovery Service Identity cannot be null");
+        }
+        return database.approvedTreasuryWithdrawalApprovalsWithoutOperation(
+                        serviceIdentity.value())
+                .stream()
+                .map(TreasuryWithdrawalApprovalRegistry::toApproval)
+                .toList();
+    }
+
     private static void requirePayload(
             StoredTreasuryWithdrawalApproval stored,
             ConfirmTreasuryWithdrawal request) {
@@ -138,12 +177,21 @@ public final class TreasuryWithdrawalApprovalRegistry {
                 stored.policyId(),
                 stored.requiredApprovals(),
                 stored.votes().stream()
-                        .map(vote -> vote.approverPlayerId())
+                        .map(vote -> new TreasuryWithdrawalApprovalVote(
+                                vote.voteId(),
+                                new ServiceIdentity(vote.serviceIdentity()),
+                                vote.requestId(),
+                                vote.approverPlayerId(),
+                                vote.reason(),
+                                Instant.ofEpochMilli(vote.approvedAtEpochMillis())))
                         .toList(),
                 stored.state(),
                 Instant.ofEpochMilli(stored.initiatedAtEpochMillis()),
                 stored.approvedAtEpochMillis() == null
                         ? null
-                        : Instant.ofEpochMilli(stored.approvedAtEpochMillis()));
+                        : Instant.ofEpochMilli(stored.approvedAtEpochMillis()),
+                stored.executedAtEpochMillis() == null
+                        ? null
+                        : Instant.ofEpochMilli(stored.executedAtEpochMillis()));
     }
 }

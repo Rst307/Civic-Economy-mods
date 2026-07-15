@@ -17,7 +17,8 @@ public record StoredTreasuryWithdrawalApproval(
         List<StoredTreasuryWithdrawalApprovalVote> votes,
         String state,
         long initiatedAtEpochMillis,
-        Long approvedAtEpochMillis) {
+        Long approvedAtEpochMillis,
+        Long executedAtEpochMillis) {
     public StoredTreasuryWithdrawalApproval {
         votes = List.copyOf(votes);
     }

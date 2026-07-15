@@ -22,6 +22,8 @@ class TreasuryWithdrawalApprovalRegistryTest {
             new ServiceIdentity("civiceconomy-treasury-withdrawal");
     private static final NationId NATION_ID =
             new NationId(UUID.fromString("11111111-1111-1111-1111-111111111111"));
+    private static final NationId OTHER_NATION_ID =
+            new NationId(UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
     private static final AccountId TREASURY =
             new AccountId("nation:" + NATION_ID.value() + ":treasury");
     private static final UUID INITIATOR =
@@ -101,6 +103,79 @@ class TreasuryWithdrawalApprovalRegistryTest {
         }
     }
 
+    @Test
+    void inspectionIsLimitedToOneExactNation() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            registerOtherNation(database);
+            TreasuryWithdrawalApprovalRegistry approvals = approvals(database, EFFECTIVE_AT);
+            TreasuryWithdrawalApproval own = approvals.initiate(
+                    request("withdraw-visible", 700L));
+            TreasuryWithdrawalApproval foreign = approvals.initiate(
+                    new ConfirmTreasuryWithdrawal(
+                            SERVICE,
+                            "withdraw-hidden",
+                            OTHER_NATION_ID,
+                            new AccountId("nation:" + OTHER_NATION_ID.value() + ":treasury"),
+                            SECOND_APPROVER,
+                            MoneyAmount.ofMinorUnits(800L),
+                            "Foreign Nation cash withdrawal"));
+
+            assertEquals(List.of(own), approvals.listForNation(NATION_ID));
+            assertEquals(own, approvals.findForNation(own.approvalRequestId(), NATION_ID));
+            assertThrows(
+                    SecurityException.class,
+                    () -> approvals.findForNation(foreign.approvalRequestId(), NATION_ID));
+        }
+    }
+
+    @Test
+    void inspectionExposesImmutableVoteAndExecutionAuditFacts() {
+        Instant secondVoteAt = EFFECTIVE_AT.plusSeconds(60L);
+        Instant executedAt = EFFECTIVE_AT.plusSeconds(180L);
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            schedulePolicy(database, 2, EFFECTIVE_AT);
+            TreasuryWithdrawalApproval pending = approvals(database, EFFECTIVE_AT)
+                    .initiate(request("withdraw-audit", 700L));
+            TreasuryWithdrawalApproval approved = approvals(database, secondVoteAt)
+                    .approve(new ApproveTreasuryWithdrawal(
+                            SERVICE,
+                            "approve-withdraw-audit",
+                            pending.approvalRequestId(),
+                            SECOND_APPROVER,
+                            "Verified payroll evidence"));
+            UUID withdrawalId = UUID.fromString(
+                    "cccccccc-cccc-cccc-cccc-cccccccccccc");
+            database.prepareTreasuryWithdrawal(
+                    withdrawalId,
+                    SERVICE.value(),
+                    approved.requestId(),
+                    approved.approvalRequestId(),
+                    NATION_ID.value(),
+                    TREASURY.value(),
+                    INITIATOR,
+                    approved.amount().minorUnits(),
+                    approved.reason(),
+                    EFFECTIVE_AT.plusSeconds(120L).toEpochMilli());
+            database.commitTreasuryWithdrawal(withdrawalId, executedAt.toEpochMilli());
+
+            TreasuryWithdrawalApproval inspected = approvals(database, executedAt)
+                    .findForNation(pending.approvalRequestId(), NATION_ID);
+
+            assertEquals("Cash for public works payroll", inspected.reason());
+            assertEquals("EXECUTED", inspected.state());
+            assertEquals(executedAt, inspected.executedAt());
+            assertEquals(2, inspected.votes().size());
+            assertEquals(INITIATOR, inspected.votes().get(0).approverPlayerId());
+            assertEquals("Initiated Treasury Withdrawal", inspected.votes().get(0).reason());
+            assertEquals(EFFECTIVE_AT, inspected.votes().get(0).approvedAt());
+            assertEquals(SECOND_APPROVER, inspected.votes().get(1).approverPlayerId());
+            assertEquals("Verified payroll evidence", inspected.votes().get(1).reason());
+            assertEquals(secondVoteAt, inspected.votes().get(1).approvedAt());
+        }
+    }
+
     private void schedulePolicy(CivicDatabase database, int required, Instant effectiveAt) {
         new WithdrawalApprovalPolicyRegistry(
                         database, Clock.fixed(SCHEDULED_AT, ZoneOffset.UTC))
@@ -148,6 +223,15 @@ class TreasuryWithdrawalApprovalRegistryTest {
                 "withdrawal-approval-test",
                 "register-nation",
                 UUID.fromString("44444444-4444-4444-4444-444444444444"),
+                SCHEDULED_AT.minusSeconds(60L).toEpochMilli());
+    }
+
+    private static void registerOtherNation(CivicDatabase database) {
+        database.registerNation(
+                OTHER_NATION_ID.value(),
+                "withdrawal-approval-other-test",
+                "register-other-nation",
+                UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
                 SCHEDULED_AT.minusSeconds(60L).toEpochMilli());
     }
 }
