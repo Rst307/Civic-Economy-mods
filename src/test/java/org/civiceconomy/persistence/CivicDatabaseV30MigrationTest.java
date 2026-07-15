@@ -53,6 +53,7 @@ class CivicDatabaseV30MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE territory_force_load_enforcement");
             statement.execute("DROP TABLE territory_maintenance_policy");
             statement.execute("DROP TABLE territory_maintenance_assessment_claim");
             statement.execute("DROP TABLE territory_maintenance_assessment_batch");
@@ -63,7 +64,7 @@ class CivicDatabaseV30MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(40, migrated.schemaVersion());
+            assertEquals(42, migrated.schemaVersion());
             assertNotNull(migrated.fiscalCapabilityGrant(grantId));
             assertNotNull(migrated.fiscalCapabilityRevocation(grantId));
             assertNotNull(migrated.grantFiscalCapability(

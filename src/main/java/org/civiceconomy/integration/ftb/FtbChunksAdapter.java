@@ -9,6 +9,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
@@ -66,5 +67,49 @@ public final class FtbChunksAdapter {
                         .thenComparingInt(claim -> claim.chunkPos().x)
                         .thenComparingInt(claim -> claim.chunkPos().z))
                 .toList();
+    }
+
+    public boolean disableForceLoadIfOwned(
+            UUID expectedFtbTeamId,
+            ResourceKey<Level> dimension,
+            ChunkPos chunkPos,
+            CommandSourceStack source) {
+        if (expectedFtbTeamId == null
+                || dimension == null
+                || chunkPos == null
+                || source == null) {
+            throw new IllegalArgumentException(
+                    "FTB force-load enforcement cannot contain null values");
+        }
+        ChunkDimPos position = new ChunkDimPos(dimension, chunkPos);
+        ClaimedChunk claimed = manager.getChunk(position);
+        if (claimed == null) {
+            throw new IllegalStateException(
+                    "FTB force-load enforcement requires the exact current Claim");
+        }
+        Team team = claimed.getTeamData().getTeam();
+        if (team == null
+                || !team.isValid()
+                || !team.getId().equals(expectedFtbTeamId)) {
+            throw new SecurityException(
+                    "FTB force-load enforcement Team does not own the exact current Claim");
+        }
+        if (!claimed.isForceLoaded()) {
+            return false;
+        }
+        var result = claimed.getTeamData().unForceLoad(source, position, false);
+        if (!result.isSuccess()) {
+            throw new IllegalStateException("FTB Chunks rejected force-load disable");
+        }
+        ClaimedChunk updated = manager.getChunk(position);
+        if (updated == null
+                || updated.getTeamData().getTeam() == null
+                || !updated.getTeamData().getTeam().isValid()
+                || !updated.getTeamData().getTeam().getId().equals(expectedFtbTeamId)
+                || updated.isForceLoaded()) {
+            throw new IllegalStateException(
+                    "FTB force-load disable did not preserve exact Claim ownership");
+        }
+        return true;
     }
 }

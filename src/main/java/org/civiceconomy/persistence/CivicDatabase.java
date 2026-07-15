@@ -25,7 +25,8 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 40;
+    private static final int SCHEMA_VERSION = 42;
+    private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
 
@@ -2512,6 +2513,178 @@ public final class CivicDatabase implements AutoCloseable {
         } finally {
             restoreAutoCommit("Zero-cost Territory Maintenance settlement", primaryFailure);
         }
+    }
+
+    public synchronized StoredTerritoryForceLoadEnforcement territoryForceLoadEnforcement(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_force_load_enforcement
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTerritoryForceLoadEnforcement(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Force-load Enforcement replay", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryForceLoadEnforcement territoryForceLoadEnforcement(
+            UUID enforcementId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM territory_force_load_enforcement WHERE enforcement_id = ?
+                """)) {
+            query.setString(1, enforcementId.toString());
+            return readTerritoryForceLoadEnforcement(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Territory Force-load Enforcement", failure);
+        }
+    }
+
+    public synchronized List<StoredTerritoryForceLoadEnforcement>
+            dueTerritoryForceLoadEnforcements(long nowEpochMillis) {
+        List<StoredTerritoryForceLoadEnforcement> enforcements = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                    SELECT * FROM territory_force_load_enforcement
+                    WHERE state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                      AND not_before_epoch_millis <= ?
+                    ORDER BY prepared_at_epoch_millis, enforcement_id
+                    """)) {
+            query.setLong(1, nowEpochMillis);
+            try (ResultSet due = query.executeQuery()) {
+                while (due.next()) {
+                    enforcements.add(storedTerritoryForceLoadEnforcement(due));
+                }
+            }
+            return List.copyOf(enforcements);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read incomplete Territory Force-load Enforcements", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryForceLoadEnforcement
+            prepareTerritoryForceLoadEnforcement(
+                    UUID enforcementId,
+                    String serviceIdentity,
+                    String requestId,
+                    UUID assessmentId,
+                    String reason,
+                    long preparedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO territory_force_load_enforcement (
+                    enforcement_id, service_identity, request_id, assessment_id,
+                    ftb_team_id, dimension_id, chunk_x, chunk_z, state, reason,
+                    not_before_epoch_millis,
+                    prepared_at_epoch_millis, external_applied_at_epoch_millis,
+                    committed_at_epoch_millis
+                )
+                SELECT ?, assessment.service_identity, ?, assessment.assessment_id,
+                       assessment.ftb_team_id, assessment.dimension_id,
+                       assessment.chunk_x, assessment.chunk_z, 'PREPARED', ?,
+                       cycle.ends_at_epoch_millis + ?, ?, NULL, NULL
+                FROM territory_fiscal_assessment assessment
+                JOIN territory_maintenance_cycle cycle
+                  ON cycle.cycle_id = assessment.cycle_id
+                WHERE assessment.assessment_id = ?
+                  AND assessment.service_identity = ?
+                  AND assessment.validity = 'SUSPENDED'
+                  AND cycle.ends_at_epoch_millis <= 9223372036854775807 - ?
+                """)) {
+            insert.setString(1, enforcementId.toString());
+            insert.setString(2, requestId);
+            insert.setString(3, reason);
+            insert.setLong(4, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
+            insert.setLong(5, preparedAtEpochMillis);
+            insert.setString(6, assessmentId.toString());
+            insert.setString(7, serviceIdentity);
+            insert.setLong(8, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
+            if (insert.executeUpdate() != 1) {
+                throw new SecurityException(
+                        "Force-load Enforcement requires the exact suspended Assessment service identity");
+            }
+            return territoryForceLoadEnforcement(enforcementId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to prepare Territory Force-load Enforcement", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryForceLoadEnforcement
+            markTerritoryForceLoadExternalApplied(
+                    UUID enforcementId, long externalAppliedAtEpochMillis) {
+        StoredTerritoryForceLoadEnforcement existing = requireTerritoryForceLoadEnforcement(
+                enforcementId);
+        if (!existing.state().equals("PREPARED")) {
+            return existing;
+        }
+        if (externalAppliedAtEpochMillis < existing.notBeforeEpochMillis()) {
+            throw new IllegalStateException(
+                    "Territory Force-load Enforcement grace has not elapsed");
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE territory_force_load_enforcement
+                SET state = 'EXTERNAL_APPLIED', external_applied_at_epoch_millis = ?
+                WHERE enforcement_id = ? AND state = 'PREPARED'
+                """)) {
+            update.setLong(1, externalAppliedAtEpochMillis);
+            update.setString(2, enforcementId.toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Territory Force-load Enforcement state changed concurrently");
+            }
+            return territoryForceLoadEnforcement(enforcementId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to mark Territory Force-load Enforcement externally applied", failure);
+        }
+    }
+
+    public synchronized StoredTerritoryForceLoadEnforcement commitTerritoryForceLoadEnforcement(
+            UUID enforcementId, long committedAtEpochMillis) {
+        StoredTerritoryForceLoadEnforcement existing = requireTerritoryForceLoadEnforcement(
+                enforcementId);
+        if (existing.state().equals("CIVIC_COMMITTED")) {
+            return existing;
+        }
+        if (!existing.state().equals("EXTERNAL_APPLIED")) {
+            throw new IllegalStateException(
+                    "Territory Force-load Enforcement must be externally applied before commit");
+        }
+        if (existing.externalAppliedAtEpochMillis() == null
+                || committedAtEpochMillis < existing.externalAppliedAtEpochMillis()) {
+            throw new IllegalStateException(
+                    "Territory Force-load Enforcement commit cannot precede external application");
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE territory_force_load_enforcement
+                SET state = 'CIVIC_COMMITTED', committed_at_epoch_millis = ?
+                WHERE enforcement_id = ? AND state = 'EXTERNAL_APPLIED'
+                """)) {
+            update.setLong(1, committedAtEpochMillis);
+            update.setString(2, enforcementId.toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Territory Force-load Enforcement state changed concurrently");
+            }
+            return territoryForceLoadEnforcement(enforcementId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to commit Territory Force-load Enforcement", failure);
+        }
+    }
+
+    private StoredTerritoryForceLoadEnforcement requireTerritoryForceLoadEnforcement(
+            UUID enforcementId) {
+        StoredTerritoryForceLoadEnforcement existing =
+                territoryForceLoadEnforcement(enforcementId);
+        if (existing == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Territory Force-load Enforcement " + enforcementId);
+        }
+        return existing;
     }
 
     public synchronized StoredTerritoryClaimPermit territoryClaimPermit(
@@ -6426,6 +6599,75 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 40");
             }
+            if (version < 41) {
+                statement.execute("""
+                        CREATE TABLE territory_force_load_enforcement (
+                            enforcement_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            assessment_id TEXT NOT NULL UNIQUE
+                                REFERENCES territory_fiscal_assessment(assessment_id),
+                            ftb_team_id TEXT NOT NULL,
+                            dimension_id TEXT NOT NULL,
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PREPARED', 'EXTERNAL_APPLIED', 'CIVIC_COMMITTED'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            external_applied_at_epoch_millis INTEGER
+                                CHECK (external_applied_at_epoch_millis IS NULL
+                                    OR external_applied_at_epoch_millis >= 0),
+                            committed_at_epoch_millis INTEGER
+                                CHECK (committed_at_epoch_millis IS NULL
+                                    OR committed_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            CHECK (
+                                (state = 'PREPARED'
+                                    AND external_applied_at_epoch_millis IS NULL
+                                    AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'EXTERNAL_APPLIED'
+                                    AND external_applied_at_epoch_millis IS NOT NULL
+                                    AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'CIVIC_COMMITTED'
+                                    AND external_applied_at_epoch_millis IS NOT NULL
+                                    AND committed_at_epoch_millis IS NOT NULL)
+                            )
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX territory_force_load_enforcement_incomplete
+                        ON territory_force_load_enforcement (state, prepared_at_epoch_millis)
+                        WHERE state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                        """);
+                statement.execute("PRAGMA user_version = 41");
+            }
+            if (version < 42) {
+                statement.execute("""
+                        ALTER TABLE territory_force_load_enforcement
+                        ADD COLUMN not_before_epoch_millis INTEGER NOT NULL DEFAULT 0
+                        CHECK (not_before_epoch_millis >= 0)
+                        """);
+                statement.execute("""
+                        UPDATE territory_force_load_enforcement
+                        SET not_before_epoch_millis = COALESCE((
+                            SELECT CASE
+                                WHEN cycle.ends_at_epoch_millis
+                                        <= 9223372036854775807 - 86400000
+                                THEN cycle.ends_at_epoch_millis + 86400000
+                                ELSE 9223372036854775807
+                            END
+                            FROM territory_fiscal_assessment assessment
+                            JOIN territory_maintenance_cycle cycle
+                              ON cycle.cycle_id = assessment.cycle_id
+                            WHERE assessment.assessment_id =
+                                    territory_force_load_enforcement.assessment_id
+                        ), 9223372036854775807)
+                        """);
+                statement.execute("PRAGMA user_version = 42");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -6625,6 +6867,36 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("reason"),
                     result.getLong("settled_at_epoch_millis"));
         }
+    }
+
+    private StoredTerritoryForceLoadEnforcement readTerritoryForceLoadEnforcement(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedTerritoryForceLoadEnforcement(result) : null;
+        }
+    }
+
+    private static StoredTerritoryForceLoadEnforcement storedTerritoryForceLoadEnforcement(
+            ResultSet result) throws SQLException {
+        long externalAppliedAt = result.getLong("external_applied_at_epoch_millis");
+        Long externalApplied = result.wasNull() ? null : externalAppliedAt;
+        long committedAt = result.getLong("committed_at_epoch_millis");
+        Long committed = result.wasNull() ? null : committedAt;
+        return new StoredTerritoryForceLoadEnforcement(
+                UUID.fromString(result.getString("enforcement_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("assessment_id")),
+                UUID.fromString(result.getString("ftb_team_id")),
+                result.getString("dimension_id"),
+                result.getInt("chunk_x"),
+                result.getInt("chunk_z"),
+                result.getString("state"),
+                result.getString("reason"),
+                result.getLong("not_before_epoch_millis"),
+                result.getLong("prepared_at_epoch_millis"),
+                externalApplied,
+                committed);
     }
 
     private List<UUID> territoryMaintenanceSettlementAssessmentIds(

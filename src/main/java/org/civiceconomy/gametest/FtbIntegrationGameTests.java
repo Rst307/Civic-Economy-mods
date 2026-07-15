@@ -107,6 +107,52 @@ public final class FtbIntegrationGameTests {
     }
 
     @GameTest(template = "empty", timeoutTicks = 100)
+    public static void ftbChunksAdapterDisablesForceLoadWithoutDeletingOwnership(
+            GameTestHelper helper) {
+        Team team = FTBTeamsAPI.api()
+                .getManager()
+                .getTeamByID(TEST_SERVER_TEAM_ID)
+                .orElseGet(() -> createServerTeam(helper));
+        ChunkPos chunkPos = new ChunkPos(1300, 1301);
+        ChunkDimPos position = new ChunkDimPos(helper.getLevel().dimension(), chunkPos);
+        var source = helper.getLevel().getServer().createCommandSourceStack();
+        var teamData = FTBChunksAPI.api().getManager().getOrCreateData(team);
+        ClaimedChunk existing = FTBChunksAPI.api().getManager().getChunk(position);
+        if (existing != null) {
+            existing.unclaim(source, true);
+        }
+        helper.assertTrue(teamData.claim(source, position, false).isSuccess(), "force-load fixture claim");
+        helper.assertTrue(
+                teamData.forceLoad(source, position, false).isSuccess(),
+                "force-load fixture request");
+
+        try {
+            helper.assertTrue(
+                    FtbChunksAdapter.live().disableForceLoadIfOwned(
+                            team.getId(), helper.getLevel().dimension(), chunkPos, source),
+                    "first force-load disable changes FTB state");
+            FtbClaimFacts facts = FtbChunksAdapter.live()
+                    .find(helper.getLevel().dimension(), chunkPos)
+                    .orElseThrow();
+            helper.assertValueEqual(team.getId(), facts.teamId(), "FTB ownership remains unchanged");
+            helper.assertFalse(facts.forceLoadRequested(), "force-load request disabled");
+            helper.assertTrue(
+                    FTBChunksAPI.api().getManager().getChunk(position) != null,
+                    "FTB Claim remains present");
+            helper.assertFalse(
+                    FtbChunksAdapter.live().disableForceLoadIfOwned(
+                            team.getId(), helper.getLevel().dimension(), chunkPos, source),
+                    "replayed force-load disable is idempotent");
+        } finally {
+            ClaimedChunk claimed = FTBChunksAPI.api().getManager().getChunk(position);
+            if (claimed != null) {
+                claimed.unclaim(source, true);
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
     public static void ftbChunksAdapterSnapshotsOneTeamsClaimsInStableOrder(
             GameTestHelper helper) {
         Team team = FTBTeamsAPI.api()

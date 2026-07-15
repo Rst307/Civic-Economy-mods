@@ -54,6 +54,7 @@ class CivicDatabaseV37MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE territory_force_load_enforcement");
             statement.execute("DELETE FROM territory_maintenance_assessment_claim");
             statement.execute("ALTER TABLE territory_maintenance_assessment_claim DROP COLUMN restoration_cooldown_ends_at_epoch_millis");
             statement.execute("ALTER TABLE territory_maintenance_assessment_claim DROP COLUMN restoration_eligibility");
@@ -67,7 +68,7 @@ class CivicDatabaseV37MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(40, migrated.schemaVersion());
+            assertEquals(42, migrated.schemaVersion());
             var recovered = new TerritoryMaintenanceAssessmentProcessor(
                             new TerritoryMaintenanceRegistry(migrated))
                     .recover(service, "migration-cycle", "Migration assessment")
@@ -123,6 +124,7 @@ class CivicDatabaseV37MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE territory_force_load_enforcement");
             statement.execute("DELETE FROM territory_maintenance_assessment_claim");
             statement.execute("ALTER TABLE territory_maintenance_assessment_claim DROP COLUMN restoration_cooldown_ends_at_epoch_millis");
             statement.execute("ALTER TABLE territory_maintenance_assessment_claim DROP COLUMN restoration_eligibility");

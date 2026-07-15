@@ -160,6 +160,10 @@ _Avoid_: FTB 所有权、付款交易、有效性结论
 对一个 Nation 在一个 Territory Maintenance Cycle 内全部 Territory Fiscal Assessment 作出的单次财政结论；结算结果为 FULLY_FUNDED、PARTIALLY_FUNDED 或 UNFUNDED，并将每条评估分别结论为 EFFECTIVE 或 SUSPENDED。正费用续费只能由服务端读取精确 National Treasury 可用余额并按 Territory Maintenance Priority 选择；零费用评估可以在没有虚构财政交易的情况下结论为 EFFECTIVE。
 _Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 
+**领土强制加载执行（Territory Force-load Enforcement）**:
+一条 Territory Fiscal Assessment 结论为 SUSPENDED 并经过固定 24 小时短宽限后，Civic 对该评估持久化的精确 FTB Team、维度和区块执行的服务端强制加载关闭；它只取消 force-load，不删除、转移或重新声明底层 FTB Claim，并以 PREPARED、EXTERNAL_APPLIED、CIVIC_COMMITTED 三阶段恢复到精确一次的 Civic 结论。
+_Avoid_: 取消领土、调用方提供目标、批量关闭其他 Team 区块
+
 **领土恢复（Territory Maintenance Restoration）**:
 先前因维护不足而 SUSPENDED 的区块重新取得财政有效性的过程；只收配置的恢复费和下一个完整周期维护费，不追缴历史欠费，并在成功恢复后进入冷却。每条后续评估明确记录恢复资格：无需恢复（NOT_REQUIRED）、可恢复（ELIGIBLE）或冷却阻止（COOLDOWN_BLOCKED）；冷却阻止的区块不能因余额充足而重新生效。
 _Avoid_: 补缴全部欠费、重新占领 FTB 区块、无冷却反复恢复

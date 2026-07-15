@@ -56,13 +56,14 @@ class CivicDatabaseV40MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE territory_force_load_enforcement");
             dropRestorationColumns(statement, "territory_maintenance_assessment_claim");
             dropRestorationColumns(statement, "territory_fiscal_assessment");
             statement.execute("PRAGMA user_version = 39");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(40, migrated.schemaVersion());
+            assertEquals(42, migrated.schemaVersion());
             var recovered = new TerritoryMaintenanceAssessmentProcessor(
                             new TerritoryMaintenanceRegistry(migrated))
                     .recover(service, "migration-v40-cycle", "Migration assessment")

@@ -87,7 +87,7 @@ class CivicDatabaseV33MigrationTest {
         downgradeSettlementTablesToV32(databaseFile);
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(40, migrated.schemaVersion());
+            assertEquals(42, migrated.schemaVersion());
             StoredTerritoryMaintenanceSettlement funded =
                     migrated.territoryMaintenanceSettlement("migration", "funded-settlement");
             assertEquals("FULLY_FUNDED", funded.outcome());
@@ -105,6 +105,7 @@ class CivicDatabaseV33MigrationTest {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE territory_force_load_enforcement");
             statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_cooldown_ends_at_epoch_millis");
             statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_eligibility");
             statement.execute("ALTER TABLE territory_fiscal_assessment DROP COLUMN restoration_fee_minor_units");

@@ -16,8 +16,13 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -58,6 +63,9 @@ import org.civiceconomy.territory.FreeClaimAuthorizationMirror;
 import org.civiceconomy.territory.TerritoryClaimTarget;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
 import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
+import org.civiceconomy.territory.TerritoryForceLoadEnforcement;
+import org.civiceconomy.territory.TerritoryForceLoadEnforcementRegistry;
+import org.civiceconomy.territory.TerritoryForceLoadEnforcementState;
 import org.civiceconomy.territory.PrepareTerritoryClaimPrepayment;
 import org.civiceconomy.territory.CancelTerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermit;
@@ -180,6 +188,7 @@ public final class CivicServerRuntime {
         scheduleTerritoryPermitCompensation(state);
         schedulePermanentDestructionRecovery(state);
         scheduleTerritoryMaintenanceAssessment(state);
+        scheduleTerritoryForceLoadEnforcementRecovery(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
             LOGGER.warn(
@@ -253,6 +262,7 @@ public final class CivicServerRuntime {
                 >= TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS) {
             current.ticksSinceTerritoryMaintenanceAssessment = 0;
             scheduleTerritoryMaintenanceAssessment(current);
+            scheduleTerritoryForceLoadEnforcementRecovery(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -1054,6 +1064,7 @@ public final class CivicServerRuntime {
                         current, database, batch, settlementClock))
                 .whenComplete((result, failure) -> {
                     current.territoryMaintenanceSettlementQueued.set(false);
+                    scheduleTerritoryForceLoadEnforcementRecovery(current);
                     if (failure != null) {
                         LOGGER.error(
                                 "Automatic Territory Maintenance settlement failed closed",
@@ -1087,6 +1098,13 @@ public final class CivicServerRuntime {
                         .find(policyIdFromAutomaticRequest(requestPrefix))
                         .orElseThrow(() -> new IllegalStateException(
                                 "Automatic Territory Maintenance Settlement policy is missing"));
+        TerritoryForceLoadEnforcementRegistry enforcements =
+                new TerritoryForceLoadEnforcementRegistry(database, settlementClock);
+        batch.assessments().stream()
+                .filter(assessment ->
+                        assessment.validity() == TerritoryFiscalValidity.SUSPENDED)
+                .forEach(assessment -> prepareTerritoryForceLoadEnforcement(
+                        enforcements, requestPrefix, assessment.assessmentId()));
         List<org.civiceconomy.nation.NationId> nations = batch.assessments().stream()
                 .filter(assessment -> assessment.validity() == TerritoryFiscalValidity.PENDING)
                 .map(org.civiceconomy.territory.TerritoryFiscalAssessment::nationId)
@@ -1130,6 +1148,9 @@ public final class CivicServerRuntime {
                 } else {
                     unfunded++;
                 }
+                settlement.suspendedAssessmentIds().forEach(assessmentId ->
+                        prepareTerritoryForceLoadEnforcement(
+                                enforcements, requestPrefix, assessmentId));
             } catch (RuntimeException failure) {
                 LOGGER.error(
                         "Automatic Territory Maintenance settlement failed closed for Nation {}",
@@ -1147,6 +1168,97 @@ public final class CivicServerRuntime {
         }
         return new AutomaticMaintenanceSettlementResult(
                 nations.size(), fullyFunded, partiallyFunded, unfunded);
+    }
+
+    private static TerritoryForceLoadEnforcement prepareTerritoryForceLoadEnforcement(
+            TerritoryForceLoadEnforcementRegistry enforcements,
+            String requestPrefix,
+            UUID assessmentId) {
+        return enforcements.prepare(
+                TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                requestPrefix + ":force-load:" + assessmentId,
+                assessmentId,
+                "Disable FTB force-load for suspended Territory");
+    }
+
+    private void scheduleTerritoryForceLoadEnforcementRecovery(RuntimeState current) {
+        if (state != current
+                || !current.territoryForceLoadEnforcementQueued.compareAndSet(false, true)) {
+            return;
+        }
+        current.writer.submitDatabase(database ->
+                        new TerritoryForceLoadEnforcementRegistry(database).incomplete())
+                .whenComplete((enforcements, failure) -> {
+                    current.territoryForceLoadEnforcementQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Territory force-load Enforcement recovery failed closed",
+                                failure);
+                        return;
+                    }
+                    for (TerritoryForceLoadEnforcement enforcement : enforcements) {
+                        current.server.execute(() -> applyTerritoryForceLoadEnforcement(
+                                current, enforcement));
+                    }
+                });
+    }
+
+    private void applyTerritoryForceLoadEnforcement(
+            RuntimeState current, TerritoryForceLoadEnforcement enforcement) {
+        if (state != current
+                || enforcement.state()
+                        == TerritoryForceLoadEnforcementState.CIVIC_COMMITTED) {
+            return;
+        }
+        try {
+            ResourceLocation dimensionId =
+                    ResourceLocation.tryParse(enforcement.position().dimensionId());
+            if (dimensionId == null) {
+                throw new IllegalStateException(
+                        "Territory force-load Enforcement dimension is invalid");
+            }
+            ResourceKey<Level> dimension = ResourceKey.create(Registries.DIMENSION, dimensionId);
+            FtbChunksAdapter.live().disableForceLoadIfOwned(
+                    enforcement.ftbTeamId(),
+                    dimension,
+                    new ChunkPos(
+                            enforcement.position().chunkX(),
+                            enforcement.position().chunkZ()),
+                    current.server.createCommandSourceStack());
+            Clock enforcementClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+            current.writer.submitDatabase(database -> {
+                        TerritoryForceLoadEnforcementRegistry registry =
+                                new TerritoryForceLoadEnforcementRegistry(
+                                        database, enforcementClock);
+                        TerritoryForceLoadEnforcement latest = registry
+                                .find(enforcement.enforcementId())
+                                .orElseThrow(() -> new IllegalStateException(
+                                        "Territory force-load Enforcement disappeared"));
+                        if (latest.state() == TerritoryForceLoadEnforcementState.PREPARED) {
+                            latest = registry.markExternalApplied(latest.enforcementId());
+                        }
+                        return registry.commit(latest.enforcementId());
+                    })
+                    .whenComplete((committed, failure) -> {
+                        if (failure != null) {
+                            LOGGER.error(
+                                    "Territory force-load Enforcement Civic commit failed; "
+                                            + "recovery will verify the exact FTB Claim again",
+                                    failure);
+                        } else {
+                            LOGGER.info(
+                                    "Territory force-load Enforcement {} committed for Assessment {}",
+                                    committed.enforcementId(),
+                                    committed.assessmentId());
+                        }
+                    });
+        } catch (RuntimeException failure) {
+            LOGGER.error(
+                    "Territory force-load Enforcement failed closed for Assessment {}; "
+                            + "the durable state remains recoverable",
+                    enforcement.assessmentId(),
+                    failure);
+        }
     }
 
     private static AccountId nationalTreasury(org.civiceconomy.nation.NationId nationId) {
@@ -1168,6 +1280,7 @@ public final class CivicServerRuntime {
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceSettlementQueued = new AtomicBoolean();
+        private final AtomicBoolean territoryForceLoadEnforcementQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
