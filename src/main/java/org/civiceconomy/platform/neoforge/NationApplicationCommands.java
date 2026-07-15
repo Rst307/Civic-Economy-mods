@@ -93,6 +93,22 @@ final class NationApplicationCommands {
 
     private static LiteralArgumentBuilder<CommandSourceStack> treasuryCommand() {
         return Commands.literal("treasury")
+                .then(Commands.literal("withdraw")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "amountMinorUnits",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> withdrawTreasury(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        LongArgumentType.getLong(
+                                                                context, "amountMinorUnits"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))))
                 .then(Commands.literal("destroy")
                         .then(Commands.argument("requestId", StringArgumentType.word())
                                 .then(Commands.argument(
@@ -109,6 +125,36 @@ final class NationApplicationCommands {
                                                                 context, "amountMinorUnits"),
                                                         StringArgumentType.getString(
                                                                 context, "reason")))))));
+    }
+
+    private static int withdrawTreasury(
+            CommandSourceStack source,
+            String requestId,
+            long amountMinorUnits,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .withdrawNationalTreasury(player, requestId, amountMinorUnits, reason)
+                .whenComplete((withdrawal, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "National Treasury Withdrawal", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Committed Treasury Withdrawal "
+                                                + withdrawal.withdrawalId()
+                                                + " amount="
+                                                + withdrawal.amount().minorUnits()
+                                                + " player="
+                                                + withdrawal.actorPlayerId()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("National Treasury Withdrawal queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int destroyTreasury(

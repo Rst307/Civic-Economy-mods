@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 54;
+    private static final int SCHEMA_VERSION = 55;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -6195,6 +6195,189 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredTreasuryWithdrawalOperation prepareTreasuryWithdrawal(
+            UUID withdrawalId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            String sourceAccount,
+            UUID actorPlayerId,
+            long amountMinorUnits,
+            String reason,
+            long preparedAtEpochMillis) {
+        if (withdrawalId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || nationId == null
+                || sourceAccount == null
+                || sourceAccount.isBlank()
+                || actorPlayerId == null
+                || amountMinorUnits <= 0L
+                || reason == null
+                || reason.isBlank()
+                || preparedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Treasury Withdrawal values are invalid");
+        }
+        StoredTreasuryWithdrawalOperation replay =
+                treasuryWithdrawalOperation(serviceIdentity, requestId);
+        if (replay != null) {
+            return replay;
+        }
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO treasury_withdrawal_operation (
+                        withdrawal_id, service_identity, request_id, nation_id,
+                        source_account, actor_player_id, amount_minor_units,
+                        reason, state, prepared_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?)
+                    """)) {
+                insert.setString(1, withdrawalId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, nationId.toString());
+                insert.setString(5, sourceAccount);
+                insert.setString(6, actorPlayerId.toString());
+                insert.setLong(7, amountMinorUnits);
+                insert.setString(8, reason);
+                insert.setLong(9, preparedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return treasuryWithdrawalOperation(serviceIdentity, requestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException("Unable to prepare Treasury Withdrawal", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Treasury Withdrawal preparation", primaryFailure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalOperation treasuryWithdrawalOperation(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_operation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readTreasuryWithdrawalOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Treasury Withdrawal", failure);
+        }
+    }
+
+    public synchronized List<StoredTreasuryWithdrawalOperation> treasuryWithdrawalOperations() {
+        List<StoredTreasuryWithdrawalOperation> operations = new ArrayList<>();
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("""
+                        SELECT * FROM treasury_withdrawal_operation
+                        ORDER BY prepared_at_epoch_millis, withdrawal_id
+                        """)) {
+            while (result.next()) {
+                operations.add(storedTreasuryWithdrawalOperation(result));
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list Treasury Withdrawals", failure);
+        }
+    }
+
+    public synchronized List<StoredTreasuryWithdrawalOperation>
+            pendingTreasuryWithdrawalOperations(String serviceIdentity) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal service identity cannot be blank");
+        }
+        List<StoredTreasuryWithdrawalOperation> operations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_operation
+                WHERE service_identity = ? AND state = 'PREPARED'
+                ORDER BY prepared_at_epoch_millis, withdrawal_id
+                """)) {
+            query.setString(1, serviceIdentity);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    operations.add(storedTreasuryWithdrawalOperation(result));
+                }
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list pending Treasury Withdrawals", failure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalOperation commitTreasuryWithdrawal(
+            UUID withdrawalId, long committedAtEpochMillis) {
+        if (withdrawalId == null || committedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Treasury Withdrawal commit values are invalid");
+        }
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            StoredTreasuryWithdrawalOperation operation =
+                    treasuryWithdrawalOperation(withdrawalId);
+            if (operation == null) {
+                throw new IllegalArgumentException(
+                        "Unknown Treasury Withdrawal " + withdrawalId);
+            }
+            if (operation.state().equals("COMMITTED")) {
+                connection.commit();
+                return operation;
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE treasury_withdrawal_operation
+                    SET state = 'COMMITTED', committed_at_epoch_millis = ?
+                    WHERE withdrawal_id = ? AND state = 'PREPARED'
+                    """)) {
+                update.setLong(1, committedAtEpochMillis);
+                update.setString(2, withdrawalId.toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Treasury Withdrawal did not advance " + withdrawalId);
+                }
+            }
+            connection.commit();
+            return treasuryWithdrawalOperation(withdrawalId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException("Unable to commit Treasury Withdrawal", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Treasury Withdrawal commit", primaryFailure);
+        }
+    }
+
+    private StoredTreasuryWithdrawalOperation treasuryWithdrawalOperation(UUID withdrawalId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM treasury_withdrawal_operation WHERE withdrawal_id = ?
+                """)) {
+            query.setString(1, withdrawalId.toString());
+            return readTreasuryWithdrawalOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Treasury Withdrawal", failure);
+        }
+    }
+
     private StoredPermanentDestructionOperation permanentDestructionOperation(UUID operationId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM permanent_destruction_operation WHERE operation_id = ?
@@ -10604,6 +10787,86 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 54");
             }
+            if (version < 55) {
+                statement.execute("DROP INDEX fiscal_service_grant_active_scope");
+                statement.execute("ALTER TABLE fiscal_service_grant_revocation RENAME TO fiscal_service_grant_revocation_v54");
+                statement.execute("ALTER TABLE fiscal_service_grant RENAME TO fiscal_service_grant_v54");
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            capability TEXT NOT NULL CHECK (capability IN (
+                                'READ_ACCOUNT', 'RESERVE_FUNDS', 'MANAGE_ESCROW',
+                                'MANAGE_BUDGET', 'ISSUE_BILL', 'FUND_BILL',
+                                'SETTLE_PAYMENT', 'REFUND_PAYMENT', 'COMPENSATE_PAYMENT',
+                                'PERMANENT_DESTRUCTION', 'WITHDRAW_CASH', 'MANAGE_ISSUANCE'
+                            )),
+                            account_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant
+                        SELECT * FROM fiscal_service_grant_v54
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_service_grant_active_scope
+                        ON fiscal_service_grant (service_identity, capability, account_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_service_grant(grant_id),
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant_revocation
+                        SELECT * FROM fiscal_service_grant_revocation_v54
+                        """);
+                statement.execute("DROP TABLE fiscal_service_grant_revocation_v54");
+                statement.execute("DROP TABLE fiscal_service_grant_v54");
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS treasury_withdrawal_operation (
+                            withdrawal_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            source_account TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            state TEXT NOT NULL CHECK (state IN ('PREPARED', 'COMMITTED')),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            committed_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((state = 'PREPARED' AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'COMMITTED' AND committed_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS treasury_withdrawal_pending_actor
+                        ON treasury_withdrawal_operation (
+                            actor_player_id, prepared_at_epoch_millis, withdrawal_id
+                        )
+                        WHERE state = 'PREPARED'
+                        """);
+                statement.execute("PRAGMA user_version = 55");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11133,6 +11396,31 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getString("state"),
                 result.getLong("prepared_at_epoch_millis"),
                 result.wasNull() ? null : committedAt);
+    }
+
+    private StoredTreasuryWithdrawalOperation readTreasuryWithdrawalOperation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            return result.next() ? storedTreasuryWithdrawalOperation(result) : null;
+        }
+    }
+
+    private static StoredTreasuryWithdrawalOperation storedTreasuryWithdrawalOperation(
+            ResultSet result) throws SQLException {
+        long committedAt = result.getLong("committed_at_epoch_millis");
+        Long committedAtEpochMillis = result.wasNull() ? null : committedAt;
+        return new StoredTreasuryWithdrawalOperation(
+                UUID.fromString(result.getString("withdrawal_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("nation_id")),
+                result.getString("source_account"),
+                UUID.fromString(result.getString("actor_player_id")),
+                result.getLong("amount_minor_units"),
+                result.getString("reason"),
+                result.getString("state"),
+                result.getLong("prepared_at_epoch_millis"),
+                committedAtEpochMillis);
     }
 
     private static StoredMonetarySupplyEvent storedMonetarySupplyEvent(ResultSet result)

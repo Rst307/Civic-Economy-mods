@@ -22,6 +22,7 @@ final class CivicFiscalAccountData extends SavedData {
     private final Map<AccountId, StoredAccount> accounts = new LinkedHashMap<>();
     private final Set<UUID> appliedPermanentDestructions = new HashSet<>();
     private final Set<UUID> appliedMintIssuances = new HashSet<>();
+    private final Set<UUID> appliedTreasuryWithdrawalDebits = new HashSet<>();
 
     private CivicFiscalAccountData() {}
 
@@ -47,6 +48,12 @@ final class CivicFiscalAccountData extends SavedData {
         ListTag savedIssuances = root.getList("AppliedMintIssuances", Tag.TAG_STRING);
         for (int index = 0; index < savedIssuances.size(); index++) {
             data.appliedMintIssuances.add(UUID.fromString(savedIssuances.getString(index)));
+        }
+        ListTag savedWithdrawalDebits =
+                root.getList("AppliedTreasuryWithdrawalDebits", Tag.TAG_STRING);
+        for (int index = 0; index < savedWithdrawalDebits.size(); index++) {
+            data.appliedTreasuryWithdrawalDebits.add(
+                    UUID.fromString(savedWithdrawalDebits.getString(index)));
         }
         return data;
     }
@@ -95,6 +102,16 @@ final class CivicFiscalAccountData extends SavedData {
         }
     }
 
+    boolean wasTreasuryWithdrawalDebitApplied(UUID withdrawalId) {
+        return appliedTreasuryWithdrawalDebits.contains(withdrawalId);
+    }
+
+    void recordTreasuryWithdrawalDebitApplied(UUID withdrawalId) {
+        if (appliedTreasuryWithdrawalDebits.add(withdrawalId)) {
+            setDirty();
+        }
+    }
+
     @Override
     public CompoundTag save(CompoundTag root, HolderLookup.Provider registries) {
         ListTag savedAccounts = new ListTag();
@@ -120,6 +137,13 @@ final class CivicFiscalAccountData extends SavedData {
                 .map(net.minecraft.nbt.StringTag::valueOf)
                 .forEach(savedIssuances::add);
         root.put("AppliedMintIssuances", savedIssuances);
+        ListTag savedWithdrawalDebits = new ListTag();
+        appliedTreasuryWithdrawalDebits.stream()
+                .map(UUID::toString)
+                .sorted()
+                .map(net.minecraft.nbt.StringTag::valueOf)
+                .forEach(savedWithdrawalDebits::add);
+        root.put("AppliedTreasuryWithdrawalDebits", savedWithdrawalDebits);
         return root;
     }
 

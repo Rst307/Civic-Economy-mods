@@ -39,6 +39,10 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBa
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyTerritoryClearingAccountProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPublicMaintenanceFundProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.PermanentDestructionCoordinator;
+import org.civiceconomy.integration.lightmanscurrency.TreasuryWithdrawalCoordinator;
+import org.civiceconomy.fiscal.ConfirmTreasuryWithdrawal;
+import org.civiceconomy.fiscal.TreasuryWithdrawal;
+import org.civiceconomy.fiscal.TreasuryWithdrawalFiscalServiceProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.TerritoryMaintenancePaymentCoordinator;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
 import org.civiceconomy.nation.RecordOnlineTime;
@@ -132,6 +136,7 @@ public final class CivicServerRuntime {
     private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
+    private static final int TREASURY_WITHDRAWAL_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int MINT_BATCH_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
@@ -246,6 +251,7 @@ public final class CivicServerRuntime {
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
         schedulePermanentDestructionRecovery(state);
+        scheduleTreasuryWithdrawalRecovery(state);
         scheduleMintBatchRecovery(state);
         scheduleTerritoryMaintenanceAssessment(state);
         scheduleTerritoryForceLoadEnforcementRecovery(state);
@@ -273,6 +279,7 @@ public final class CivicServerRuntime {
         RuntimeState current = state;
         if (current != null) {
             current.sessions.login(player.getUUID(), clock.millis());
+            scheduleTreasuryWithdrawalRecovery(current);
         }
     }
 
@@ -316,6 +323,12 @@ public final class CivicServerRuntime {
                 >= PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS) {
             current.ticksSincePermanentDestructionRecovery = 0;
             schedulePermanentDestructionRecovery(current);
+        }
+        current.ticksSinceTreasuryWithdrawalRecovery++;
+        if (current.ticksSinceTreasuryWithdrawalRecovery
+                >= TREASURY_WITHDRAWAL_RECOVERY_INTERVAL_TICKS) {
+            current.ticksSinceTreasuryWithdrawalRecovery = 0;
+            scheduleTreasuryWithdrawalRecovery(current);
         }
         current.ticksSinceMintBatchRecovery++;
         if (current.ticksSinceMintBatchRecovery >= MINT_BATCH_RECOVERY_INTERVAL_TICKS) {
@@ -497,6 +510,66 @@ public final class CivicServerRuntime {
                                     "player:" + actorPlayerId,
                                     reason));
                 }));
+    }
+
+    CompletableFuture<TreasuryWithdrawal> withdrawNationalTreasury(
+            ServerPlayer actor,
+            String requestId,
+            long amountMinorUnits,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.MANAGE_WITHDRAWAL);
+                    AccountId treasury = nationalTreasury(nation.nationId());
+                    FiscalAuthorization authorization = new FiscalAuthorization(database);
+                    new TreasuryWithdrawalFiscalServiceProvisioner(authorization)
+                            .ensureAuthorized(treasury);
+                    var session = authorization.openSession(
+                            TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    TreasuryWithdrawalCoordinator coordinator =
+                            TreasuryWithdrawalCoordinator.live(
+                                    database,
+                                    session,
+                                    commandClock,
+                                    current.server.overworld(),
+                                    playerId -> actorPlayerId.equals(playerId)
+                                            ? actor
+                                            : current.server.getPlayerList().getPlayer(playerId));
+                    TreasuryWithdrawal prepared = coordinator.prepare(
+                            new ConfirmTreasuryWithdrawal(
+                                    TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId,
+                                    nation.nationId(),
+                                    treasury,
+                                    actorPlayerId,
+                                    MoneyAmount.ofMinorUnits(amountMinorUnits),
+                                    reason));
+                    return new PreparedTreasuryWithdrawal(coordinator, prepared);
+                }))
+                .thenCompose(prepared -> onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.withdrawal());
+                    return prepared;
+                }))
+                .thenCompose(prepared -> current.writer.submitDatabase(database ->
+                        prepared.coordinator().commit(prepared.withdrawal())));
     }
 
     CompletableFuture<MintBatch> startMintBatch(
@@ -1650,6 +1723,93 @@ public final class CivicServerRuntime {
         return operationCount;
     }
 
+    private void scheduleTreasuryWithdrawalRecovery(RuntimeState current) {
+        if (state != current
+                || !current.treasuryWithdrawalRecoveryQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database -> {
+                    List<org.civiceconomy.persistence.StoredTreasuryWithdrawalOperation>
+                            pending = database.pendingTreasuryWithdrawalOperations(
+                                    TreasuryWithdrawalFiscalServiceProvisioner
+                                            .SERVICE_IDENTITY
+                                            .value());
+                    if (pending.isEmpty()) {
+                        return null;
+                    }
+                    FiscalAuthorization authorization = new FiscalAuthorization(database);
+                    var session = authorization.openSession(
+                            TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    TreasuryWithdrawalCoordinator coordinator =
+                            TreasuryWithdrawalCoordinator.live(
+                                    database,
+                                    session,
+                                    recoveryClock,
+                                    current.server.overworld());
+                    return new TreasuryWithdrawalRecovery(
+                            coordinator,
+                            pending.stream()
+                                    .map(operation -> new TreasuryWithdrawal(
+                                            operation.withdrawalId(),
+                                            new ServiceIdentity(operation.serviceIdentity()),
+                                            operation.requestId(),
+                                            new org.civiceconomy.nation.NationId(
+                                                    operation.nationId()),
+                                            new AccountId(operation.sourceAccount()),
+                                            operation.actorPlayerId(),
+                                            MoneyAmount.ofMinorUnits(
+                                                    operation.amountMinorUnits()),
+                                            operation.reason(),
+                                            operation.state(),
+                                            Instant.ofEpochMilli(
+                                                    operation.preparedAtEpochMillis()),
+                                            null))
+                                    .toList());
+                })
+                .whenComplete((recovery, failure) -> {
+                    if (failure != null) {
+                        current.treasuryWithdrawalRecoveryQueued.set(false);
+                        LOGGER.error(
+                                "Treasury Withdrawal recovery scan failed closed", failure);
+                    } else if (recovery == null) {
+                        current.treasuryWithdrawalRecoveryQueued.set(false);
+                    } else {
+                        recoverTreasuryWithdrawals(current, recovery, 0);
+                    }
+                });
+    }
+
+    private void recoverTreasuryWithdrawals(
+            RuntimeState current, TreasuryWithdrawalRecovery recovery, int index) {
+        if (state != current || index >= recovery.withdrawals().size()) {
+            current.treasuryWithdrawalRecoveryQueued.set(false);
+            if (state == current && index > 0) {
+                LOGGER.info("Replayed {} Treasury Withdrawal operation(s)", index);
+            }
+            return;
+        }
+        TreasuryWithdrawal withdrawal = recovery.withdrawals().get(index);
+        onServer(current, () -> {
+                    recovery.coordinator().applyExternal(withdrawal);
+                    return withdrawal;
+                })
+                .thenCompose(applied -> current.writer.submitDatabase(database ->
+                        recovery.coordinator().commit(applied)))
+                .whenComplete((committed, failure) -> {
+                    if (failure != null) {
+                        current.treasuryWithdrawalRecoveryQueued.set(false);
+                        LOGGER.warn(
+                                "Treasury Withdrawal {} remains pending for player {}",
+                                withdrawal.withdrawalId(),
+                                withdrawal.actorPlayerId(),
+                                failure);
+                    } else {
+                        recoverTreasuryWithdrawals(current, recovery, index + 1);
+                    }
+                });
+    }
+
     private void scheduleMintBatchRecovery(RuntimeState current) {
         if (state != current || !current.mintBatchRecoveryQueued.compareAndSet(false, true)) {
             return;
@@ -2226,6 +2386,7 @@ public final class CivicServerRuntime {
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
+        private final AtomicBoolean treasuryWithdrawalRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean mintBatchRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceSettlementQueued = new AtomicBoolean();
@@ -2238,6 +2399,7 @@ public final class CivicServerRuntime {
         private int ticksSinceCitizenshipReconciliation;
         private int ticksSinceTerritoryPermitCompensation;
         private int ticksSincePermanentDestructionRecovery;
+        private int ticksSinceTreasuryWithdrawalRecovery;
         private int ticksSinceMintBatchRecovery;
         private int ticksSinceTerritoryMaintenanceAssessment;
         private int ticksSinceDatabaseBackup;
@@ -2285,6 +2447,14 @@ public final class CivicServerRuntime {
             PendingMintMaterialTake pending,
             NationTeam team,
             TerritoryOwnershipSource ownership) {}
+
+    private record PreparedTreasuryWithdrawal(
+            TreasuryWithdrawalCoordinator coordinator,
+            TreasuryWithdrawal withdrawal) {}
+
+    private record TreasuryWithdrawalRecovery(
+            TreasuryWithdrawalCoordinator coordinator,
+            List<TreasuryWithdrawal> withdrawals) {}
 
     private sealed interface MintCancellationPreparation
             permits MintCancellationReplay, PreparedMintReturn {}

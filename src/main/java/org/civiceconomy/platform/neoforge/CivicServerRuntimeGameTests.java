@@ -3,6 +3,7 @@ package org.civiceconomy.platform.neoforge;
 import com.mojang.authlib.GameProfile;
 import io.github.lightman314.lightmanscurrency.api.money.bank.BankAPI;
 import io.github.lightman314.lightmanscurrency.api.money.coins.CoinAPI;
+import io.github.lightman314.lightmanscurrency.api.money.MoneyAPI;
 import io.github.lightman314.lightmanscurrency.api.money.value.builtin.CoinValue;
 import io.github.lightman314.lightmanscurrency.common.data.CustomSaveData;
 import io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache;
@@ -521,7 +522,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Mint command actions");
         helper.assertValueEqual(
-                Set.of("destroy"),
+                Set.of("destroy", "withdraw"),
                 economy.getChild("nation")
                         .getChild("treasury")
                         .getChildren().stream()
@@ -1209,6 +1210,284 @@ public final class CivicServerRuntimeGameTests {
                                     .balance(new AccountId(operation.sourceAccount()))
                                     .minorUnits(),
                             "changed replay does not repeat LC destruction");
+                })
+                .thenSucceed();
+    }
+
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 800,
+            batch = "runtime-treasury-withdrawal-command")
+    public static void playerWithdrawsExactNationalTreasuryCashThroughRealLcExactlyOnce(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-treasury-withdrawal"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String unauthorizedRequestId = "unauthorized-withdrawal-" + UUID.randomUUID();
+        String requestId = "player-withdrawal-" + UUID.randomUUID();
+        String forgedSource = "nation:99999999-9999-9999-9999-999999999999:treasury";
+        String reason = "GameTest Treasury Withdrawal; attempted-source=" + forgedSource;
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
+        AtomicReference<Throwable> capacityFailure = new AtomicReference<>();
+        AtomicReference<Throwable> changedReplayFailure = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean unauthorizedFinished = new AtomicBoolean();
+        AtomicBoolean permissionReady = new AtomicBoolean();
+        AtomicBoolean capacityAttemptFinished = new AtomicBoolean();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicBoolean changedReplayFinished = new AtomicBoolean();
+        AtomicLong issuanceBeforeWithdrawal = new AtomicLong();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "player-withdrawal-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    new CitizenshipRegistry(
+                                    database, java.time.Duration.ofDays(7), setupClock)
+                            .join(new JoinCitizenship(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "player-withdrawal-citizenship-" + UUID.randomUUID(),
+                                    player.getUUID(),
+                                    nation.nationId()));
+                    issuanceBeforeWithdrawal.set(
+                            database.cumulativeNetIssuanceMinorUnits());
+                    return nation.nationId();
+                })
+                .whenComplete((registeredNationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                fundTreasury(
+                                        helper,
+                                        registeredNationId,
+                                        "Player Treasury Withdrawal Treasury",
+                                        1_000L);
+                                setupReady.set(true);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Treasury Withdrawal setup");
+                    helper.assertTrue(setupReady.get(), "Treasury Withdrawal setup complete");
+                })
+                .thenExecute(() -> runtime.withdrawNationalTreasury(
+                                player,
+                                unauthorizedRequestId,
+                                100L,
+                                "Must fail before fiscal or LC writes")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Unauthorized Treasury Withdrawal unexpectedly succeeded"));
+                            } else {
+                                unauthorizedFailure.set(rootCause(failure));
+                            }
+                            unauthorizedFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Unauthorized Treasury Withdrawal");
+                    helper.assertTrue(
+                            unauthorizedFinished.get(),
+                            "unauthorized Treasury Withdrawal completed");
+                    helper.assertTrue(
+                            unauthorizedFailure.get() instanceof SecurityException,
+                            "unauthorized request fails at exact Nation fiscal permission");
+                    AccountId treasury = new AccountId(
+                            "nation:" + nationId.get().value() + ":treasury");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(treasury)
+                                    .minorUnits(),
+                            "unauthorized request leaves LC Treasury unchanged");
+                    helper.assertTrue(
+                            treasuryWithdrawalByRequest(databaseFile, unauthorizedRequestId) == null,
+                            "unauthorized request creates no Treasury Withdrawal operation");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            NationRegistry nations = new NationRegistry(
+                                    database, snapshot(teamSnapshot));
+                            CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                                    database, java.time.Duration.ofDays(7), setupClock);
+                            var provider = new FtbTeamsNationProvider(
+                                    nations,
+                                    citizenships,
+                                    new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                                    snapshot(teamSnapshot));
+                            new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                                    .grant(new GrantNationFiscalPermission(
+                                            new ServiceIdentity("civiceconomy-gametest"),
+                                            "player-withdrawal-authority-" + UUID.randomUUID(),
+                                            nationId.get(),
+                                            player.getUUID(),
+                                            player.getUUID(),
+                                            NationFiscalPermission.MANAGE_WITHDRAWAL,
+                                            "Authorize real player Treasury Withdrawal"));
+                            return null;
+                        })
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                permissionReady.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Treasury Withdrawal permission");
+                    helper.assertTrue(permissionReady.get(), "Treasury Withdrawal permission ready");
+                })
+                .thenExecute(() -> {
+                    for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+                        player.getInventory().setItem(slot, new ItemStack(Items.STONE, 64));
+                    }
+                    player.getInventory().setChanged();
+                    runtime.withdrawNationalTreasury(player, requestId, 300L, reason)
+                            .whenComplete((ignored, failure) -> {
+                                if (failure == null) {
+                                    asyncFailure.set(new AssertionError(
+                                            "Full-inventory Treasury Withdrawal unexpectedly succeeded"));
+                                } else {
+                                    capacityFailure.set(rootCause(failure));
+                                }
+                                capacityAttemptFinished.set(true);
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Full inventory Treasury Withdrawal");
+                    helper.assertTrue(
+                            capacityAttemptFinished.get(),
+                            "full inventory Treasury Withdrawal completed");
+                    helper.assertTrue(
+                            capacityFailure.get()
+                                    instanceof org.civiceconomy.integration.lightmanscurrency
+                                            .InsufficientTreasuryWithdrawalInventoryCapacityException,
+                            "full inventory fails at exact LC capacity simulation");
+                    TreasuryWithdrawalRow prepared =
+                            treasuryWithdrawalByRequest(databaseFile, requestId);
+                    helper.assertTrue(prepared != null, "capacity failure leaves durable operation");
+                    helper.assertValueEqual("PREPARED", prepared.state(), "pending withdrawal state");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(prepared.sourceAccount()))
+                                    .minorUnits(),
+                            "capacity failure does not debit the Treasury");
+                })
+                .thenExecute(() -> {
+                    player.getInventory().clearContent();
+                    player.getInventory().setChanged();
+                    try {
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        String command = "civic economy nation treasury withdraw "
+                                + requestId + " 300 " + reason;
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        player.createCommandSourceStack().withSuppressedOutput()),
+                                "Treasury Withdrawal command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        player.createCommandSourceStack().withSuppressedOutput()),
+                                "Treasury Withdrawal replay command result");
+                        commandStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Treasury Withdrawal command");
+                    helper.assertTrue(commandStarted.get(), "Treasury Withdrawal command started");
+                    TreasuryWithdrawalRow operation =
+                            treasuryWithdrawalByRequest(databaseFile, requestId);
+                    helper.assertTrue(operation != null, "persisted Treasury Withdrawal operation");
+                    helper.assertValueEqual("COMMITTED", operation.state(), "withdrawal state");
+                    helper.assertValueEqual(
+                            nationId.get().value().toString(),
+                            operation.nationId(),
+                            "server-derived formal Nation");
+                    helper.assertValueEqual(
+                            "nation:" + nationId.get().value() + ":treasury",
+                            operation.sourceAccount(),
+                            "server-derived exact National Treasury source");
+                    helper.assertValueEqual(
+                            player.getUUID().toString(),
+                            operation.actorPlayerId(),
+                            "server-derived player operator audit");
+                    helper.assertValueEqual(300L, operation.amountMinorUnits(), "withdrawal amount");
+                    helper.assertValueEqual(reason, operation.reason(), "immutable withdrawal purpose");
+                    helper.assertValueEqual(
+                            700L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(operation.sourceAccount()))
+                                    .minorUnits(),
+                            "real LC National Treasury debited exactly once");
+                    helper.assertValueEqual(
+                            300L,
+                            playerInventoryMoney(player),
+                            "exact real LC coin value delivered to player inventory");
+                    helper.assertValueEqual(
+                            issuanceBeforeWithdrawal.get(),
+                            cumulativeNetIssuance(databaseFile),
+                            "Treasury Withdrawal does not change cumulative net issuance");
+                })
+                .thenExecute(() -> runtime.withdrawNationalTreasury(
+                                player, requestId, 301L, reason)
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Changed Treasury Withdrawal replay unexpectedly succeeded"));
+                            } else {
+                                changedReplayFailure.set(rootCause(failure));
+                            }
+                            changedReplayFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Changed Treasury Withdrawal replay");
+                    helper.assertTrue(
+                            changedReplayFinished.get(),
+                            "changed Treasury Withdrawal replay completed");
+                    helper.assertTrue(
+                            changedReplayFailure.get()
+                                    instanceof org.civiceconomy.fiscal.IdempotencyConflictException,
+                            "changed replay fails with an idempotency conflict");
+                    helper.assertValueEqual(
+                            700L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(
+                                            "nation:" + nationId.get().value() + ":treasury"))
+                                    .minorUnits(),
+                            "changed replay does not repeat Treasury debit");
+                    helper.assertValueEqual(
+                            300L,
+                            playerInventoryMoney(player),
+                            "changed replay does not repeat cash delivery");
                 })
                 .thenSucceed();
     }
@@ -2739,6 +3018,52 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static long playerInventoryMoney(ServerPlayer player) {
+        var unit = CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1L);
+        return MoneyAPI.getApi()
+                .GetContainersMoneyHandler(player.getInventory(), player)
+                .getStoredMoney()
+                .valueOf(unit.getUniqueName())
+                .getCoreValue();
+    }
+
+    private static TreasuryWithdrawalRow treasuryWithdrawalByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT nation_id,
+                               source_account,
+                               actor_player_id,
+                               amount_minor_units,
+                               reason,
+                               state
+                        FROM treasury_withdrawal_operation
+                        WHERE service_identity = ? AND request_id = ?
+                        """)) {
+            query.setString(
+                    1,
+                    org.civiceconomy.fiscal.TreasuryWithdrawalFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new TreasuryWithdrawalRow(
+                                result.getString(1),
+                                result.getString(2),
+                                result.getString(3),
+                                result.getLong(4),
+                                result.getString(5),
+                                result.getString(6))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Treasury Withdrawal command result", failure);
+        }
+    }
+
     private static PermanentDestructionRow permanentDestructionByRequest(
             Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection(
@@ -3062,7 +3387,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(54, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(55, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -3578,6 +3903,14 @@ public final class CivicServerRuntimeGameTests {
             String sourceAccount,
             long amountMinorUnits,
             String operatorIdentity,
+            String reason,
+            String state) {}
+
+    private record TreasuryWithdrawalRow(
+            String nationId,
+            String sourceAccount,
+            String actorPlayerId,
+            long amountMinorUnits,
             String reason,
             String state) {}
 }

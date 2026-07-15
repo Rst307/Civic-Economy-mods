@@ -19,7 +19,7 @@ public final class FiscalServiceSession {
         this.ownerContainer = ownerContainer;
     }
 
-    void requireIdentity(ServiceIdentity requestedIdentity) {
+    public void requireIdentity(ServiceIdentity requestedIdentity) {
         if (!serviceIdentity.equals(requestedIdentity)) {
             throw new FiscalServiceIdentityMismatchException(serviceIdentity, requestedIdentity);
         }

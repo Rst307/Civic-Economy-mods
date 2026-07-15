@@ -76,6 +76,10 @@ _Avoid_: 出生点、任意已占领区块、FTB 团队基地
 由国家治理权限控制、可用于正式财政支出的 LC 银行资金账户。
 _Avoid_: 国家财富、GDP、中央国库
 
+**Treasury Withdrawal（国库提现）**:
+把 National Treasury 的 LC 银行余额等额转换为交付给获授权 Citizen 的实体 LC 现金；它不改变 Cumulative Net Issuance。
+_Avoid_: Payment、Issuance、Permanent Destruction、cash grant
+
 **组织财政账户（Organization Fiscal Account）**:
 由 Civic 权限控制、属于部门、协会、企业或承包组织的 LC 银行账户。
 _Avoid_: LC 团队账户、玩家账户

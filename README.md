@@ -108,6 +108,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation mint start <requestId> <mintId> <periodId> <amountMinorUnits>
 /civic economy nation mint status [batchId]
 /civic economy nation mint cancel <batchId> <requestId> <reason>
+/civic economy nation treasury withdraw <requestId> <amountMinorUnits> <reason>
 /civic economy nation treasury destroy <requestId> <amountMinorUnits> <reason>
 /civic economy nation territory allowance
 /civic economy nation territory prepare <requestId>
@@ -132,6 +133,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation territory prepare` 和 `restore` 都只接受稳定 `requestId`；服务端从真实玩家、正式 Nation/FTB Team 绑定和玩家当前区块推导目标与金额。`restore` 只处理该精确区块最新的 `SUSPENDED` 维护结论，要求 `MANAGE_TERRITORY_FINANCE`，收取下一个完整周期预付与配置的恢复费，并且不会自动重新启用 FTB force-load。同一请求重放返回原持久化结果，不会再次移动 LC。`cancel` 只退款仍为 READY 的精确 Territory Claim Permit。
 
 `nation treasury destroy` 是国家国库的永久销毁入口，不是付款、退款、提现或管理员余额调整。命令只接受稳定请求 ID、正金额和审计理由；服务端从真实玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导精确 National Treasury，并要求该玩家拥有 `MANAGE_ISSUANCE`。调用者不能提交 Nation、Team 或来源账户。真实 LC 扣减、累计净发行量减少、`player:<UUID>` 操作者和请求重放都由持久化 Permanent Destruction 状态机约束；同一请求改变金额、操作者、来源或理由会失败且不会再次销毁。
+
+`nation treasury withdraw` 把精确 National Treasury 的 LC 银行余额等额转换为交付给当前获授权玩家的实体 LC 硬币，不是付款、发行、永久销毁或免费赠款。命令只接受稳定请求 ID、正金额和审计理由；服务端推导真实玩家、FTB Team、正式 Citizenship/Nation 与来源国库，并要求该玩家拥有 `MANAGE_WITHDRAWAL`。首次执行会先在真实玩家 inventory 副本上按固定 LC 面额精确模拟容量，容量不足时国库不扣款；持久化操作、国库扣款 marker 和玩家现金交付 marker 共同保证重放只补齐缺失步骤。提现不改变 Cumulative Net Issuance，调用者也不能指定 Nation、Team、来源账户或目标玩家。
 
 FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenship；后续 Team 新成员不会自动入籍。正式 Citizen 离开绑定 Team 后立即停止 Provider 权限和 Effective Citizen 人口贡献，进入当前固定两天的 Citizenship Correction Grace；宽限内回归恢复同一 Citizenship，截止仍未回归才结束 Citizenship 并开始转籍冷却。协调扫描只在服务器线程读取 FTB 快照，所有持久化工作均在 SQLite 线程执行。
 

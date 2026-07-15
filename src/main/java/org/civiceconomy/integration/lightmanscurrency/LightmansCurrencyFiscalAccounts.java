@@ -114,6 +114,14 @@ public final class LightmansCurrencyFiscalAccounts implements AccountBalances {
         data.recordMintIssuanceApplied(issuanceId);
     }
 
+    boolean wasTreasuryWithdrawalDebitApplied(UUID withdrawalId) {
+        return data.wasTreasuryWithdrawalDebitApplied(withdrawalId);
+    }
+
+    void recordTreasuryWithdrawalDebitApplied(UUID withdrawalId) {
+        data.recordTreasuryWithdrawalDebitApplied(withdrawalId);
+    }
+
     Object transactionLock() {
         return data;
     }
