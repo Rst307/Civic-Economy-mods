@@ -37,6 +37,7 @@ class PermanentDestructionCoordinatorTest {
     private static final Instant NOW = Instant.parse("2026-08-02T00:00:00Z");
     private static final Clock CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
     private static final ServiceIdentity SERVICE = new ServiceIdentity("maintenance-service");
+    private static final ServiceIdentity OTHER_SERVICE = new ServiceIdentity("other-service");
     private static final AccountId TREASURY = new AccountId("nation:aurora:treasury");
 
     @TempDir Path temporaryDirectory;
@@ -102,7 +103,7 @@ class PermanentDestructionCoordinatorTest {
             applied.clear();
             lcBalance.set(1_000L);
             recovery.recoverAll();
-            assertEquals(400L, lcBalance.get());
+            assertEquals(1_000L, lcBalance.get());
             assertEquals(400L, database.cumulativeNetIssuanceMinorUnits());
             assertEquals(2, database.monetarySupplyEvents().size());
         }
@@ -138,6 +139,7 @@ class PermanentDestructionCoordinatorTest {
                     "authorized-destruction",
                     TREASURY,
                     MoneyAmount.ofMinorUnits(100L),
+                    "player:11111111-1111-1111-1111-111111111111",
                     "Authorized exact account destruction");
             coordinator.confirm(request);
             assertThrows(
@@ -147,15 +149,86 @@ class PermanentDestructionCoordinatorTest {
                             request.requestId(),
                             TREASURY,
                             MoneyAmount.ofMinorUnits(101L),
+                            request.operatorIdentity(),
                             request.reason())));
+            assertThrows(
+                    org.civiceconomy.fiscal.IdempotencyConflictException.class,
+                    () -> coordinator.confirm(new ConfirmPermanentDestruction(
+                            SERVICE,
+                            request.requestId(),
+                            TREASURY,
+                            request.amount(),
+                            "player:22222222-2222-2222-2222-222222222222",
+                            request.reason())));
+            assertEquals(
+                    request.operatorIdentity(),
+                    database.permanentDestructionOperation(SERVICE.value(), request.requestId())
+                            .operatorIdentity());
 
             assertEquals(1L, externalCalls.get());
         }
     }
 
+    @Test
+    void recoveryOnlyAdvancesPreparedOperationsOwnedByTheVerifiedServiceSession() {
+        try (CivicDatabase database = database()) {
+            authorize(database, SERVICE, "grant-maintenance-destruction");
+            authorize(database, OTHER_SERVICE, "grant-other-destruction");
+            seedIssuance(database, "seed-isolated-recovery", "mint-batch:isolated-recovery");
+
+            ConfirmPermanentDestruction maintenance = new ConfirmPermanentDestruction(
+                    SERVICE,
+                    "maintenance-recovery",
+                    TREASURY,
+                    MoneyAmount.ofMinorUnits(100L),
+                    "Maintenance recovery");
+            ConfirmPermanentDestruction other = new ConfirmPermanentDestruction(
+                    OTHER_SERVICE,
+                    "other-recovery",
+                    TREASURY,
+                    MoneyAmount.ofMinorUnits(200L),
+                    "Other service recovery");
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> coordinator(database, SERVICE, ignored -> {
+                        throw new IllegalStateException("leave maintenance PREPARED");
+                    }).confirm(maintenance));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> coordinator(database, OTHER_SERVICE, ignored -> {
+                        throw new IllegalStateException("leave other PREPARED");
+                    }).confirm(other));
+
+            AtomicLong recoveredMinorUnits = new AtomicLong();
+            coordinator(database, SERVICE, destruction -> recoveredMinorUnits.addAndGet(
+                            destruction.amount().minorUnits()))
+                    .recoverAll();
+
+            assertEquals(100L, recoveredMinorUnits.get());
+            assertEquals(
+                    "COMMITTED",
+                    database.permanentDestructionOperation(
+                                    SERVICE.value(), maintenance.requestId())
+                            .state());
+            assertEquals(
+                    "PREPARED",
+                    database.permanentDestructionOperation(
+                                    OTHER_SERVICE.value(), other.requestId())
+                            .state());
+        }
+    }
+
     private PermanentDestructionCoordinator coordinator(
             CivicDatabase database, ExternalPermanentDestructions external) {
-        FiscalServiceSession session = FiscalTestSessions.open(database, SERVICE, "civiceconomy-tests");
+        return coordinator(database, SERVICE, external);
+    }
+
+    private PermanentDestructionCoordinator coordinator(
+            CivicDatabase database,
+            ServiceIdentity serviceIdentity,
+            ExternalPermanentDestructions external) {
+        FiscalServiceSession session = FiscalTestSessions.open(
+                database, serviceIdentity, "civiceconomy-tests");
         return PermanentDestructionCoordinator.authorized(
                 database, external, session, CLOCK);
     }
@@ -175,13 +248,18 @@ class PermanentDestructionCoordinatorTest {
     }
 
     private void authorize(CivicDatabase database) {
+        authorize(database, SERVICE, "grant-permanent-destruction");
+    }
+
+    private void authorize(
+            CivicDatabase database, ServiceIdentity serviceIdentity, String grantRequestId) {
         FiscalAuthorization authorization = new FiscalAuthorization(database);
         authorization.register(new RegisterFiscalService(
-                SERVICE, "civiceconomy-tests", "Maintenance test service"));
+                serviceIdentity, "civiceconomy-tests", "Permanent Destruction test service"));
         authorization.grant(new GrantFiscalCapability(
                 new ServiceIdentity("test-admin"),
-                "grant-permanent-destruction",
-                SERVICE,
+                grantRequestId,
+                serviceIdentity,
                 FiscalCapability.PERMANENT_DESTRUCTION,
                 TREASURY,
                 "Test exact-account destruction authority"));

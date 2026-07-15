@@ -70,6 +70,7 @@ public final class PermanentDestructionCoordinator {
                 request.requestId(),
                 request.sourceAccount().value(),
                 request.amount().minorUnits(),
+                request.operatorIdentity(),
                 request.reason(),
                 clock.millis());
         requirePayload(operation, request);
@@ -78,7 +79,8 @@ public final class PermanentDestructionCoordinator {
 
     public void recoverAll() {
         for (StoredPermanentDestructionOperation operation :
-                database.permanentDestructionOperations()) {
+                database.pendingPermanentDestructionOperations(
+                        session.serviceIdentity().value())) {
             applyAndCommit(operation);
         }
     }
@@ -98,6 +100,7 @@ public final class PermanentDestructionCoordinator {
             ConfirmPermanentDestruction request) {
         if (!operation.sourceAccount().equals(request.sourceAccount().value())
                 || operation.amountMinorUnits() != request.amount().minorUnits()
+                || !operation.operatorIdentity().equals(request.operatorIdentity())
                 || !operation.reason().equals(request.reason())) {
             throw new IdempotencyConflictException(
                     request.serviceIdentity(), request.requestId());

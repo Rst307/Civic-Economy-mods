@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 53;
+    private static final int SCHEMA_VERSION = 54;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -5975,6 +5975,41 @@ public final class CivicDatabase implements AutoCloseable {
             long amountMinorUnits,
             String reason,
             long preparedAtEpochMillis) {
+        return preparePermanentDestruction(
+                operationId,
+                serviceIdentity,
+                requestId,
+                sourceAccount,
+                amountMinorUnits,
+                serviceIdentity == null ? null : "service:" + serviceIdentity,
+                reason,
+                preparedAtEpochMillis);
+    }
+
+    public synchronized StoredPermanentDestructionOperation preparePermanentDestruction(
+            UUID operationId,
+            String serviceIdentity,
+            String requestId,
+            String sourceAccount,
+            long amountMinorUnits,
+            String operatorIdentity,
+            String reason,
+            long preparedAtEpochMillis) {
+        if (operationId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || sourceAccount == null
+                || sourceAccount.isBlank()
+                || amountMinorUnits <= 0L
+                || operatorIdentity == null
+                || operatorIdentity.isBlank()
+                || reason == null
+                || reason.isBlank()
+                || preparedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Permanent Destruction values are invalid");
+        }
         StoredPermanentDestructionOperation replay =
                 permanentDestructionOperation(serviceIdentity, requestId);
         if (replay != null) {
@@ -5991,16 +6026,18 @@ public final class CivicDatabase implements AutoCloseable {
             try (PreparedStatement insert = connection.prepareStatement("""
                     INSERT INTO permanent_destruction_operation (
                         operation_id, service_identity, request_id, source_account,
-                        amount_minor_units, reason, state, prepared_at_epoch_millis
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', ?)
+                        amount_minor_units, operator_identity, reason,
+                        state, prepared_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PREPARED', ?)
                     """)) {
                 insert.setString(1, operationId.toString());
                 insert.setString(2, serviceIdentity);
                 insert.setString(3, requestId);
                 insert.setString(4, sourceAccount);
                 insert.setLong(5, amountMinorUnits);
-                insert.setString(6, reason);
-                insert.setLong(7, preparedAtEpochMillis);
+                insert.setString(6, operatorIdentity);
+                insert.setString(7, reason);
+                insert.setLong(8, preparedAtEpochMillis);
                 insert.executeUpdate();
             }
             connection.commit();
@@ -6049,6 +6086,31 @@ public final class CivicDatabase implements AutoCloseable {
             return List.copyOf(operations);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to list Permanent Destruction operations", failure);
+        }
+    }
+
+    public synchronized List<StoredPermanentDestructionOperation>
+            pendingPermanentDestructionOperations(String serviceIdentity) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Permanent Destruction service identity cannot be blank");
+        }
+        List<StoredPermanentDestructionOperation> operations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM permanent_destruction_operation
+                WHERE service_identity = ? AND state = 'PREPARED'
+                ORDER BY prepared_at_epoch_millis, operation_id
+                """)) {
+            query.setString(1, serviceIdentity);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    operations.add(storedPermanentDestructionOperation(result));
+                }
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list pending Permanent Destruction operations", failure);
         }
     }
 
@@ -10528,6 +10590,20 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 53");
             }
+            if (version < 54) {
+                addColumnIfMissing(
+                        statement,
+                        "permanent_destruction_operation",
+                        "operator_identity",
+                        "TEXT NOT NULL DEFAULT 'legacy:unknown' "
+                                + "CHECK (length(trim(operator_identity)) > 0)");
+                statement.execute("""
+                        UPDATE permanent_destruction_operation
+                        SET operator_identity = 'service:' || service_identity
+                        WHERE operator_identity = 'legacy:unknown'
+                        """);
+                statement.execute("PRAGMA user_version = 54");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11052,6 +11128,7 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getString("request_id"),
                 result.getString("source_account"),
                 result.getLong("amount_minor_units"),
+                result.getString("operator_identity"),
                 result.getString("reason"),
                 result.getString("state"),
                 result.getLong("prepared_at_epoch_millis"),

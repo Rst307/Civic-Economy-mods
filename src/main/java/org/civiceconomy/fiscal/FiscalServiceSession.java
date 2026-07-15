@@ -25,7 +25,7 @@ public final class FiscalServiceSession {
         }
     }
 
-    ServiceIdentity serviceIdentity() {
+    public ServiceIdentity serviceIdentity() {
         return serviceIdentity;
     }
 

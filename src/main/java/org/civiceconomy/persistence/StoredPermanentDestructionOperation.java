@@ -8,6 +8,7 @@ public record StoredPermanentDestructionOperation(
         String requestId,
         String sourceAccount,
         long amountMinorUnits,
+        String operatorIdentity,
         String reason,
         String state,
         long preparedAtEpochMillis,

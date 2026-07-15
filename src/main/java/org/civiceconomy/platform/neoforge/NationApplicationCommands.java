@@ -86,8 +86,57 @@ final class NationApplicationCommands {
                 .then(roleCommand())
                 .then(mintCommand())
                 .then(territoryCommand())
+                .then(treasuryCommand())
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> treasuryCommand() {
+        return Commands.literal("treasury")
+                .then(Commands.literal("destroy")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "amountMinorUnits",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> destroyTreasury(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        LongArgumentType.getLong(
+                                                                context, "amountMinorUnits"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))));
+    }
+
+    private static int destroyTreasury(
+            CommandSourceStack source,
+            String requestId,
+            long amountMinorUnits,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .destroyNationalTreasury(player, requestId, amountMinorUnits, reason)
+                .whenComplete((event, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "National Treasury Permanent Destruction", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Confirmed Permanent Destruction " + event.eventId()
+                                                + " amount=" + event.amount().minorUnits()
+                                                + " netIssuanceChange=-"
+                                                + event.amount().minorUnits()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("National Treasury Permanent Destruction queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int mintStatus(CommandSourceStack source, UUID batchId)

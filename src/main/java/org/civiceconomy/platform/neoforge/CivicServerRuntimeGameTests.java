@@ -22,6 +22,7 @@ import java.sql.SQLException;
 import java.util.UUID;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -497,7 +498,8 @@ public final class CivicServerRuntimeGameTests {
                         "population",
                         "role",
                         "mint",
-                        "territory"),
+                        "territory",
+                        "treasury"),
                 economy.getChild("nation").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -518,6 +520,14 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Mint command actions");
+        helper.assertValueEqual(
+                Set.of("destroy"),
+                economy.getChild("nation")
+                        .getChild("treasury")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative National Treasury command actions");
         if (CivicDebugWorldCommands.dedicatedStartupPermit()) {
             helper.assertValueEqual(
                     Set.of("status", "enable"),
@@ -959,6 +969,248 @@ public final class CivicServerRuntimeGameTests {
             assertNationFiscalPermissionGranted(
                     helper, databaseFile, team.getId(), head.getUUID());
         });
+    }
+
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 600,
+            batch = "runtime-permanent-destruction-command")
+    public static void playerDestroysExactNationalTreasuryThroughRealLcExactlyOnce(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-treasury-destruction"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String unauthorizedRequestId = "unauthorized-destruction-" + UUID.randomUUID();
+        String requestId = "player-destruction-" + UUID.randomUUID();
+        String forgedSource = "nation:22222222-2222-2222-2222-222222222222:treasury";
+        String reason = "GameTest Permanent Destruction; attempted-source=" + forgedSource;
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
+        AtomicReference<Throwable> changedReplayFailure = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean unauthorizedFinished = new AtomicBoolean();
+        AtomicBoolean permissionReady = new AtomicBoolean();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicBoolean changedReplayFinished = new AtomicBoolean();
+        AtomicLong issuanceAfterSeed = new AtomicLong();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "player-destruction-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, java.time.Duration.ofDays(7), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "player-destruction-citizenship-" + UUID.randomUUID(),
+                            player.getUUID(),
+                            nation.nationId()));
+                    long issuanceBefore = database.cumulativeNetIssuanceMinorUnits();
+                    database.confirmMonetarySupplyChange(
+                            UUID.randomUUID(),
+                            "civiceconomy-gametest",
+                            "player-destruction-issuance-" + UUID.randomUUID(),
+                            "ISSUANCE",
+                            1_000L,
+                            "mint-batch:player-destruction:" + UUID.randomUUID(),
+                            "Seed player Permanent Destruction capacity",
+                            now.toEpochMilli(),
+                            Math.addExact(issuanceBefore, 10_000L));
+                    issuanceAfterSeed.set(database.cumulativeNetIssuanceMinorUnits());
+                    return nation.nationId();
+                })
+                .whenComplete((registeredNationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                fundTreasury(
+                                        helper,
+                                        registeredNationId,
+                                        "Player Permanent Destruction Treasury",
+                                        1_000L);
+                                setupReady.set(true);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Permanent Destruction setup");
+                    helper.assertTrue(setupReady.get(), "Permanent Destruction setup complete");
+                })
+                .thenExecute(() -> runtime.destroyNationalTreasury(
+                                player,
+                                unauthorizedRequestId,
+                                100L,
+                                "Must fail before fiscal or LC writes")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Unauthorized Permanent Destruction unexpectedly succeeded"));
+                            } else {
+                                unauthorizedFailure.set(rootCause(failure));
+                            }
+                            unauthorizedFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Unauthorized Permanent Destruction");
+                    helper.assertTrue(
+                            unauthorizedFinished.get(),
+                            "unauthorized Permanent Destruction completed");
+                    helper.assertTrue(
+                            unauthorizedFailure.get() instanceof SecurityException,
+                            "unauthorized request fails at exact Nation fiscal permission");
+                    AccountId treasury = new AccountId(
+                            "nation:" + nationId.get().value() + ":treasury");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(treasury)
+                                    .minorUnits(),
+                            "unauthorized request leaves LC Treasury unchanged");
+                    helper.assertTrue(
+                            permanentDestructionByRequest(databaseFile, unauthorizedRequestId) == null,
+                            "unauthorized request creates no Permanent Destruction operation");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            NationRegistry nations = new NationRegistry(
+                                    database, snapshot(teamSnapshot));
+                            CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                                    database, java.time.Duration.ofDays(7), setupClock);
+                            var provider = new FtbTeamsNationProvider(
+                                    nations,
+                                    citizenships,
+                                    new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                                    snapshot(teamSnapshot));
+                            new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                                    .grant(new GrantNationFiscalPermission(
+                                            new ServiceIdentity("civiceconomy-gametest"),
+                                            "player-destruction-authority-" + UUID.randomUUID(),
+                                            nationId.get(),
+                                            player.getUUID(),
+                                            player.getUUID(),
+                                            NationFiscalPermission.MANAGE_ISSUANCE,
+                                            "Authorize real player Permanent Destruction"));
+                            return null;
+                        })
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                permissionReady.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Permanent Destruction permission");
+                    helper.assertTrue(permissionReady.get(), "Permanent Destruction permission ready");
+                })
+                .thenExecute(() -> {
+                    try {
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        String command = "civic economy nation treasury destroy "
+                                + requestId + " 300 " + reason;
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        player.createCommandSourceStack().withSuppressedOutput()),
+                                "Permanent Destruction command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        player.createCommandSourceStack().withSuppressedOutput()),
+                                "Permanent Destruction replay command result");
+                        commandStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Permanent Destruction command");
+                    helper.assertTrue(commandStarted.get(), "Permanent Destruction command started");
+                    PermanentDestructionRow operation =
+                            permanentDestructionByRequest(databaseFile, requestId);
+                    helper.assertTrue(operation != null, "persisted Permanent Destruction operation");
+                    helper.assertValueEqual(
+                            "COMMITTED", operation.state(), "Permanent Destruction state");
+                    helper.assertValueEqual(
+                            "nation:" + nationId.get().value() + ":treasury",
+                            operation.sourceAccount(),
+                            "server-derived exact National Treasury source");
+                    helper.assertValueEqual(
+                            300L, operation.amountMinorUnits(), "Permanent Destruction amount");
+                    helper.assertValueEqual(
+                            "player:" + player.getUUID(),
+                            operation.operatorIdentity(),
+                            "server-derived player operator audit");
+                    helper.assertValueEqual(
+                            reason, operation.reason(), "immutable Permanent Destruction reason");
+                    AccountId treasury = new AccountId(operation.sourceAccount());
+                    helper.assertValueEqual(
+                            700L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(treasury)
+                                    .minorUnits(),
+                            "real LC National Treasury destruction exactly once");
+                    helper.assertValueEqual(
+                            issuanceAfterSeed.get() - 300L,
+                            cumulativeNetIssuance(databaseFile),
+                            "cumulative net issuance decreases exactly once");
+                })
+                .thenExecute(() -> runtime.destroyNationalTreasury(
+                                player, requestId, 301L, reason)
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Changed Permanent Destruction replay unexpectedly succeeded"));
+                            } else {
+                                changedReplayFailure.set(rootCause(failure));
+                            }
+                            changedReplayFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Changed Permanent Destruction replay");
+                    helper.assertTrue(
+                            changedReplayFinished.get(),
+                            "changed Permanent Destruction replay completed");
+                    helper.assertTrue(
+                            changedReplayFailure.get()
+                                    instanceof org.civiceconomy.fiscal.IdempotencyConflictException,
+                            "changed replay fails with an idempotency conflict");
+                    PermanentDestructionRow operation =
+                            permanentDestructionByRequest(databaseFile, requestId);
+                    helper.assertValueEqual(
+                            300L, operation.amountMinorUnits(), "replay amount remains immutable");
+                    helper.assertValueEqual(
+                            700L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(operation.sourceAccount()))
+                                    .minorUnits(),
+                            "changed replay does not repeat LC destruction");
+                })
+                .thenSucceed();
     }
 
     @GameTest(template = "empty", timeoutTicks = 300)
@@ -2487,6 +2739,59 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static PermanentDestructionRow permanentDestructionByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT source_account,
+                               amount_minor_units,
+                               operator_identity,
+                               reason,
+                               state
+                        FROM permanent_destruction_operation
+                        WHERE service_identity = ? AND request_id = ?
+                        """)) {
+            query.setString(
+                    1,
+                    org.civiceconomy.monetary.PermanentDestructionFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new PermanentDestructionRow(
+                                result.getString(1),
+                                result.getLong(2),
+                                result.getString(3),
+                                result.getString(4),
+                                result.getString(5))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Permanent Destruction command result", failure);
+        }
+    }
+
+    private static void assertNoAsyncFailure(
+            GameTestHelper helper,
+            AtomicReference<Throwable> asyncFailure,
+            String operation) {
+        Throwable failure = asyncFailure.get();
+        helper.assertTrue(
+                failure == null,
+                failure == null ? operation + " state" : operation + " failure: " + failure);
+    }
+
+    private static Throwable rootCause(Throwable failure) {
+        Throwable current = failure;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
     private static UUID prepareStockCorrectionIncident(
             org.civiceconomy.persistence.CivicDatabase database) {
         UUID nationId = UUID.randomUUID();
@@ -2757,7 +3062,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(53, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(54, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -3268,4 +3573,11 @@ public final class CivicServerRuntimeGameTests {
             long fee,
             long total,
             String sourceValidity) {}
+
+    private record PermanentDestructionRow(
+            String sourceAccount,
+            long amountMinorUnits,
+            String operatorIdentity,
+            String reason,
+            String state) {}
 }

@@ -111,12 +111,16 @@ import org.civiceconomy.mint.PendingMintMaterialTake;
 import org.civiceconomy.mint.PendingMintIssuanceStep;
 import org.civiceconomy.mint.PrepareMintBatch;
 import org.civiceconomy.monetary.CorrectMonetaryStock;
+import org.civiceconomy.monetary.ConfirmPermanentDestruction;
+import org.civiceconomy.monetary.MonetarySupplyEvent;
 import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.monetary.MonetaryStockCorrectionRegistry;
+import org.civiceconomy.monetary.PermanentDestructionFiscalServiceProvisioner;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.FtbTeamsNationProvider;
 import org.civiceconomy.nation.NationFiscalAuthorityRegistry;
+import org.civiceconomy.nation.NationFiscalPermission;
 import org.civiceconomy.territory.EffectiveTerritoryQuery;
 import org.civiceconomy.territory.TerritoryOwnershipSource;
 import org.slf4j.Logger;
@@ -446,6 +450,53 @@ public final class CivicServerRuntime {
     CompletableFuture<MonetaryStockCorrection> monetaryStockCorrection(UUID incidentId) {
         return submitDatabase(database ->
                 new MonetaryStockCorrectionRegistry(database, clock).correction(incidentId));
+    }
+
+    CompletableFuture<MonetarySupplyEvent> destroyNationalTreasury(
+            ServerPlayer actor,
+            String requestId,
+            long amountMinorUnits,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.MANAGE_ISSUANCE);
+                    AccountId treasury = nationalTreasury(nation.nationId());
+                    FiscalAuthorization authorization = new FiscalAuthorization(database);
+                    new PermanentDestructionFiscalServiceProvisioner(authorization)
+                            .ensureAuthorized(treasury);
+                    var session = authorization.openSession(
+                            PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    return PermanentDestructionCoordinator.live(
+                                    database,
+                                    session,
+                                    commandClock,
+                                    current.server.overworld())
+                            .confirm(new ConfirmPermanentDestruction(
+                                    PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId,
+                                    treasury,
+                                    MoneyAmount.ofMinorUnits(amountMinorUnits),
+                                    "player:" + actorPlayerId,
+                                    reason));
+                }));
     }
 
     CompletableFuture<MintBatch> startMintBatch(
@@ -1557,19 +1608,16 @@ public final class CivicServerRuntime {
         }
         Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         current.writer.submitDatabase(database -> {
-                    int operationCount = database.permanentDestructionOperations().size();
-                    if (operationCount == 0) {
-                        return 0;
-                    }
-                    var session = new FiscalAuthorization(database)
-                            .openSession(TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
-                    PermanentDestructionCoordinator.live(
+                    return recoverPermanentDestructions(
                                     database,
-                                    session,
+                                    current,
                                     recoveryClock,
-                                    current.server.overworld())
-                            .recoverAll();
-                    return operationCount;
+                                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY)
+                            + recoverPermanentDestructions(
+                                    database,
+                                    current,
+                                    recoveryClock,
+                                    PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY);
                 })
                 .whenComplete((recovered, failure) -> {
                     current.permanentDestructionRecoveryQueued.set(false);
@@ -1579,6 +1627,27 @@ public final class CivicServerRuntime {
                         LOGGER.info("Replayed {} Permanent Destruction operation(s)", recovered);
                     }
                 });
+    }
+
+    private static int recoverPermanentDestructions(
+            CivicDatabase database,
+            RuntimeState current,
+            Clock recoveryClock,
+            ServiceIdentity serviceIdentity) {
+        int operationCount = database
+                .pendingPermanentDestructionOperations(serviceIdentity.value())
+                .size();
+        if (operationCount == 0) {
+            return 0;
+        }
+        var session = new FiscalAuthorization(database).openSession(serviceIdentity);
+        PermanentDestructionCoordinator.live(
+                        database,
+                        session,
+                        recoveryClock,
+                        current.server.overworld())
+                .recoverAll();
+        return operationCount;
     }
 
     private void scheduleMintBatchRecovery(RuntimeState current) {
