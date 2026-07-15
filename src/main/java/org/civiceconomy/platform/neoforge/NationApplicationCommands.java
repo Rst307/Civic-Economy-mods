@@ -108,20 +108,7 @@ final class NationApplicationCommands {
     }
 
     static String formatMintStatus(MintBatchStatus status) {
-        var batch = status.batch();
-        var issuance = status.issuance();
-        return "Mint Batch status: batch=" + batch.batchId()
-                + " state=" + batch.state()
-                + " custody=" + batch.custodyState()
-                + " amount=" + batch.issuedMinorUnits()
-                + " preparedAt=" + batch.preparedAtEpochMillis()
-                + " completesAt=" + batch.processingCompletesAtEpochMillis()
-                + " reason=" + batch.reason()
-                + " issuanceState=" + (issuance == null ? "NOT_PREPARED" : issuance.state())
-                + " externalReference="
-                + (issuance == null ? null : issuance.externalReference())
-                + " materialReference="
-                + (issuance == null ? null : issuance.materialConsumptionReference());
+        return MintBatchStatusFormatter.format(status);
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> mintCommand() {

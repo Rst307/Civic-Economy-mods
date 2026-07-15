@@ -11,11 +11,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.persistence.StoredMintMaterialStack;
+import org.civiceconomy.persistence.StoredMintRecoveryIncident;
 import org.civiceconomy.persistence.StoredMintRecipeIngredient;
 import org.civiceconomy.persistence.StoredNationalIssuanceQuotaAllocation;
 import org.junit.jupiter.api.Test;
@@ -76,6 +78,59 @@ class MintIssuanceRecoveryTest {
             assertEquals(300L, database.cumulativeNetIssuanceMinorUnits());
             assertEquals(1, database.monetarySupplyEvents().size());
             assertEquals(List.of(), new MintIssuanceRecovery(database, DUE_CLOCK).pendingExternal());
+        }
+    }
+
+    @Test
+    void treasuryRecoveryFailureIsPersistedAndResolvedByDurableConfirmation() {
+        try (CivicDatabase database = database()) {
+            setupProcessingBatch(database);
+            MintIssuanceRecovery recovery = new MintIssuanceRecovery(database, DUE_CLOCK);
+            PendingMintTreasuryCredit credit = assertInstanceOf(
+                    PendingMintTreasuryCredit.class, onlyPending(database));
+
+            StoredMintRecoveryIncident incident = recovery.recordFailure(
+                    credit, new IllegalStateException("LC Treasury unavailable"));
+            assertEquals("OPEN", incident.state());
+            assertEquals("TREASURY_CREDIT", incident.step());
+            assertEquals("IllegalStateException", incident.failureKind());
+            assertEquals("LC Treasury unavailable", incident.failureMessage());
+
+            recovery.confirmExternal(credit);
+            StoredMintRecoveryIncident resolved = database.mintRecoveryIncident(
+                    credit.operationId(), "TREASURY_CREDIT");
+            assertEquals("RESOLVED", resolved.state());
+            assertEquals("STEP_CONFIRMED", resolved.resolutionKind());
+            assertEquals("lc-mint-issuance:" + credit.operationId(), resolved.resolutionDetail());
+        }
+    }
+
+    @Test
+    void materialRecoveryFailureIsUnwrappedAndResolvedByDurableConfirmation() {
+        try (CivicDatabase database = database()) {
+            setupProcessingBatch(database);
+            MintIssuanceRecovery recovery = new MintIssuanceRecovery(database, DUE_CLOCK);
+            PendingMintTreasuryCredit credit = assertInstanceOf(
+                    PendingMintTreasuryCredit.class, onlyPending(database));
+            recovery.confirmExternal(credit);
+            PendingMintMaterialConsumption consumption = assertInstanceOf(
+                    PendingMintMaterialConsumption.class, onlyPending(database));
+
+            StoredMintRecoveryIncident incident = recovery.recordFailure(
+                    consumption,
+                    new CompletionException(
+                            new IllegalStateException("Mint custody owner offline")));
+            assertEquals("MATERIAL_CONSUMPTION", incident.step());
+            assertEquals("IllegalStateException", incident.failureKind());
+            assertEquals("Mint custody owner offline", incident.failureMessage());
+
+            recovery.confirmExternal(consumption);
+            StoredMintRecoveryIncident resolved = database.mintRecoveryIncident(
+                    consumption.operationId(), "MATERIAL_CONSUMPTION");
+            assertEquals("RESOLVED", resolved.state());
+            assertEquals(
+                    "mint-material-consume:" + consumption.operationId(),
+                    resolved.resolutionDetail());
         }
     }
 

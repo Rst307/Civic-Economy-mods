@@ -5,12 +5,15 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredMintBatch;
 import org.civiceconomy.persistence.StoredMintIssuanceOperation;
 import org.civiceconomy.persistence.StoredMintMaterialStack;
+import org.civiceconomy.persistence.StoredMintRecoveryIncident;
 
 public final class MintIssuanceRecovery {
     private static final String ISSUANCE_REASON = "Complete authorized Mint Batch";
@@ -72,6 +75,24 @@ public final class MintIssuanceRecovery {
         throw new IllegalArgumentException("Unknown pending Mint issuance step");
     }
 
+    public StoredMintRecoveryIncident recordFailure(
+            PendingMintIssuanceStep pending, Throwable failure) {
+        if (pending == null || failure == null) {
+            throw new IllegalArgumentException("Mint recovery failure evidence cannot be null");
+        }
+        Throwable cause = unwrap(failure);
+        String kind = cause.getClass().getSimpleName();
+        if (kind.isBlank()) {
+            kind = cause.getClass().getName();
+        }
+        String message = cause.getMessage();
+        if (message == null || message.isBlank()) {
+            message = kind;
+        }
+        return database.recordMintRecoveryIncident(
+                pending.operationId(), recoveryStep(pending), kind, message, clock.millis());
+    }
+
     private PendingMintIssuanceStep pending(StoredMintIssuanceOperation operation) {
         StoredMintBatch batch = database.mintBatch(operation.batchId());
         if (batch == null) {
@@ -99,6 +120,25 @@ public final class MintIssuanceRecovery {
         }
         throw new IllegalStateException(
                 "Unsupported recoverable Mint issuance state " + operation.state());
+    }
+
+    private static String recoveryStep(PendingMintIssuanceStep pending) {
+        if (pending instanceof PendingMintTreasuryCredit) {
+            return "TREASURY_CREDIT";
+        }
+        if (pending instanceof PendingMintMaterialConsumption) {
+            return "MATERIAL_CONSUMPTION";
+        }
+        throw new IllegalArgumentException("Unknown pending Mint issuance step");
+    }
+
+    private static Throwable unwrap(Throwable failure) {
+        Throwable cause = failure;
+        while ((cause instanceof CompletionException || cause instanceof ExecutionException)
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
     }
 
     private List<MintMaterialStack> materials(UUID batchId) {

@@ -490,7 +490,8 @@ public final class CivicServerRuntime {
                                     : "Unknown Mint Batch for your player identity"));
             return new MintBatchStatus(
                     batch,
-                    database.mintBatchIssuanceOperationByBatch(batch.batchId()));
+                    database.mintBatchIssuanceOperationByBatch(batch.batchId()),
+                    database.latestMintRecoveryIncidentByBatch(batch.batchId()));
         });
     }
 
@@ -502,7 +503,8 @@ public final class CivicServerRuntime {
             }
             return new MintBatchStatus(
                     batch,
-                    database.mintBatchIssuanceOperationByBatch(batch.batchId()));
+                    database.mintBatchIssuanceOperationByBatch(batch.batchId()),
+                    database.latestMintRecoveryIncidentByBatch(batch.batchId()));
         });
     }
 
@@ -1646,6 +1648,24 @@ public final class CivicServerRuntime {
                                         + "may require the source player online",
                                 operation.operationId(),
                                 failure);
+                        current.writer.submitDatabase(database ->
+                                        new MintIssuanceRecovery(database, recoveryClock)
+                                                .recordFailure(operation, failure))
+                                .whenComplete((incident, incidentFailure) -> {
+                                    if (incidentFailure != null) {
+                                        LOGGER.error(
+                                                "Mint issuance {} recovery failure evidence could not be persisted",
+                                                operation.operationId(),
+                                                incidentFailure);
+                                    }
+                                    recoverMintIssuanceOperations(
+                                            current,
+                                            pending,
+                                            recoveryClock,
+                                            index + 1,
+                                            recovered);
+                                });
+                        return;
                     }
                     recoverMintIssuanceOperations(
                             current,

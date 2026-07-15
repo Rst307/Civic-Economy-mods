@@ -24,7 +24,7 @@ class CivicDatabaseV47MigrationTest {
                 UUID.fromString("8456f0a5-b0a8-41bd-b745-6af738b12400"),
                 "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20");
         try (CivicDatabase ignored = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(51, ignored.schemaVersion());
+            assertEquals(52, ignored.schemaVersion());
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
@@ -36,7 +36,7 @@ class CivicDatabaseV47MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(51, migrated.schemaVersion());
+            assertEquals(52, migrated.schemaVersion());
             try (var connection = DriverManager.getConnection(
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                     var statement = connection.createStatement();

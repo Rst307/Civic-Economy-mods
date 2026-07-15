@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 51;
+    private static final int SCHEMA_VERSION = 52;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4753,6 +4753,12 @@ public final class CivicDatabase implements AutoCloseable {
                 if (updateBatch.executeUpdate() != 1) {
                     throw new IllegalStateException("Mint Batch is not awaiting material consumption");
                 }
+                resolveOpenMintRecoveryIncident(
+                        operationId,
+                        "TREASURY_CREDIT",
+                        "STEP_CONFIRMED",
+                        externalReference,
+                        confirmedAtEpochMillis);
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -4808,6 +4814,12 @@ public final class CivicDatabase implements AutoCloseable {
                 if (updateBatch.executeUpdate() != 1) {
                     throw new IllegalStateException("Mint Batch is not awaiting material consumption");
                 }
+                resolveOpenMintRecoveryIncident(
+                        operationId,
+                        "MATERIAL_CONSUMPTION",
+                        "STEP_CONFIRMED",
+                        materialConsumptionReference,
+                        confirmedAtEpochMillis);
                 connection.commit();
             } catch (SQLException | RuntimeException failure) {
                 connection.rollback();
@@ -4948,6 +4960,210 @@ public final class CivicDatabase implements AutoCloseable {
             return readMintIssuanceOperation(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Mint issuance request", failure);
+        }
+    }
+
+    public synchronized StoredMintRecoveryIncident recordMintRecoveryIncident(
+            UUID operationId,
+            String step,
+            String failureKind,
+            String failureMessage,
+            long observedAtEpochMillis) {
+        validateMintRecoveryIncidentValues(
+                operationId, step, failureKind, failureMessage, observedAtEpochMillis);
+        StoredMintIssuanceOperation operation = mintBatchIssuanceOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException("Unknown Mint issuance operation " + operationId);
+        }
+        if (!matchesMintRecoveryStep(operation.state(), step)) {
+            throw new IllegalStateException(
+                    "Mint Recovery Incident step does not match the durable issuance state");
+        }
+        StoredMintRecoveryIncident existing = mintRecoveryIncident(operationId, step);
+        if (existing != null) {
+            if ("RESOLVED".equals(existing.state())) {
+                throw new IllegalStateException("Resolved Mint Recovery Incident cannot be reopened");
+            }
+            if (observedAtEpochMillis < existing.lastObservedAtEpochMillis()) {
+                throw new IllegalArgumentException(
+                        "Mint Recovery Incident observation time cannot move backwards");
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE mint_recovery_incident
+                    SET failure_kind = ?, failure_message = ?,
+                        last_observed_at_epoch_millis = ?,
+                        occurrence_count = occurrence_count + 1
+                    WHERE incident_id = ? AND state = 'OPEN'
+                    """)) {
+                update.setString(1, failureKind);
+                update.setString(2, failureMessage);
+                update.setLong(3, observedAtEpochMillis);
+                update.setString(4, existing.incidentId().toString());
+                if (update.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Mint Recovery Incident changed before failure evidence was recorded");
+                }
+                return mintRecoveryIncident(operationId, step);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to update Mint Recovery Incident", failure);
+            }
+        }
+        UUID incidentId = UUID.randomUUID();
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO mint_recovery_incident (
+                    incident_id, operation_id, batch_id, step, state,
+                    failure_kind, failure_message,
+                    first_observed_at_epoch_millis, last_observed_at_epoch_millis,
+                    occurrence_count
+                ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, 1)
+                """)) {
+            insert.setString(1, incidentId.toString());
+            insert.setString(2, operationId.toString());
+            insert.setString(3, operation.batchId().toString());
+            insert.setString(4, step);
+            insert.setString(5, failureKind);
+            insert.setString(6, failureMessage);
+            insert.setLong(7, observedAtEpochMillis);
+            insert.setLong(8, observedAtEpochMillis);
+            insert.executeUpdate();
+            return mintRecoveryIncident(operationId, step);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to record Mint Recovery Incident", failure);
+        }
+    }
+
+    public synchronized StoredMintRecoveryIncident mintRecoveryIncident(
+            UUID operationId, String step) {
+        if (operationId == null || !isMintRecoveryStep(step)) {
+            throw new IllegalArgumentException("Mint Recovery Incident identity is invalid");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_recovery_incident
+                WHERE operation_id = ? AND step = ?
+                """)) {
+            query.setString(1, operationId.toString());
+            query.setString(2, step);
+            return readMintRecoveryIncident(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Recovery Incident", failure);
+        }
+    }
+
+    public synchronized StoredMintRecoveryIncident latestMintRecoveryIncidentByBatch(
+            UUID batchId) {
+        if (batchId == null) {
+            throw new IllegalArgumentException("Mint Recovery Incident Batch cannot be null");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_recovery_incident
+                WHERE batch_id = ?
+                ORDER BY last_observed_at_epoch_millis DESC, incident_id DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, batchId.toString());
+            return readMintRecoveryIncident(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read latest Mint Recovery Incident", failure);
+        }
+    }
+
+    public synchronized StoredMintRecoveryIncident resolveMintRecoveryIncident(
+            UUID operationId,
+            String step,
+            String resolutionKind,
+            String resolutionDetail,
+            long resolvedAtEpochMillis) {
+        if (operationId == null
+                || !isMintRecoveryStep(step)
+                || resolutionKind == null
+                || resolutionKind.isBlank()
+                || resolutionDetail == null
+                || resolutionDetail.isBlank()
+                || resolvedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Recovery Incident resolution is invalid");
+        }
+        StoredMintRecoveryIncident incident = mintRecoveryIncident(operationId, step);
+        if (incident == null) {
+            return null;
+        }
+        if ("RESOLVED".equals(incident.state())) {
+            if (!resolutionKind.equals(incident.resolutionKind())
+                    || !resolutionDetail.equals(incident.resolutionDetail())
+                    || !Long.valueOf(resolvedAtEpochMillis).equals(incident.resolvedAtEpochMillis())) {
+                throw new IllegalArgumentException(
+                        "Mint Recovery Incident resolution replay changed immutable metadata");
+            }
+            return incident;
+        }
+        if (resolvedAtEpochMillis < incident.lastObservedAtEpochMillis()) {
+            throw new IllegalArgumentException(
+                    "Mint Recovery Incident resolution predates its latest failure");
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE mint_recovery_incident
+                SET state = 'RESOLVED', resolution_kind = ?, resolution_detail = ?,
+                    resolved_at_epoch_millis = ?
+                WHERE incident_id = ? AND state = 'OPEN'
+                """)) {
+            update.setString(1, resolutionKind);
+            update.setString(2, resolutionDetail);
+            update.setLong(3, resolvedAtEpochMillis);
+            update.setString(4, incident.incidentId().toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Mint Recovery Incident changed before resolution was recorded");
+            }
+            return mintRecoveryIncident(operationId, step);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to resolve Mint Recovery Incident", failure);
+        }
+    }
+
+    private static void validateMintRecoveryIncidentValues(
+            UUID operationId,
+            String step,
+            String failureKind,
+            String failureMessage,
+            long observedAtEpochMillis) {
+        if (operationId == null
+                || !isMintRecoveryStep(step)
+                || failureKind == null
+                || failureKind.isBlank()
+                || failureMessage == null
+                || failureMessage.isBlank()
+                || observedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Recovery Incident values are invalid");
+        }
+    }
+
+    private static boolean isMintRecoveryStep(String step) {
+        return "TREASURY_CREDIT".equals(step) || "MATERIAL_CONSUMPTION".equals(step);
+    }
+
+    private static boolean matchesMintRecoveryStep(String operationState, String step) {
+        return ("PREPARED".equals(operationState) && "TREASURY_CREDIT".equals(step))
+                || ("EXTERNAL_APPLIED".equals(operationState)
+                        && "MATERIAL_CONSUMPTION".equals(step));
+    }
+
+    private void resolveOpenMintRecoveryIncident(
+            UUID operationId,
+            String step,
+            String resolutionKind,
+            String resolutionDetail,
+            long resolvedAtEpochMillis) throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE mint_recovery_incident
+                SET state = 'RESOLVED', resolution_kind = ?, resolution_detail = ?,
+                    resolved_at_epoch_millis = ?
+                WHERE operation_id = ? AND step = ? AND state = 'OPEN'
+                """)) {
+            update.setString(1, resolutionKind);
+            update.setString(2, resolutionDetail);
+            update.setLong(3, resolvedAtEpochMillis);
+            update.setString(4, operationId.toString());
+            update.setString(5, step);
+            update.executeUpdate();
         }
     }
 
@@ -10016,6 +10232,53 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 51");
             }
+            if (version < 52) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS mint_recovery_incident (
+                            incident_id TEXT PRIMARY KEY,
+                            operation_id TEXT NOT NULL REFERENCES mint_issuance_operation(operation_id),
+                            batch_id TEXT NOT NULL REFERENCES mint_batch(batch_id),
+                            step TEXT NOT NULL CHECK (step IN (
+                                'TREASURY_CREDIT', 'MATERIAL_CONSUMPTION'
+                            )),
+                            state TEXT NOT NULL CHECK (state IN ('OPEN', 'RESOLVED')),
+                            failure_kind TEXT NOT NULL CHECK (length(trim(failure_kind)) > 0),
+                            failure_message TEXT NOT NULL CHECK (length(trim(failure_message)) > 0),
+                            first_observed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (first_observed_at_epoch_millis >= 0),
+                            last_observed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (last_observed_at_epoch_millis >= first_observed_at_epoch_millis),
+                            occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
+                            resolution_kind TEXT,
+                            resolution_detail TEXT,
+                            resolved_at_epoch_millis INTEGER,
+                            UNIQUE (operation_id, step),
+                            CHECK ((state = 'OPEN'
+                                    AND resolution_kind IS NULL
+                                    AND resolution_detail IS NULL
+                                    AND resolved_at_epoch_millis IS NULL)
+                                OR (state = 'RESOLVED'
+                                    AND resolution_kind IS NOT NULL
+                                    AND length(trim(resolution_kind)) > 0
+                                    AND resolution_detail IS NOT NULL
+                                    AND length(trim(resolution_detail)) > 0
+                                    AND resolved_at_epoch_millis IS NOT NULL
+                                    AND resolved_at_epoch_millis >= last_observed_at_epoch_millis))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS mint_recovery_incident_batch_latest
+                        ON mint_recovery_incident (
+                            batch_id, last_observed_at_epoch_millis DESC, incident_id DESC
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS mint_recovery_incident_open
+                        ON mint_recovery_incident (state, last_observed_at_epoch_millis, incident_id)
+                        WHERE state = 'OPEN'
+                        """);
+                statement.execute("PRAGMA user_version = 52");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11304,6 +11567,29 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getLong("refunded_minor_units"),
                 result.getString("reason"),
                 result.getString("state"));
+    }
+
+    private static StoredMintRecoveryIncident readMintRecoveryIncident(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredMintRecoveryIncident(
+                    UUID.fromString(result.getString("incident_id")),
+                    UUID.fromString(result.getString("operation_id")),
+                    UUID.fromString(result.getString("batch_id")),
+                    result.getString("step"),
+                    result.getString("state"),
+                    result.getString("failure_kind"),
+                    result.getString("failure_message"),
+                    result.getLong("first_observed_at_epoch_millis"),
+                    result.getLong("last_observed_at_epoch_millis"),
+                    result.getLong("occurrence_count"),
+                    result.getString("resolution_kind"),
+                    result.getString("resolution_detail"),
+                    optionalLong(result, "resolved_at_epoch_millis"));
+        }
     }
 
     public static void validateBackup(Path backupFile, DatabaseIdentity expectedIdentity) {
