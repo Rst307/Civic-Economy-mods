@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 48;
+    private static final int SCHEMA_VERSION = 49;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4133,6 +4133,341 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("transaction_state"),
                     result.getString("reason"),
                     result.getLong("registered_at_epoch_millis"));
+        }
+    }
+
+    public synchronized StoredMintBatch prepareMintBatch(
+            UUID batchId,
+            String serviceIdentity,
+            String requestId,
+            UUID mintId,
+            UUID periodId,
+            UUID nationId,
+            UUID recipeVersionId,
+            long issuedMinorUnits,
+            List<StoredMintMaterialStack> materials,
+            UUID actorPlayerId,
+            String reason,
+            long preparedAtEpochMillis) {
+        if (batchId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || mintId == null
+                || periodId == null
+                || nationId == null
+                || recipeVersionId == null
+                || issuedMinorUnits <= 0L
+                || materials == null
+                || materials.isEmpty()
+                || actorPlayerId == null
+                || reason == null
+                || reason.isBlank()
+                || preparedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Batch preparation values are invalid");
+        }
+        StoredMintBatch replay = mintBatch(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.batchId().equals(batchId)
+                    || !replay.mintId().equals(mintId)
+                    || !replay.periodId().equals(periodId)
+                    || !replay.nationId().equals(nationId)
+                    || !replay.recipeVersionId().equals(recipeVersionId)
+                    || replay.issuedMinorUnits() != issuedMinorUnits
+                    || !replay.actorPlayerId().equals(actorPlayerId)
+                    || !replay.reason().equals(reason)
+                    || !mintBatchMaterials(batchId).equals(List.copyOf(materials))) {
+                throw new IllegalArgumentException(
+                        "Mint Batch preparation replay changed its immutable payload");
+            }
+            return replay;
+        }
+        StoredRegisteredMint mint = registeredMint(mintId);
+        if (mint == null
+                || !mint.nationId().equals(nationId)
+                || !mint.recipeVersionId().equals(recipeVersionId)
+                || !"IDLE".equals(mint.transactionState())) {
+            throw new IllegalStateException("Registered Mint is not eligible for this batch");
+        }
+        StoredIssuanceQuotaPeriod period = issuanceQuotaPeriod(periodId);
+        StoredNationalIssuanceQuota quota = nationalIssuanceQuota(periodId, nationId);
+        if (period == null
+                || quota == null
+                || preparedAtEpochMillis < period.startsAtEpochMillis()
+                || preparedAtEpochMillis >= period.endsAtEpochMillis()) {
+            throw new IllegalStateException("Mint Batch has no active National Issuance Quota");
+        }
+        validateMintBatchMaterials(recipeVersionId, issuedMinorUnits, materials);
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement reserveQuota = connection.prepareStatement("""
+                        UPDATE national_issuance_quota
+                        SET reserved_minor_units = reserved_minor_units + ?
+                        WHERE period_id = ? AND nation_id = ?
+                          AND reserved_minor_units + used_minor_units + ?
+                              <= activated_minor_units
+                        """);
+                    PreparedStatement reserveMint = connection.prepareStatement("""
+                        UPDATE registered_mint SET transaction_state = 'PREPARING'
+                        WHERE mint_id = ? AND transaction_state = 'IDLE'
+                        """);
+                    PreparedStatement insertBatch = connection.prepareStatement("""
+                        INSERT INTO mint_batch (
+                            batch_id, service_identity, request_id, mint_id,
+                            period_id, nation_id, recipe_version_id,
+                            issued_minor_units, actor_player_id, state, custody_state,
+                            reason, prepared_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARING',
+                                  'EXTERNAL_PENDING', ?, ?)
+                        """);
+                    PreparedStatement insertMaterial = connection.prepareStatement("""
+                        INSERT INTO mint_batch_material (
+                            batch_id, material_index, group_index, matcher_kind,
+                            matcher_value, item_id, item_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """)) {
+                reserveQuota.setLong(1, issuedMinorUnits);
+                reserveQuota.setString(2, periodId.toString());
+                reserveQuota.setString(3, nationId.toString());
+                reserveQuota.setLong(4, issuedMinorUnits);
+                if (reserveQuota.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Mint Batch exceeds remaining National Issuance Quota");
+                }
+                reserveMint.setString(1, mintId.toString());
+                if (reserveMint.executeUpdate() != 1) {
+                    throw new IllegalStateException("Registered Mint changed concurrently");
+                }
+                insertBatch.setString(1, batchId.toString());
+                insertBatch.setString(2, serviceIdentity);
+                insertBatch.setString(3, requestId);
+                insertBatch.setString(4, mintId.toString());
+                insertBatch.setString(5, periodId.toString());
+                insertBatch.setString(6, nationId.toString());
+                insertBatch.setString(7, recipeVersionId.toString());
+                insertBatch.setLong(8, issuedMinorUnits);
+                insertBatch.setString(9, actorPlayerId.toString());
+                insertBatch.setString(10, reason);
+                insertBatch.setLong(11, preparedAtEpochMillis);
+                insertBatch.executeUpdate();
+                for (int index = 0; index < materials.size(); index++) {
+                    StoredMintMaterialStack material = materials.get(index);
+                    insertMaterial.setString(1, batchId.toString());
+                    insertMaterial.setInt(2, index);
+                    insertMaterial.setInt(3, material.groupIndex());
+                    insertMaterial.setString(4, material.matcherKind());
+                    insertMaterial.setString(5, material.matcherValue());
+                    insertMaterial.setString(6, material.itemId());
+                    insertMaterial.setLong(7, material.count());
+                    insertMaterial.addBatch();
+                }
+                insertMaterial.executeBatch();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatch(batchId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to prepare Mint Batch", failure);
+        }
+    }
+
+    public synchronized StoredMintBatch confirmMintBatchCustody(
+            UUID batchId,
+            String serviceIdentity,
+            String requestId,
+            String externalReference,
+            long confirmedAtEpochMillis) {
+        if (batchId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || externalReference == null
+                || externalReference.isBlank()
+                || confirmedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Batch custody confirmation values are invalid");
+        }
+        StoredMintBatch batch = mintBatch(batchId);
+        if (batch == null) {
+            throw new IllegalArgumentException("Unknown Mint Batch");
+        }
+        if (batch.custodyRequestId() != null) {
+            if (!serviceIdentity.equals(batch.custodyServiceIdentity())
+                    || !requestId.equals(batch.custodyRequestId())
+                    || !externalReference.equals(batch.custodyExternalReference())) {
+                throw new IllegalArgumentException(
+                        "Mint Batch custody replay changed its immutable payload");
+            }
+            return batch;
+        }
+        if (!"PREPARING".equals(batch.state())
+                || !"EXTERNAL_PENDING".equals(batch.custodyState())) {
+            throw new IllegalStateException("Mint Batch is not awaiting material custody");
+        }
+        StoredMintRecipeVersion recipe = mintRecipeVersion(batch.recipeVersionId());
+        long completesAt = Math.addExact(confirmedAtEpochMillis, recipe.processingDurationMillis());
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch
+                        SET state = 'PROCESSING', custody_state = 'HELD',
+                            custody_service_identity = ?, custody_request_id = ?,
+                            custody_external_reference = ?,
+                            processing_started_at_epoch_millis = ?,
+                            processing_completes_at_epoch_millis = ?
+                        WHERE batch_id = ? AND state = 'PREPARING'
+                          AND custody_state = 'EXTERNAL_PENDING'
+                        """);
+                    PreparedStatement updateMint = connection.prepareStatement("""
+                        UPDATE registered_mint SET transaction_state = 'PROCESSING'
+                        WHERE mint_id = ? AND transaction_state = 'PREPARING'
+                        """)) {
+                updateBatch.setString(1, serviceIdentity);
+                updateBatch.setString(2, requestId);
+                updateBatch.setString(3, externalReference);
+                updateBatch.setLong(4, confirmedAtEpochMillis);
+                updateBatch.setLong(5, completesAt);
+                updateBatch.setString(6, batchId.toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch changed concurrently");
+                }
+                updateMint.setString(1, batch.mintId().toString());
+                if (updateMint.executeUpdate() != 1) {
+                    throw new IllegalStateException("Registered Mint changed concurrently");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatch(batchId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to confirm Mint Batch custody", failure);
+        }
+    }
+
+    public synchronized StoredMintBatch mintBatch(UUID batchId) {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT * FROM mint_batch WHERE batch_id = ?")) {
+            query.setString(1, batchId.toString());
+            return readMintBatch(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Batch", failure);
+        }
+    }
+
+    public synchronized StoredMintBatch mintBatch(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_batch
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readMintBatch(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Batch request", failure);
+        }
+    }
+
+    public synchronized List<StoredMintMaterialStack> mintBatchMaterials(UUID batchId) {
+        List<StoredMintMaterialStack> materials = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_batch_material
+                WHERE batch_id = ? ORDER BY material_index
+                """)) {
+            query.setString(1, batchId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    materials.add(new StoredMintMaterialStack(
+                            result.getInt("group_index"),
+                            result.getString("matcher_kind"),
+                            result.getString("matcher_value"),
+                            result.getString("item_id"),
+                            result.getLong("item_count")));
+                }
+            }
+            return List.copyOf(materials);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Batch materials", failure);
+        }
+    }
+
+    private void validateMintBatchMaterials(
+            UUID recipeVersionId,
+            long issuedMinorUnits,
+            List<StoredMintMaterialStack> materials) {
+        List<StoredMintRecipeIngredient> ingredients = mintRecipeIngredients(recipeVersionId);
+        Set<Integer> recipeGroups = new HashSet<>();
+        ingredients.forEach(ingredient -> recipeGroups.add(ingredient.groupIndex()));
+        Set<Integer> suppliedGroups = new HashSet<>();
+        if (materials.size() != recipeGroups.size()) {
+            throw new IllegalStateException("Mint Batch material manifest is incomplete");
+        }
+        for (StoredMintMaterialStack material : materials) {
+            if (material == null || !suppliedGroups.add(material.groupIndex())) {
+                throw new IllegalStateException("Mint Batch material groups are invalid");
+            }
+            StoredMintRecipeIngredient selected = ingredients.stream()
+                    .filter(ingredient -> ingredient.groupIndex() == material.groupIndex()
+                            && ingredient.matcherKind().equals(material.matcherKind())
+                            && ingredient.matcherValue().equals(material.matcherValue()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Mint Batch material is not allowed by its locked recipe"));
+            if ("EXACT_ITEM".equals(selected.matcherKind())
+                    && !selected.matcherValue().equals(material.itemId())) {
+                throw new IllegalStateException("Mint Batch exact-item material does not match");
+            }
+            long expected = selected.quantityUnits();
+            if (selected.perFaceValueMinorUnits() > 0L) {
+                if (issuedMinorUnits % selected.perFaceValueMinorUnits() != 0L) {
+                    throw new IllegalStateException(
+                            "Mint Batch amount does not align with the recipe face value");
+                }
+                expected = Math.multiplyExact(
+                        expected, issuedMinorUnits / selected.perFaceValueMinorUnits());
+            }
+            if (material.count() != expected) {
+                throw new IllegalStateException("Mint Batch material count is not exact");
+            }
+        }
+    }
+
+    private static StoredMintBatch readMintBatch(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            long started = result.getLong("processing_started_at_epoch_millis");
+            Long startedAt = result.wasNull() ? null : started;
+            long completes = result.getLong("processing_completes_at_epoch_millis");
+            Long completesAt = result.wasNull() ? null : completes;
+            return new StoredMintBatch(
+                    UUID.fromString(result.getString("batch_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("mint_id")),
+                    UUID.fromString(result.getString("period_id")),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("recipe_version_id")),
+                    result.getLong("issued_minor_units"),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("state"),
+                    result.getString("custody_state"),
+                    result.getString("custody_service_identity"),
+                    result.getString("custody_request_id"),
+                    result.getString("custody_external_reference"),
+                    result.getString("reason"),
+                    result.getLong("prepared_at_epoch_millis"),
+                    startedAt,
+                    completesAt);
         }
     }
 
@@ -8859,6 +9194,109 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 48");
             }
+            if (version < 49) {
+                if (!tableExists("mint_batch")) {
+                    statement.execute("DROP INDEX IF EXISTS registered_mint_nation_state");
+                statement.execute("ALTER TABLE registered_mint RENAME TO registered_mint_v48");
+                statement.execute("""
+                        CREATE TABLE registered_mint (
+                            mint_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            block_x INTEGER NOT NULL,
+                            block_y INTEGER NOT NULL,
+                            block_z INTEGER NOT NULL,
+                            operator_organization_id TEXT NOT NULL,
+                            license_id TEXT NOT NULL,
+                            automation_allowed INTEGER NOT NULL
+                                CHECK (automation_allowed IN (0, 1)),
+                            recipe_version_id TEXT NOT NULL
+                                REFERENCES mint_recipe_version(recipe_version_id),
+                            actor_player_id TEXT NOT NULL,
+                            transaction_state TEXT NOT NULL CHECK (transaction_state IN (
+                                'IDLE', 'PREPARING', 'PROCESSING', 'RECOVERY'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            registered_at_epoch_millis INTEGER NOT NULL
+                                CHECK (registered_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (license_id),
+                            UNIQUE (dimension_id, block_x, block_y, block_z)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO registered_mint SELECT * FROM registered_mint_v48
+                        """);
+                statement.execute("DROP TABLE registered_mint_v48");
+                statement.execute("""
+                        CREATE INDEX registered_mint_nation_state
+                        ON registered_mint (nation_id, transaction_state, mint_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE mint_batch (
+                            batch_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            mint_id TEXT NOT NULL REFERENCES registered_mint(mint_id),
+                            period_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL,
+                            recipe_version_id TEXT NOT NULL
+                                REFERENCES mint_recipe_version(recipe_version_id),
+                            issued_minor_units INTEGER NOT NULL
+                                CHECK (issued_minor_units > 0),
+                            actor_player_id TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PREPARING', 'PROCESSING', 'COMMITTING', 'COMMITTED',
+                                'CANCELLING', 'CANCELLED', 'RECOVERY'
+                            )),
+                            custody_state TEXT NOT NULL CHECK (custody_state IN (
+                                'EXTERNAL_PENDING', 'HELD', 'CONSUME_PENDING',
+                                'CONSUMED', 'RETURN_PENDING', 'RETURNED'
+                            )),
+                            custody_service_identity TEXT,
+                            custody_request_id TEXT,
+                            custody_external_reference TEXT UNIQUE,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            processing_started_at_epoch_millis INTEGER,
+                            processing_completes_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (custody_service_identity, custody_request_id),
+                            FOREIGN KEY (period_id, nation_id)
+                                REFERENCES national_issuance_quota(period_id, nation_id),
+                            CHECK ((processing_started_at_epoch_millis IS NULL
+                                    AND processing_completes_at_epoch_millis IS NULL)
+                                OR (processing_started_at_epoch_millis IS NOT NULL
+                                    AND processing_completes_at_epoch_millis
+                                        > processing_started_at_epoch_millis))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE mint_batch_material (
+                            batch_id TEXT NOT NULL REFERENCES mint_batch(batch_id),
+                            material_index INTEGER NOT NULL CHECK (material_index >= 0),
+                            group_index INTEGER NOT NULL CHECK (group_index >= 0),
+                            matcher_kind TEXT NOT NULL
+                                CHECK (matcher_kind IN ('EXACT_ITEM', 'TAG')),
+                            matcher_value TEXT NOT NULL,
+                            item_id TEXT NOT NULL,
+                            item_count INTEGER NOT NULL CHECK (item_count > 0),
+                            PRIMARY KEY (batch_id, material_index),
+                            UNIQUE (batch_id, group_index)
+                        )
+                        """);
+                    statement.execute("""
+                        CREATE INDEX mint_batch_recovery
+                        ON mint_batch (state, prepared_at_epoch_millis, batch_id)
+                        WHERE state NOT IN ('COMMITTED', 'CANCELLED')
+                        """);
+                }
+                statement.execute("PRAGMA user_version = 49");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -8877,6 +9315,17 @@ public final class CivicDatabase implements AutoCloseable {
                 }
             }
             return false;
+        }
+    }
+
+    private boolean tableExists(String tableName) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?
+                """)) {
+            query.setString(1, tableName);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next();
+            }
         }
     }
 
