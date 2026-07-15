@@ -62,6 +62,12 @@ import org.civiceconomy.territory.IssueTerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
 import org.civiceconomy.territory.TerritoryClaimPermitState;
+import org.civiceconomy.territory.AssessTerritoryFiscalValidity;
+import org.civiceconomy.territory.OpenTerritoryMaintenanceCycle;
+import org.civiceconomy.territory.SuspendTerritoryMaintenance;
+import org.civiceconomy.territory.TerritoryClaimPosition;
+import org.civiceconomy.territory.TerritoryMaintenancePriority;
+import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -642,6 +648,215 @@ public final class CivicServerRuntimeGameTests {
                 }
             }
         });
+    }
+
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 1800,
+            batch = "territory-force-load-guard")
+    public static void suspendedTerritoryBlocksRealFtbForceLoadUntilEffectiveRestoration(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-force-load-guard-test"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(72, 0, 72)).getCenter());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        ChunkDimPos position = new ChunkDimPos(
+                player.level().dimension(), new ChunkPos(player.blockPosition()));
+        TerritoryClaimPosition civicPosition = new TerritoryClaimPosition(
+                position.dimension().location().toString(), position.x(), position.z());
+        var manager = FTBChunksAPI.api().getManager();
+        ClaimedChunk existing = manager.getChunk(position);
+        if (existing != null) {
+            existing.unclaim(player.createCommandSourceStack(), true);
+        }
+        var teamData = manager.getOrCreateData(team);
+        teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
+        teamData.setExtraForceLoadChunks(Math.max(100, teamData.getExtraForceLoadChunks()));
+        ((ChunkTeamDataImpl) teamData).updateLimits();
+        helper.assertTrue(
+                teamData.claim(player.createCommandSourceStack(), position, false).isSuccess(),
+                "force-load guard Claim fixture");
+
+        java.time.Instant now = java.time.Instant.now();
+        ServiceIdentity maintenanceService =
+                new ServiceIdentity("force-load-gametest-" + UUID.randomUUID());
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<java.time.Instant> restoredCycleStart = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean restorationCommitted = new AtomicBoolean();
+
+        CivicServerRuntime.current()
+                .submitDatabase(database -> {
+                    NationTeam nationTeam = new NationTeam(
+                            team.getId(), team.getOwner(), team.getMembers());
+                    var nation = new NationRegistry(database, snapshot(nationTeam)).register(
+                            new RegisterNation(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "force-load-guard-nation-" + UUID.randomUUID(),
+                                    team.getId()));
+                    nationId.set(nation.nationId());
+                    TerritoryMaintenanceRegistry maintenance =
+                            new TerritoryMaintenanceRegistry(database);
+                    long suspendedStartMillis =
+                            now.minus(java.time.Duration.ofHours(25L)).toEpochMilli() - 4L;
+                    while (true) {
+                        var occupiedAtSuspension =
+                                database.territoryMaintenanceCycleAt(suspendedStartMillis);
+                        if (occupiedAtSuspension != null) {
+                            suspendedStartMillis =
+                                    occupiedAtSuspension.startsAtEpochMillis() - 4L;
+                            continue;
+                        }
+                        var occupiedAtRestoration =
+                                database.territoryMaintenanceCycleAt(suspendedStartMillis + 2L);
+                        if (occupiedAtRestoration != null) {
+                            suspendedStartMillis =
+                                    occupiedAtRestoration.startsAtEpochMillis() - 4L;
+                            continue;
+                        }
+                        break;
+                    }
+                    java.time.Instant suspendedCycleStart =
+                            java.time.Instant.ofEpochMilli(suspendedStartMillis);
+                    java.time.Instant suspendedCycleEnd = suspendedCycleStart.plusMillis(1L);
+                    restoredCycleStart.set(suspendedCycleEnd.plusMillis(1L));
+                    var suspendedCycle = maintenance.openCycle(
+                            new OpenTerritoryMaintenanceCycle(
+                                    maintenanceService,
+                                    "force-load-guard-cycle-" + UUID.randomUUID(),
+                                    suspendedCycleStart,
+                                    suspendedCycleEnd));
+                    maintenance.assess(new AssessTerritoryFiscalValidity(
+                            maintenanceService,
+                            "force-load-guard-assessment-" + UUID.randomUUID(),
+                            suspendedCycle.cycleId(),
+                            nation.nationId(),
+                            team.getId(),
+                            civicPosition.dimensionId(),
+                            civicPosition.chunkX(),
+                            civicPosition.chunkZ(),
+                            10L,
+                            TerritoryMaintenancePriority.ORDINARY,
+                            "Post-grace force-load guard GameTest"));
+                    maintenance.suspend(new SuspendTerritoryMaintenance(
+                            maintenanceService,
+                            "force-load-guard-settlement-" + UUID.randomUUID(),
+                            suspendedCycle.cycleId(),
+                            nation.nationId(),
+                            "Post-grace force-load guard GameTest"));
+                    return nation.nationId();
+                })
+                .whenComplete((ignored, setupFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (setupFailure != null) {
+                                asyncFailure.set(setupFailure);
+                            } else {
+                                CivicServerRuntime.current()
+                                        .refreshTerritoryForceLoadRestrictions();
+                            }
+                        }));
+
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    Throwable failure = asyncFailure.get();
+                    helper.assertTrue(
+                            failure == null,
+                            failure == null
+                                    ? "force-load guard async state"
+                                    : "force-load guard async failure: " + failure.getMessage());
+                    helper.assertTrue(
+                            runtime.territoryForceLoadRestrictionsReady(),
+                            "force-load Restriction mirror ready");
+                    helper.assertTrue(
+                            runtime.territoryForceLoadBlocked(team.getId(), civicPosition),
+                            "exact post-grace suspended Claim mirrored");
+                })
+                .thenExecute(() -> {
+                    helper.assertFalse(
+                            teamData.forceLoad(
+                                            player.createCommandSourceStack()
+                                                    .withSuppressedOutput(),
+                                            position,
+                                            false)
+                                    .isSuccess(),
+                            "real FTB BEFORE_LOAD rejects post-grace suspended Territory");
+                    helper.assertFalse(
+                            manager.getChunk(position).isForceLoaded(),
+                            "rejected force-load does not mutate FTB state");
+                    runtime.submitDatabase(database -> {
+                                TerritoryMaintenanceRegistry maintenance =
+                                        new TerritoryMaintenanceRegistry(database);
+                                var restoredCycle = maintenance.openCycle(
+                                        new OpenTerritoryMaintenanceCycle(
+                                                maintenanceService,
+                                                "force-load-restored-cycle-" + UUID.randomUUID(),
+                                                restoredCycleStart.get(),
+                                                restoredCycleStart.get().plusMillis(1L)));
+                                maintenance.assess(new AssessTerritoryFiscalValidity(
+                                        maintenanceService,
+                                        "force-load-restored-assessment-" + UUID.randomUUID(),
+                                        restoredCycle.cycleId(),
+                                        nationId.get(),
+                                        team.getId(),
+                                        civicPosition.dimensionId(),
+                                        civicPosition.chunkX(),
+                                        civicPosition.chunkZ(),
+                                        0L,
+                                        TerritoryMaintenancePriority.ORDINARY,
+                                        "Effective restoration mirror GameTest"));
+                                maintenance.settleZeroCostAssessments(
+                                        new SuspendTerritoryMaintenance(
+                                                maintenanceService,
+                                                "force-load-restored-settlement-" + UUID.randomUUID(),
+                                                restoredCycle.cycleId(),
+                                                nationId.get(),
+                                                "Effective restoration mirror GameTest"));
+                                return null;
+                            })
+                            .whenComplete((ignored, restorationFailure) ->
+                                    helper.getLevel().getServer().execute(() -> {
+                                        if (restorationFailure != null) {
+                                            asyncFailure.set(restorationFailure);
+                                        } else {
+                                            restorationCommitted.set(true);
+                                            runtime.refreshTerritoryForceLoadRestrictions();
+                                        }
+                                    }));
+                })
+                .thenWaitUntil(() -> {
+                    Throwable failure = asyncFailure.get();
+                    helper.assertTrue(
+                            failure == null,
+                            failure == null
+                                    ? "restoration async state"
+                                    : "restoration async failure: " + failure.getMessage());
+                    helper.assertTrue(restorationCommitted.get(), "effective restoration committed");
+                    helper.assertFalse(
+                            runtime.territoryForceLoadBlocked(team.getId(), civicPosition),
+                            "effective restoration removes exact Restriction");
+                })
+                .thenExecute(() -> {
+                    helper.assertTrue(
+                            teamData.forceLoad(
+                                            player.createCommandSourceStack().withSuppressedOutput(),
+                                            position,
+                                            false)
+                                    .isSuccess(),
+                            "authorized player can manually re-enable FTB force-load after restoration");
+                    helper.assertTrue(
+                            manager.getChunk(position).isForceLoaded(),
+                            "restored Claim force-load requested");
+                    helper.assertTrue(
+                            teamData.unForceLoad(player.createCommandSourceStack(), position, false)
+                                    .isSuccess(),
+                            "force-load guard cleanup unload");
+                    manager.getChunk(position).unclaim(player.createCommandSourceStack(), true);
+                })
+                .thenSucceed();
     }
 
     @GameTest(

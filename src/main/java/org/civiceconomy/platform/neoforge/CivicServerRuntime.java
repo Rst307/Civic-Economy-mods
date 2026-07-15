@@ -66,6 +66,8 @@ import org.civiceconomy.territory.TerritoryFiscalServiceProvisioner;
 import org.civiceconomy.territory.TerritoryForceLoadEnforcement;
 import org.civiceconomy.territory.TerritoryForceLoadEnforcementRegistry;
 import org.civiceconomy.territory.TerritoryForceLoadEnforcementState;
+import org.civiceconomy.territory.TerritoryForceLoadRestrictionMirror;
+import org.civiceconomy.territory.TerritoryForceLoadRestrictionRegistry;
 import org.civiceconomy.territory.PrepareTerritoryClaimPrepayment;
 import org.civiceconomy.territory.CancelTerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermit;
@@ -123,9 +125,12 @@ public final class CivicServerRuntime {
             new TerritoryClaimPermitMirror();
     private final FreeClaimAuthorizationMirror freeClaimAuthorizationMirror =
             new FreeClaimAuthorizationMirror();
+    private final TerritoryForceLoadRestrictionMirror territoryForceLoadRestrictionMirror =
+            new TerritoryForceLoadRestrictionMirror();
     private final Map<UUID, org.civiceconomy.nation.NationId> nationByFtbTeam =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicBoolean territoryClaimAuthorizationReady = new AtomicBoolean();
+    private final AtomicBoolean territoryForceLoadRestrictionsReady = new AtomicBoolean();
     private RuntimeState state;
 
     public CivicServerRuntime() {
@@ -141,7 +146,8 @@ public final class CivicServerRuntime {
                                 territoryClaimPermitMirror,
                                 freeClaimAuthorizationMirror,
                                 this::queueTerritoryClaimPermitConsumption,
-                                clock))
+                                clock),
+                        territoryForceLoadRestrictionMirror)
                 .register();
     }
 
@@ -183,6 +189,7 @@ public final class CivicServerRuntime {
         }
         state = new RuntimeState(server, sessions, writer);
         scheduleTerritoryPermitMirrorRefresh(state);
+        scheduleTerritoryForceLoadRestrictionRefresh(state);
         scheduleNationApplicationExpiry(state);
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
@@ -263,6 +270,7 @@ public final class CivicServerRuntime {
             current.ticksSinceTerritoryMaintenanceAssessment = 0;
             scheduleTerritoryMaintenanceAssessment(current);
             scheduleTerritoryForceLoadEnforcementRecovery(current);
+            scheduleTerritoryForceLoadRestrictionRefresh(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -289,8 +297,10 @@ public final class CivicServerRuntime {
         } finally {
             state = null;
             territoryClaimAuthorizationReady.set(false);
+            territoryForceLoadRestrictionsReady.set(false);
             territoryClaimPermitMirror.replaceAll(List.of());
             freeClaimAuthorizationMirror.clear();
+            territoryForceLoadRestrictionMirror.replaceAll(List.of());
             nationByFtbTeam.clear();
         }
         LOGGER.info("Civic server runtime closed SQLite after draining buffered online-time intervals");
@@ -532,6 +542,46 @@ public final class CivicServerRuntime {
 
     boolean territoryClaimAuthorizationReady() {
         return territoryClaimAuthorizationReady.get();
+    }
+
+    boolean territoryForceLoadRestrictionsReady() {
+        return territoryForceLoadRestrictionsReady.get();
+    }
+
+    boolean territoryForceLoadBlocked(UUID ftbTeamId, TerritoryClaimPosition position) {
+        return territoryForceLoadRestrictionMirror.blocks(ftbTeamId, position);
+    }
+
+    void refreshTerritoryForceLoadRestrictions() {
+        RuntimeState current = state;
+        if (current != null) {
+            scheduleTerritoryForceLoadRestrictionRefresh(current);
+        }
+    }
+
+    private void scheduleTerritoryForceLoadRestrictionRefresh(RuntimeState current) {
+        if (state != current
+                || !current.territoryForceLoadRestrictionRefreshQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock refreshClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database ->
+                        new TerritoryForceLoadRestrictionRegistry(database, refreshClock).active())
+                .whenComplete((restrictions, failure) -> {
+                    current.territoryForceLoadRestrictionRefreshQueued.set(false);
+                    if (state != current) {
+                        return;
+                    }
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Territory Force-load Restriction mirror refresh failed closed",
+                                failure);
+                        territoryForceLoadRestrictionsReady.set(false);
+                        return;
+                    }
+                    territoryForceLoadRestrictionMirror.replaceAll(restrictions);
+                    territoryForceLoadRestrictionsReady.set(true);
+                });
     }
 
     private void scheduleTerritoryPermitMirrorRefresh(RuntimeState current) {
@@ -1065,6 +1115,7 @@ public final class CivicServerRuntime {
                 .whenComplete((result, failure) -> {
                     current.territoryMaintenanceSettlementQueued.set(false);
                     scheduleTerritoryForceLoadEnforcementRecovery(current);
+                    scheduleTerritoryForceLoadRestrictionRefresh(current);
                     if (failure != null) {
                         LOGGER.error(
                                 "Automatic Territory Maintenance settlement failed closed",
@@ -1281,6 +1332,8 @@ public final class CivicServerRuntime {
         private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceSettlementQueued = new AtomicBoolean();
         private final AtomicBoolean territoryForceLoadEnforcementQueued = new AtomicBoolean();
+        private final AtomicBoolean territoryForceLoadRestrictionRefreshQueued =
+                new AtomicBoolean();
         private int ticksSinceCheckpoint;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;

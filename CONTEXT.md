@@ -164,6 +164,10 @@ _Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 一条 Territory Fiscal Assessment 结论为 SUSPENDED 并经过固定 24 小时短宽限后，Civic 对该评估持久化的精确 FTB Team、维度和区块执行的服务端强制加载关闭；它只取消 force-load，不删除、转移或重新声明底层 FTB Claim，并以 PREPARED、EXTERNAL_APPLIED、CIVIC_COMMITTED 三阶段恢复到精确一次的 Civic 结论。
 _Avoid_: 取消领土、调用方提供目标、批量关闭其他 Team 区块
 
+**领土强制加载限制（Territory Force-load Restriction）**:
+固定 24 小时短宽限结束后，由一个精确 FTB Team、维度和区块的最新已结论 Territory Fiscal Assessment 派生的服务端限制；最新结论为 SUSPENDED 时阻止新的 FTB force-load 请求，较新的 EFFECTIVE 结论解除该限制，但 Civic 不自动重新启用外部 force-load 状态。运行时只读取异步刷新的权威镜像，不在 FTB 事件线程同步查询 SQLite。
+_Avoid_: 全服 force-load 开关、调用方声明的财政状态、恢复后自动 force-load
+
 **领土恢复（Territory Maintenance Restoration）**:
 先前因维护不足而 SUSPENDED 的区块重新取得财政有效性的过程；只收配置的恢复费和下一个完整周期维护费，不追缴历史欠费，并在成功恢复后进入冷却。每条后续评估明确记录恢复资格：无需恢复（NOT_REQUIRED）、可恢复（ELIGIBLE）或冷却阻止（COOLDOWN_BLOCKED）；冷却阻止的区块不能因余额充足而重新生效。
 _Avoid_: 补缴全部欠费、重新占领 FTB 区块、无冷却反复恢复

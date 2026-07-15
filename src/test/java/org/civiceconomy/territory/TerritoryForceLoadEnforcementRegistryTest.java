@@ -108,6 +108,70 @@ class TerritoryForceLoadEnforcementRegistryTest {
         }
     }
 
+    @Test
+    void restrictionUsesLatestConcludedAssessmentAndReleasesAfterEffectiveRestoration() {
+        try (CivicDatabase database = database()) {
+            suspendedAssessment(database);
+
+            assertEquals(
+                    List.of(),
+                    new TerritoryForceLoadRestrictionRegistry(
+                                    database,
+                                    Clock.fixed(
+                                            Instant.ofEpochMilli(86_402_999L),
+                                            ZoneOffset.UTC))
+                            .active());
+            TerritoryForceLoadRestriction restriction =
+                    new TerritoryForceLoadRestrictionRegistry(
+                                    database,
+                                    Clock.fixed(
+                                            Instant.ofEpochMilli(86_403_000L),
+                                            ZoneOffset.UTC))
+                            .active()
+                            .getFirst();
+            assertEquals(NATION, restriction.nationId());
+            assertEquals(TEAM, restriction.ftbTeamId());
+            assertEquals(
+                    new TerritoryClaimPosition("minecraft:overworld", 4, 5),
+                    restriction.position());
+
+            TerritoryMaintenanceRegistry maintenance = new TerritoryMaintenanceRegistry(database);
+            TerritoryMaintenanceCycle restoredCycle = maintenance.openCycle(
+                    new OpenTerritoryMaintenanceCycle(
+                            SERVICE,
+                            "restored-cycle",
+                            Instant.ofEpochMilli(4_000L),
+                            Instant.ofEpochMilli(5_000L)));
+            maintenance.assess(new AssessTerritoryFiscalValidity(
+                    SERVICE,
+                    "restored-assessment",
+                    restoredCycle.cycleId(),
+                    NATION,
+                    TEAM,
+                    "minecraft:overworld",
+                    4,
+                    5,
+                    0L,
+                    TerritoryMaintenancePriority.ORDINARY,
+                    "Effective restoration fixture"));
+            maintenance.settleZeroCostAssessments(new SuspendTerritoryMaintenance(
+                    SERVICE,
+                    "restored-settlement",
+                    restoredCycle.cycleId(),
+                    NATION,
+                    "Effective restoration fixture"));
+
+            assertEquals(
+                    List.of(),
+                    new TerritoryForceLoadRestrictionRegistry(
+                                    database,
+                                    Clock.fixed(
+                                            Instant.ofEpochMilli(86_403_000L),
+                                            ZoneOffset.UTC))
+                            .active());
+        }
+    }
+
     private TerritoryFiscalAssessment suspendedAssessment(CivicDatabase database) {
         database.registerNation(NATION.value(), "test", "nation", TEAM, 1_000L);
         TerritoryMaintenanceRegistry maintenance = new TerritoryMaintenanceRegistry(database);

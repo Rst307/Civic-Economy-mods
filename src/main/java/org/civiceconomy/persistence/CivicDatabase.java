@@ -2565,6 +2565,69 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredTerritoryForceLoadRestriction>
+            activeTerritoryForceLoadRestrictions(long nowEpochMillis) {
+        List<StoredTerritoryForceLoadRestriction> restrictions = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                WITH concluded AS (
+                    SELECT assessment.assessment_id,
+                           assessment.nation_id,
+                           assessment.ftb_team_id,
+                           assessment.dimension_id,
+                           assessment.chunk_x,
+                           assessment.chunk_z,
+                           assessment.validity,
+                           cycle.ends_at_epoch_millis,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY assessment.nation_id,
+                                            assessment.ftb_team_id,
+                                            assessment.dimension_id,
+                                            assessment.chunk_x,
+                                            assessment.chunk_z
+                               ORDER BY cycle.ends_at_epoch_millis DESC,
+                                        assessment.assessed_at_epoch_millis DESC,
+                                        assessment.assessment_id DESC
+                           ) AS current_rank
+                    FROM territory_fiscal_assessment assessment
+                    JOIN territory_maintenance_cycle cycle
+                      ON cycle.cycle_id = assessment.cycle_id
+                    WHERE assessment.validity IN ('EFFECTIVE', 'SUSPENDED')
+                      AND cycle.ends_at_epoch_millis <= ?
+                )
+                SELECT assessment_id, nation_id, ftb_team_id, dimension_id,
+                       chunk_x, chunk_z,
+                       ends_at_epoch_millis + ? AS restricted_at_epoch_millis
+                FROM concluded
+                WHERE current_rank = 1
+                  AND validity = 'SUSPENDED'
+                  AND ends_at_epoch_millis <= 9223372036854775807 - ?
+                  AND ends_at_epoch_millis + ? <= ?
+                ORDER BY ftb_team_id, dimension_id, chunk_x, chunk_z, assessment_id
+                """)) {
+            query.setLong(1, nowEpochMillis);
+            query.setLong(2, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
+            query.setLong(3, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
+            query.setLong(4, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
+            query.setLong(5, nowEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    restrictions.add(new StoredTerritoryForceLoadRestriction(
+                            UUID.fromString(result.getString("assessment_id")),
+                            UUID.fromString(result.getString("nation_id")),
+                            UUID.fromString(result.getString("ftb_team_id")),
+                            result.getString("dimension_id"),
+                            result.getInt("chunk_x"),
+                            result.getInt("chunk_z"),
+                            result.getLong("restricted_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(restrictions);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read active Territory Force-load Restrictions", failure);
+        }
+    }
+
     public synchronized StoredTerritoryForceLoadEnforcement
             prepareTerritoryForceLoadEnforcement(
                     UUID enforcementId,
