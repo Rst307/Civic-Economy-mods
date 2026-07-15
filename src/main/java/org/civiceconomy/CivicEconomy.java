@@ -18,6 +18,7 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMonetaryG
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
 import org.civiceconomy.platform.neoforge.CivicServerRuntime;
 import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
+import org.civiceconomy.platform.neoforge.MintMaterialCustodyGameTests;
 import org.civiceconomy.platform.neoforge.FiscalAdministrationCommands;
 import org.slf4j.Logger;
 
@@ -74,6 +75,7 @@ public final class CivicEconomy {
         LOGGER.info("Registering Civic Economy GameTests");
         event.register(FtbIntegrationGameTests.class);
         event.register(CivicServerRuntimeGameTests.class);
+        event.register(MintMaterialCustodyGameTests.class);
         event.register(LightmansCurrencyFiscalAccountsGameTests.class);
         event.register(LightmansCurrencyMonetaryGuardGameTests.class);
         event.register(LightmansCurrencyPermanentDestructionsGameTests.class);

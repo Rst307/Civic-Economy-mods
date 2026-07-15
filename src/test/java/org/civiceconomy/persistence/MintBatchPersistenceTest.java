@@ -148,6 +148,33 @@ class MintBatchPersistenceTest {
         }
     }
 
+    @Test
+    void cancellationReleasesQuotaOnlyAfterHeldMaterialsAreReturned() {
+        try (CivicDatabase database = database()) {
+            setup(database);
+            database.prepareMintBatch(
+                    BATCH, "mint-controller", "prepare-cancel", MINT, PERIOD, NATION, RECIPE,
+                    300L, materials(3L), ACTOR, "Prepare cancellation", START + 1L);
+            database.confirmMintBatchCustody(
+                    BATCH, "mint-controller", "custody-cancel", "inventory-move:cancel", START + 2L);
+
+            StoredMintBatch returning = database.prepareMintBatchCancellation(
+                    BATCH, "mint-controller", "cancel-batch", ACTOR,
+                    "Operator cancels before issuance", START + 3L);
+            assertEquals("CANCELLING", returning.state());
+            assertEquals("RETURN_PENDING", returning.custodyState());
+            assertEquals(300L, database.nationalIssuanceQuota(PERIOD, NATION).reservedMinorUnits());
+            assertEquals("RECOVERY", database.registeredMint(MINT).transactionState());
+
+            StoredMintBatch cancelled = database.confirmMintBatchMaterialReturn(
+                    BATCH, "mint-controller", "return-materials",
+                    "inventory-return:cancel", START + 4L);
+            assertEquals("CANCELLED", cancelled.state());
+            assertEquals("RETURNED", cancelled.custodyState());
+            assertEquals(0L, database.nationalIssuanceQuota(PERIOD, NATION).reservedMinorUnits());
+            assertEquals("IDLE", database.registeredMint(MINT).transactionState());
+        }
+    }
     private List<StoredMintMaterialStack> materials(long diamondCount) {
         return List.of(
                 new StoredMintMaterialStack(

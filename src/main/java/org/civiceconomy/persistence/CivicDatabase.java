@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 49;
+    private static final int SCHEMA_VERSION = 50;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4353,6 +4353,165 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredMintBatch prepareMintBatchCancellation(
+            UUID batchId,
+            String serviceIdentity,
+            String requestId,
+            UUID actorPlayerId,
+            String reason,
+            long preparedAtEpochMillis) {
+        if (batchId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || actorPlayerId == null
+                || reason == null
+                || reason.isBlank()
+                || preparedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Batch cancellation values are invalid");
+        }
+        StoredMintBatch batch = mintBatch(batchId);
+        if (batch == null) {
+            throw new IllegalArgumentException("Unknown Mint Batch");
+        }
+        if (batch.cancellationRequestId() != null) {
+            if (!serviceIdentity.equals(batch.cancellationServiceIdentity())
+                    || !requestId.equals(batch.cancellationRequestId())
+                    || !actorPlayerId.equals(batch.cancellationActorPlayerId())
+                    || !reason.equals(batch.cancellationReason())) {
+                throw new IllegalArgumentException(
+                        "Mint Batch cancellation replay changed its immutable payload");
+            }
+            return batch;
+        }
+        if (!"PROCESSING".equals(batch.state()) || !"HELD".equals(batch.custodyState())) {
+            throw new IllegalStateException("Mint Batch is not eligible for cancellation");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch
+                        SET state = 'CANCELLING', custody_state = 'RETURN_PENDING',
+                            cancellation_service_identity = ?, cancellation_request_id = ?,
+                            cancellation_actor_player_id = ?, cancellation_reason = ?,
+                            cancellation_prepared_at_epoch_millis = ?
+                        WHERE batch_id = ? AND state = 'PROCESSING' AND custody_state = 'HELD'
+                        """);
+                    PreparedStatement updateMint = connection.prepareStatement("""
+                        UPDATE registered_mint SET transaction_state = 'RECOVERY'
+                        WHERE mint_id = ? AND transaction_state = 'PROCESSING'
+                        """)) {
+                updateBatch.setString(1, serviceIdentity);
+                updateBatch.setString(2, requestId);
+                updateBatch.setString(3, actorPlayerId.toString());
+                updateBatch.setString(4, reason);
+                updateBatch.setLong(5, preparedAtEpochMillis);
+                updateBatch.setString(6, batchId.toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch changed concurrently");
+                }
+                updateMint.setString(1, batch.mintId().toString());
+                if (updateMint.executeUpdate() != 1) {
+                    throw new IllegalStateException("Registered Mint changed concurrently");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatch(batchId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to prepare Mint Batch cancellation", failure);
+        }
+    }
+
+    public synchronized StoredMintBatch confirmMintBatchMaterialReturn(
+            UUID batchId,
+            String serviceIdentity,
+            String requestId,
+            String externalReference,
+            long confirmedAtEpochMillis) {
+        if (batchId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || externalReference == null
+                || externalReference.isBlank()
+                || confirmedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint Batch material return values are invalid");
+        }
+        StoredMintBatch batch = mintBatch(batchId);
+        if (batch == null) {
+            throw new IllegalArgumentException("Unknown Mint Batch");
+        }
+        if (batch.returnRequestId() != null) {
+            if (!serviceIdentity.equals(batch.returnServiceIdentity())
+                    || !requestId.equals(batch.returnRequestId())
+                    || !externalReference.equals(batch.returnExternalReference())) {
+                throw new IllegalArgumentException(
+                        "Mint Batch material return replay changed its immutable payload");
+            }
+            return batch;
+        }
+        if (!"CANCELLING".equals(batch.state())
+                || !"RETURN_PENDING".equals(batch.custodyState())) {
+            throw new IllegalStateException("Mint Batch is not awaiting material return");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement releaseQuota = connection.prepareStatement("""
+                        UPDATE national_issuance_quota
+                        SET reserved_minor_units = reserved_minor_units - ?
+                        WHERE period_id = ? AND nation_id = ?
+                          AND reserved_minor_units >= ?
+                        """);
+                    PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch
+                        SET state = 'CANCELLED', custody_state = 'RETURNED',
+                            return_service_identity = ?, return_request_id = ?,
+                            return_external_reference = ?, cancelled_at_epoch_millis = ?
+                        WHERE batch_id = ? AND state = 'CANCELLING'
+                          AND custody_state = 'RETURN_PENDING'
+                        """);
+                    PreparedStatement updateMint = connection.prepareStatement("""
+                        UPDATE registered_mint SET transaction_state = 'IDLE'
+                        WHERE mint_id = ? AND transaction_state = 'RECOVERY'
+                        """)) {
+                releaseQuota.setLong(1, batch.issuedMinorUnits());
+                releaseQuota.setString(2, batch.periodId().toString());
+                releaseQuota.setString(3, batch.nationId().toString());
+                releaseQuota.setLong(4, batch.issuedMinorUnits());
+                if (releaseQuota.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch reserved quota cannot be released");
+                }
+                updateBatch.setString(1, serviceIdentity);
+                updateBatch.setString(2, requestId);
+                updateBatch.setString(3, externalReference);
+                updateBatch.setLong(4, confirmedAtEpochMillis);
+                updateBatch.setString(5, batchId.toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch changed concurrently");
+                }
+                updateMint.setString(1, batch.mintId().toString());
+                if (updateMint.executeUpdate() != 1) {
+                    throw new IllegalStateException("Registered Mint changed concurrently");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatch(batchId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to confirm Mint Batch material return", failure);
+        }
+    }
     public synchronized StoredMintBatch mintBatch(UUID batchId) {
         try (PreparedStatement query = connection.prepareStatement(
                 "SELECT * FROM mint_batch WHERE batch_id = ?")) {
@@ -4376,6 +4535,23 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredMintBatch> recoverableMintBatches() {
+        List<StoredMintBatch> batches = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_batch
+                WHERE state NOT IN ('COMMITTED', 'CANCELLED')
+                ORDER BY prepared_at_epoch_millis, batch_id
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    batches.add(readMintBatch(result));
+                }
+            }
+            return List.copyOf(batches);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read recoverable Mint Batches", failure);
+        }
+    }
     public synchronized List<StoredMintMaterialStack> mintBatchMaterials(UUID batchId) {
         List<StoredMintMaterialStack> materials = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""
@@ -4442,9 +4618,11 @@ public final class CivicDatabase implements AutoCloseable {
 
     private static StoredMintBatch readMintBatch(PreparedStatement query) throws SQLException {
         try (ResultSet result = query.executeQuery()) {
-            if (!result.next()) {
-                return null;
-            }
+            return result.next() ? readMintBatch(result) : null;
+        }
+    }
+
+    private static StoredMintBatch readMintBatch(ResultSet result) throws SQLException {
             long started = result.getLong("processing_started_at_epoch_millis");
             Long startedAt = result.wasNull() ? null : started;
             long completes = result.getLong("processing_completes_at_epoch_millis");
@@ -4465,10 +4643,27 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("custody_request_id"),
                     result.getString("custody_external_reference"),
                     result.getString("reason"),
+                    result.getString("cancellation_service_identity"),
+                    result.getString("cancellation_request_id"),
+                    optionalUuid(result.getString("cancellation_actor_player_id")),
+                    result.getString("cancellation_reason"),
+                    optionalLong(result, "cancellation_prepared_at_epoch_millis"),
+                    result.getString("return_service_identity"),
+                    result.getString("return_request_id"),
+                    result.getString("return_external_reference"),
+                    optionalLong(result, "cancelled_at_epoch_millis"),
                     result.getLong("prepared_at_epoch_millis"),
                     startedAt,
                     completesAt);
-        }
+    }
+
+    private static UUID optionalUuid(String value) {
+        return value == null ? null : UUID.fromString(value);
+    }
+
+    private static Long optionalLong(ResultSet result, String column) throws SQLException {
+        long value = result.getLong(column);
+        return result.wasNull() ? null : value;
     }
 
     public synchronized StoredIssuanceQuotaPeriod publishIssuanceQuotaPeriod(
@@ -9297,6 +9492,40 @@ public final class CivicDatabase implements AutoCloseable {
                 }
                 statement.execute("PRAGMA user_version = 49");
             }
+            if (version < 50) {
+                addColumnIfMissing(
+                        statement, "mint_batch", "cancellation_service_identity", "TEXT");
+                addColumnIfMissing(
+                        statement, "mint_batch", "cancellation_request_id", "TEXT");
+                addColumnIfMissing(
+                        statement, "mint_batch", "cancellation_actor_player_id", "TEXT");
+                addColumnIfMissing(statement, "mint_batch", "cancellation_reason", "TEXT");
+                addColumnIfMissing(
+                        statement,
+                        "mint_batch",
+                        "cancellation_prepared_at_epoch_millis",
+                        "INTEGER");
+                addColumnIfMissing(statement, "mint_batch", "return_service_identity", "TEXT");
+                addColumnIfMissing(statement, "mint_batch", "return_request_id", "TEXT");
+                addColumnIfMissing(statement, "mint_batch", "return_external_reference", "TEXT");
+                addColumnIfMissing(statement, "mint_batch", "cancelled_at_epoch_millis", "INTEGER");
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS mint_batch_cancellation_request
+                        ON mint_batch (cancellation_service_identity, cancellation_request_id)
+                        WHERE cancellation_request_id IS NOT NULL
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS mint_batch_return_request
+                        ON mint_batch (return_service_identity, return_request_id)
+                        WHERE return_request_id IS NOT NULL
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS mint_batch_return_reference
+                        ON mint_batch (return_external_reference)
+                        WHERE return_external_reference IS NOT NULL
+                        """);
+                statement.execute("PRAGMA user_version = 50");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -9315,6 +9544,15 @@ public final class CivicDatabase implements AutoCloseable {
                 }
             }
             return false;
+        }
+    }
+
+    private void addColumnIfMissing(
+            Statement statement, String tableName, String columnName, String definition)
+            throws SQLException {
+        if (!tableHasColumn(tableName, columnName)) {
+            statement.execute(
+                    "ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " " + definition);
         }
     }
 
