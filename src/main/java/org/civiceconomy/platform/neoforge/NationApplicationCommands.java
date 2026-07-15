@@ -97,6 +97,11 @@ final class NationApplicationCommands {
                                 .executes(context -> prepareTerritoryClaim(
                                         context.getSource(),
                                         StringArgumentType.getString(context, "requestId")))))
+                .then(Commands.literal("restore")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .executes(context -> restoreTerritory(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "requestId")))))
                 .then(Commands.literal("cancel")
                         .then(Commands.argument("permitId", UuidArgument.uuid())
                                 .then(Commands.argument("requestId", StringArgumentType.word())
@@ -111,6 +116,49 @@ final class NationApplicationCommands {
                                                                 context, "requestId"),
                                                         StringArgumentType.getString(
                                                                 context, "reason")))))));
+    }
+
+    private static int restoreTerritory(CommandSourceStack source, String requestId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+        NationTeam team = teams.findEffectiveTeamForPlayer(player.getUUID())
+                .or(() -> teams.findOwnedTeamForPlayer(player.getUUID()))
+                .orElseThrow(() -> new SecurityException(
+                        "You must belong to a formal Nation FTB Team"));
+        ChunkPos chunk = new ChunkPos(player.blockPosition());
+        CivicServerRuntime.current()
+                .restoreTerritory(
+                        team,
+                        player.getUUID(),
+                        requestId,
+                        player.level().dimension().location().toString(),
+                        chunk.x,
+                        chunk.z)
+                .whenComplete((payment, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Territory Restoration", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Restored Territory "
+                                                + payment.restoration().restorationId()
+                                                + " total="
+                                                + payment.restoration().totalDue().minorUnits()
+                                                + " nextCyclePrepayment="
+                                                + payment.restoration()
+                                                        .nextCyclePrepayment()
+                                                        .minorUnits()
+                                                + " restorationFee="
+                                                + payment.restoration()
+                                                        .restorationFee()
+                                                        .minorUnits()
+                                                + "; request force-load manually if desired"),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Territory Restoration queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int prepareTerritoryClaim(CommandSourceStack source, String requestId)

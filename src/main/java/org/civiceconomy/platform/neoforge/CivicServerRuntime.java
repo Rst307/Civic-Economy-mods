@@ -536,6 +536,208 @@ public final class CivicServerRuntime {
                 });
     }
 
+    CompletableFuture<org.civiceconomy.territory.TerritoryMaintenanceRestorationPayment>
+            restoreTerritory(
+                    NationTeam team,
+                    UUID actorPlayerId,
+                    String requestId,
+                    String dimensionId,
+                    int chunkX,
+                    int chunkZ) {
+        Instant commandTime = clock.instant();
+        Clock commandClock = Clock.fixed(commandTime, ZoneOffset.UTC);
+        RuntimeState current = state;
+        if (current == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Civic server runtime is not active"));
+        }
+        var observedClaims = FtbChunksAdapter.live().claimsForTeam(team.teamId()).stream()
+                .map(claim -> new TerritoryMaintenanceObservedClaim(
+                        new TerritoryClaimPosition(
+                                claim.dimension().location().toString(),
+                                claim.chunkPos().x,
+                                claim.chunkPos().z),
+                        claim.forceLoadRequested()))
+                .toList();
+        TerritoryClaimPosition target =
+                new TerritoryClaimPosition(dimensionId, chunkX, chunkZ);
+        if (observedClaims.stream().noneMatch(claim -> claim.position().equals(target))) {
+            return CompletableFuture.failedFuture(new SecurityException(
+                    "Your FTB Team does not own the exact Restoration Claim"));
+        }
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        return current.writer.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var citizenships = new org.civiceconomy.nation.CitizenshipRegistry(
+                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                    var corrections =
+                            new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
+                                    database, commandClock);
+                    var provider = new org.civiceconomy.nation.FtbTeamsNationProvider(
+                            nations, citizenships, corrections, teams);
+                    var restorations = new org.civiceconomy.territory
+                            .TerritoryMaintenanceRestorationRegistry(database, commandClock);
+                    var replay = restorations.find(
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY, requestId);
+                    org.civiceconomy.territory.PrepareTerritoryMaintenanceRestoration
+                            restorationRequest;
+                    if (replay.isPresent()) {
+                        var existingRestoration = replay.orElseThrow();
+                        restorationRequest = new org.civiceconomy.territory
+                                .PrepareTerritoryMaintenanceRestoration(
+                                        TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                        requestId,
+                                        nation.nationId(),
+                                        team.teamId(),
+                                        actorPlayerId,
+                                        dimensionId,
+                                        chunkX,
+                                        chunkZ,
+                                        existingRestoration.policyId(),
+                                        existingRestoration.nextFullCycleStartsAt(),
+                                        new org.civiceconomy.territory
+                                                .TerritoryMaintenanceRestorationQuote(
+                                                        existingRestoration.totalDue(),
+                                                        existingRestoration.cooldownEndsAt()),
+                                        existingRestoration.reason());
+                    } else {
+                        var policies = new TerritoryMaintenancePolicyRegistry(
+                                database, commandClock);
+                        TerritoryMaintenancePolicyVersion currentPolicy = policies
+                                .current(commandTime)
+                                .orElseThrow(() -> new IllegalStateException(
+                                        "Territory Maintenance policy is not configured"));
+                        TerritoryMaintenanceCycleWindow currentWindow =
+                                new TerritoryMaintenanceCycleSchedule()
+                                        .current(currentPolicy, commandTime)
+                                        .orElseThrow(() -> new IllegalStateException(
+                                                "Territory Maintenance Cycle is not active"));
+                        Instant nextCycleStartsAt = currentWindow.endsAt();
+                        TerritoryMaintenancePolicyVersion nextPolicy = policies
+                                .current(nextCycleStartsAt)
+                                .orElseThrow(() -> new IllegalStateException(
+                                        "Next Territory Maintenance policy is unavailable"));
+                        var storedCapital = database.nationCapital(nation.nationId().value());
+                        if (storedCapital == null) {
+                            throw new IllegalStateException(
+                                    "Territory Restoration requires a persistent Capital");
+                        }
+                        Capital capital = new Capital(
+                                storedCapital.dimensionId(),
+                                storedCapital.chunkX(),
+                                storedCapital.chunkZ());
+                        var population = new org.civiceconomy.nation.NationPopulationCalculator(
+                                        citizenships,
+                                        corrections,
+                                        new org.civiceconomy.nation.OnlineTimeLedger(database),
+                                        NATION_APPLICATION_EVIDENCE_WINDOW,
+                                        Duration.ofHours(8))
+                                .calculate(nation.nationId(), commandTime);
+                        TerritoryFreeAllocation allocation =
+                                new TerritoryFreeAllocationPolicyRegistry(
+                                                database,
+                                                commandClock,
+                                                TerritoryFreeAllocationPolicyVersion.defaultPolicy(
+                                                        0, 0))
+                                        .current(nextCycleStartsAt)
+                                        .policy()
+                                        .calculate(population);
+                        var maintenance = new TerritoryMaintenanceRegistry(database, commandClock);
+                        var history = maintenance.restorationHistory(
+                                nation.nationId(), team.teamId(), commandTime.plusMillis(1L));
+                        var targetHistory = history.get(target);
+                        if (targetHistory == null || !targetHistory.previouslySuspended()) {
+                            throw new IllegalStateException(
+                                    "Territory Restoration requires the exact latest suspended Claim");
+                        }
+                        targetHistory.cooldownEndsAt()
+                                .filter(commandTime::isBefore)
+                                .ifPresent(eligibleAt -> {
+                                    throw new org.civiceconomy.territory
+                                            .TerritoryMaintenanceRestorationCooldownException(
+                                                    eligibleAt);
+                                });
+                        var targetSnapshot = new TerritoryMaintenanceAssessmentPlanner()
+                                .plan(
+                                        nation.nationId(),
+                                        team.teamId(),
+                                        capital,
+                                        observedClaims,
+                                        allocation,
+                                        nextPolicy,
+                                        nextCycleStartsAt,
+                                        Map.of())
+                                .stream()
+                                .filter(claim -> claim.dimensionId().equals(dimensionId)
+                                        && claim.chunkX() == chunkX
+                                        && claim.chunkZ() == chunkZ)
+                                .findFirst()
+                                .orElseThrow();
+                        var quote = new org.civiceconomy.territory
+                                .TerritoryMaintenanceRestorationQuote(
+                                        org.civiceconomy.fiscal.MoneyAmount.ofMinorUnits(
+                                                Math.addExact(
+                                                        targetSnapshot
+                                                                .maintenanceDueMinorUnits(),
+                                                        nextPolicy
+                                                                .restorationFeeMinorUnits())),
+                                        commandTime.plus(nextPolicy.restorationCooldown()));
+                        restorationRequest = new org.civiceconomy.territory
+                                .PrepareTerritoryMaintenanceRestoration(
+                                        TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                        requestId,
+                                        nation.nationId(),
+                                        team.teamId(),
+                                        actorPlayerId,
+                                        dimensionId,
+                                        chunkX,
+                                        chunkZ,
+                                        nextPolicy.policyId(),
+                                        nextCycleStartsAt,
+                                        quote,
+                                        "Player-authorized out-of-Cycle Restoration");
+                    }
+                    var treasury = new org.civiceconomy.fiscal.AccountId(
+                            "nation:" + nation.nationId().value() + ":treasury");
+                    var authorization = new FiscalAuthorization(database);
+                    new TerritoryFiscalServiceProvisioner(authorization)
+                            .ensureAuthorized(treasury);
+                    var session = authorization.openSession(
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    var payment = new org.civiceconomy.integration.lightmanscurrency
+                                    .TerritoryMaintenanceRestorationPaymentCoordinator(
+                                            nations,
+                                            new org.civiceconomy.nation
+                                                    .NationFiscalAuthorityRegistry(
+                                                            database, provider, commandClock),
+                                            FiscalLedger.authorized(
+                                                    database,
+                                                    LightmansCurrencyAccountBalances.live(
+                                                            current.server.overworld()),
+                                                    session),
+                                            PaymentCoordinator.authorized(
+                                                    database,
+                                                    LightmansCurrencyPayments.live(
+                                                            current.server.overworld()),
+                                                    session),
+                                            PermanentDestructionCoordinator.live(
+                                                    database,
+                                                    session,
+                                                    commandClock,
+                                                    current.server.overworld()),
+                                            restorations)
+                            .restore(restorationRequest);
+                    return payment;
+                })
+                .thenApply(payment -> {
+                    scheduleTerritoryForceLoadRestrictionRefresh(current);
+                    return payment;
+                });
+    }
+
     org.civiceconomy.nation.NationId nationForFtbTeam(UUID ftbTeamId) {
         return nationByFtbTeam.get(ftbTeamId);
     }

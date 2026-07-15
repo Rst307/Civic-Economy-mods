@@ -29,7 +29,7 @@ public final class TerritoryMaintenanceRestorationPaymentCoordinator {
     private final PermanentDestructionCoordinator destructions;
     private final TerritoryMaintenanceRestorationRegistry restorations;
 
-    TerritoryMaintenanceRestorationPaymentCoordinator(
+    public TerritoryMaintenanceRestorationPaymentCoordinator(
             NationRegistry nations,
             NationFiscalAuthorityRegistry authorities,
             FiscalLedger ledger,
