@@ -23,6 +23,7 @@ import java.util.UUID;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
@@ -72,6 +73,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriority;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.persistence.StoredMintRecipeIngredient;
 import org.civiceconomy.persistence.StoredNationalIssuanceQuotaAllocation;
+import org.civiceconomy.mint.MintBatch;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -79,7 +81,7 @@ public final class CivicServerRuntimeGameTests {
     private CivicServerRuntimeGameTests() {}
 
     @GameTest(template = "empty", timeoutTicks = 600)
-    public static void runtimeMintBatchUsesRealFtbTerritoryInventoryAndSqliteWithoutIssuance(
+    public static void runtimeMintBatchCompletesRealLcIssuanceExactlyOnce(
             GameTestHelper helper) {
         ServerPlayer player = new ServerPlayer(
                 helper.getLevel().getServer(),
@@ -99,6 +101,8 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicReference<UUID> batchId = new AtomicReference<>();
         AtomicBoolean completed = new AtomicBoolean();
+        AtomicBoolean issuanceCompleted = new AtomicBoolean();
+        AtomicReference<UUID> issuanceBatchId = new AtomicReference<>();
         java.time.Instant now = java.time.Instant.now();
         java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
         ChunkPos chunk = new ChunkPos(player.blockPosition());
@@ -160,7 +164,7 @@ public final class CivicServerRuntimeGameTests {
                             1,
                             java.util.List.of(new StoredMintRecipeIngredient(
                                     0, "EXACT_ITEM", "minecraft:diamond", 1L, 100L)),
-                            60_000L,
+                             1_000L,
                             "Runtime Mint recipe",
                             now.minusSeconds(10L).toEpochMilli());
                     database.registerMint(
@@ -208,6 +212,21 @@ public final class CivicServerRuntimeGameTests {
                             "Runtime Mint zero-cost settlement"));
                     return nation.nationId();
                 })
+                .thenCompose(nationId -> {
+                    CompletableFuture<Void> treasuryCreated = new CompletableFuture<>();
+                    helper.getLevel().getServer().execute(() -> {
+                        try {
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel()).create(
+                                    new AccountId("nation:" + nationId.value() + ":treasury"),
+                                    FiscalAccountKind.NATIONAL_TREASURY,
+                                    "Runtime Mint Treasury");
+                            treasuryCreated.complete(null);
+                        } catch (Throwable failure) {
+                            treasuryCreated.completeExceptionally(failure);
+                        }
+                    });
+                    return treasuryCreated;
+                })
                 .thenCompose(ignored -> runtime.startMintBatch(
                         player, requestId, mintId, periodId, 300L))
                 .thenCompose(batch -> {
@@ -222,39 +241,67 @@ public final class CivicServerRuntimeGameTests {
                                     "changed-payload runtime Mint replay must fail closed");
                             return replay;
                         }))
-                .thenCompose(replay -> runtime.cancelMintBatch(
-                        player,
-                        replay.batchId(),
-                        cancellationRequestId,
-                        "Runtime Mint cancellation"))
-                .thenCompose(cancelled -> runtime.cancelMintBatch(
-                        player,
-                        cancelled.batchId(),
-                        cancellationRequestId,
-                        "Runtime Mint cancellation"))
-                .thenCompose(cancelled -> runtime.submitDatabase(database -> {
-                    helper.assertValueEqual("CANCELLED", cancelled.state(), "runtime Mint state");
+                .thenCompose(issuanceBatch -> {
+                    issuanceBatchId.set(issuanceBatch.batchId());
+                    CompletableFuture<MintBatch> finished = new CompletableFuture<>();
+                    helper.runAfterDelay(30L, () -> {
+                        runtime.recoverMintBatchesNowForGameTest();
+                        helper.runAfterDelay(30L, () -> {
+                            runtime.recoverMintBatchesNowForGameTest();
+                            helper.runAfterDelay(20L, () -> runtime
+                                    .submitDatabase(database ->
+                                            database.mintBatch(issuanceBatch.batchId()))
+                                    .whenComplete((stored, recoveryFailure) ->
+                                            helper.getLevel().getServer().execute(() -> {
+                                                if (recoveryFailure != null) {
+                                                    finished.completeExceptionally(recoveryFailure);
+                                                } else if (!"COMMITTED".equals(stored.state())) {
+                                                    finished.completeExceptionally(
+                                                            new IllegalStateException(
+                                                                    "Mint issuance did not commit after recovery"));
+                                                } else {
+                                                    finished.complete(issuanceBatch);
+                                                }
+                                            })));
+                        });
+                    });
+                    return finished;
+                })
+                .thenCompose(issued -> runtime.submitDatabase(database -> {
                     helper.assertValueEqual(
-                            0L,
-                            database.nationalIssuanceQuota(periodId, cancelled.nationId().value())
-                                    .reservedMinorUnits(),
-                            "released runtime Mint quota");
-                    helper.assertTrue(
-                            database.monetarySupplyEvent(
-                                            "civiceconomy-mint", requestId)
-                                    == null,
-                            "runtime Mint has no issuance event before commit boundary");
-                    return cancelled;
+                            "COMMITTED",
+                            database.mintBatch(issued.batchId()).state(),
+                            "runtime Mint issuance state");
+                    helper.assertValueEqual(
+                            300L,
+                            database.nationalIssuanceQuota(periodId, issued.nationId().value())
+                                    .usedMinorUnits(),
+                            "runtime Mint used quota");
+                    helper.assertValueEqual(
+                            1L,
+                            database.monetarySupplyEvents().stream()
+                                    .filter(event -> event.requestId().equals("issue:" + issued.requestId()))
+                                    .count(),
+                            "one runtime Mint issuance event");
+                    return issued;
                 }))
                 .whenComplete((cancelled, failure) -> helper.getLevel().getServer().execute(() -> {
                     if (failure != null) {
                         asyncFailure.set(failure);
                     } else {
                         helper.assertValueEqual(
-                                3,
+                                0,
                                 player.getInventory().getItem(0).getCount(),
-                                "returned runtime Mint diamonds");
+                                "consumed runtime Mint diamonds");
+                        helper.assertValueEqual(
+                                300L,
+                                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                        .balance(new AccountId(
+                                                "nation:" + cancelled.nationId().value() + ":treasury"))
+                                        .minorUnits(),
+                                "real LC runtime Mint Treasury credit");
                         completed.set(true);
+                        issuanceCompleted.set(true);
                         unclaimCapital(helper, player);
                     }
                 }));
@@ -268,6 +315,8 @@ public final class CivicServerRuntimeGameTests {
                             : "runtime Mint async failure: " + failure.getMessage());
             helper.assertTrue(batchId.get() != null, "runtime Mint Batch ID");
             helper.assertTrue(completed.get(), "runtime Mint start/cancel completion");
+            helper.assertTrue(issuanceBatchId.get() != null, "runtime issuance Mint Batch ID");
+            helper.assertTrue(issuanceCompleted.get(), "runtime Mint issuance completion");
         });
     }
 
@@ -2348,7 +2397,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(50, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(51, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

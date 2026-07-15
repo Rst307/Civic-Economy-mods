@@ -105,4 +105,16 @@ public final class LightmansCurrencyFiscalAccounts implements AccountBalances {
     void recordPermanentDestructionApplied(UUID destructionId) {
         data.recordPermanentDestructionApplied(destructionId);
     }
+
+    boolean wasMintIssuanceApplied(UUID issuanceId) {
+        return data.wasMintIssuanceApplied(issuanceId);
+    }
+
+    void recordMintIssuanceApplied(UUID issuanceId) {
+        data.recordMintIssuanceApplied(issuanceId);
+    }
+
+    Object transactionLock() {
+        return data;
+    }
 }

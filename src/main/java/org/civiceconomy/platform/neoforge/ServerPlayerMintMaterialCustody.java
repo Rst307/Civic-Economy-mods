@@ -15,6 +15,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import org.civiceconomy.mint.ExternalMintMaterialCustody;
 import org.civiceconomy.mint.MintMaterialCustodyReturn;
+import org.civiceconomy.mint.MintMaterialCustodyConsumption;
 import org.civiceconomy.mint.MintMaterialCustodyTransfer;
 import org.civiceconomy.mint.MintMaterialStack;
 import org.civiceconomy.platform.neoforge.MintMaterialCustodyData.Operation;
@@ -50,7 +51,7 @@ public final class ServerPlayerMintMaterialCustody implements ExternalMintMateri
             TakePlan plan = prepareTake(player.getInventory(), transfer.materials());
             operation = new Operation(
                     transfer.transferId(), transfer.batchId(), transfer.mintId(),
-                    transfer.actorPlayerId(), null, "TAKE_PLANNED", transfer.materials(),
+                    transfer.actorPlayerId(), null, null, "TAKE_PLANNED", transfer.materials(),
                     plan.heldStacks(), plan.mutations(), List.of());
             data.put(operation);
             saveData();
@@ -104,6 +105,29 @@ public final class ServerPlayerMintMaterialCustody implements ExternalMintMateri
         saveData();
     }
 
+    @Override
+    public void consume(MintMaterialCustodyConsumption request) {
+        requireServerThread();
+        MintMaterialCustodyData data = MintMaterialCustodyData.get(server);
+        Operation operation = data.operation(request.batchId());
+        if (operation == null) {
+            throw new IllegalStateException("Unknown held Mint material operation");
+        }
+        requireSameConsumption(operation, request);
+        if ("CONSUMED".equals(operation.state())) {
+            if (!request.operationId().equals(operation.consumptionOperationId())) {
+                throw new IllegalArgumentException(
+                        "Mint consumption replay changed its operation ID");
+            }
+            return;
+        }
+        if (!"HELD".equals(operation.state())) {
+            throw new IllegalStateException("Mint materials are not held for consumption");
+        }
+        data.put(operation.withConsumption(request.operationId()));
+        saveData();
+    }
+
     private Operation findHeldOperation(
             MintMaterialCustodyData data, MintMaterialCustodyReturn request) {
         Operation held = data.operation(request.batchId());
@@ -129,6 +153,17 @@ public final class ServerPlayerMintMaterialCustody implements ExternalMintMateri
                 || !operation.playerId().equals(request.actorPlayerId())
                 || !operation.manifest().equals(request.materials())) {
             throw new IllegalArgumentException("Mint return replay changed its immutable payload");
+        }
+    }
+
+    private void requireSameConsumption(
+            Operation operation, MintMaterialCustodyConsumption request) {
+        if (!operation.batchId().equals(request.batchId())
+                || !operation.mintId().equals(request.mintId())
+                || !operation.playerId().equals(request.actorPlayerId())
+                || !operation.manifest().equals(request.materials())) {
+            throw new IllegalArgumentException(
+                    "Mint consumption replay changed its immutable payload");
         }
     }
 

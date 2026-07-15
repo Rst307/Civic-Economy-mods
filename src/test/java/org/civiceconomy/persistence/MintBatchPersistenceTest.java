@@ -175,6 +175,210 @@ class MintBatchPersistenceTest {
             assertEquals("IDLE", database.registeredMint(MINT).transactionState());
         }
     }
+
+    @Test
+    void processingDeadlineAtomicallyPreparesIssuanceWithoutCreditingOrConsuming() {
+        try (CivicDatabase database = database()) {
+            setup(database);
+            database.prepareMintBatch(
+                    BATCH, "mint-controller", "prepare-issuance", MINT, PERIOD, NATION, RECIPE,
+                    300L, materials(3L), ACTOR, "Prepare issuance", START + 1L);
+            StoredMintBatch processing = database.confirmMintBatchCustody(
+                    BATCH,
+                    "mint-controller",
+                    "custody-issuance",
+                    "inventory-move:issuance",
+                    START + 2L);
+            UUID operationId = UUID.fromString("7453c656-a730-4e11-a83f-b4e1ac184f4a");
+
+            assertThrows(IllegalStateException.class, () -> database.prepareMintBatchIssuance(
+                    operationId,
+                    BATCH,
+                    "mint-controller",
+                    "issue-300",
+                    "Complete authorized Mint Batch",
+                    processing.processingCompletesAtEpochMillis() - 1L));
+            assertNull(database.mintBatchIssuanceOperation(operationId));
+            assertEquals("PROCESSING", database.mintBatch(BATCH).state());
+
+            StoredMintIssuanceOperation prepared = database.prepareMintBatchIssuance(
+                    operationId,
+                    BATCH,
+                    "mint-controller",
+                    "issue-300",
+                    "Complete authorized Mint Batch",
+                    processing.processingCompletesAtEpochMillis());
+            assertEquals("PREPARED", prepared.state());
+            assertEquals(BATCH, prepared.batchId());
+            assertEquals("nation:" + NATION + ":treasury", prepared.treasuryAccount());
+            assertEquals(300L, prepared.amountMinorUnits());
+            assertEquals("COMMITTING", database.mintBatch(BATCH).state());
+            assertEquals("HELD", database.mintBatch(BATCH).custodyState());
+            assertEquals(300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION).reservedMinorUnits());
+            assertEquals(0L, database.nationalIssuanceQuota(PERIOD, NATION).usedMinorUnits());
+            assertNull(database.monetarySupplyEvent("mint-controller", "issue-300"));
+        }
+    }
+
+    @Test
+    void externalIssuanceConfirmationOnlyAdvancesDurableConsumeIntent() {
+        try (CivicDatabase database = database()) {
+            setup(database);
+            database.prepareMintBatch(
+                    BATCH, "mint-controller", "prepare-external", MINT, PERIOD, NATION, RECIPE,
+                    300L, materials(3L), ACTOR, "Prepare external issuance", START + 1L);
+            StoredMintBatch processing = database.confirmMintBatchCustody(
+                    BATCH,
+                    "mint-controller",
+                    "custody-external",
+                    "inventory-move:external",
+                    START + 2L);
+            UUID operationId = UUID.fromString("08c4eb5c-9389-4e3c-96ec-770fe75cc9ca");
+            database.prepareMintBatchIssuance(
+                    operationId,
+                    BATCH,
+                    "mint-controller",
+                    "issue-external",
+                    "Complete external Mint issuance",
+                    processing.processingCompletesAtEpochMillis());
+
+            StoredMintIssuanceOperation externalApplied =
+                    database.confirmMintBatchIssuanceExternal(
+                            operationId,
+                            "lc-mint-issuance:" + operationId,
+                            processing.processingCompletesAtEpochMillis() + 1L);
+            assertEquals("EXTERNAL_APPLIED", externalApplied.state());
+            assertEquals("lc-mint-issuance:" + operationId, externalApplied.externalReference());
+            assertEquals("COMMITTING", database.mintBatch(BATCH).state());
+            assertEquals("CONSUME_PENDING", database.mintBatch(BATCH).custodyState());
+            assertEquals(300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION).reservedMinorUnits());
+            assertEquals(0L, database.nationalIssuanceQuota(PERIOD, NATION).usedMinorUnits());
+            assertNull(database.monetarySupplyEvent("mint-controller", "issue-external"));
+            assertEquals(
+                    externalApplied,
+                    database.confirmMintBatchIssuanceExternal(
+                            operationId,
+                            "lc-mint-issuance:" + operationId,
+                            processing.processingCompletesAtEpochMillis() + 2L));
+            assertThrows(IllegalArgumentException.class, () ->
+                    database.confirmMintBatchIssuanceExternal(
+                            operationId,
+                            "lc-mint-issuance:changed",
+                            processing.processingCompletesAtEpochMillis() + 2L));
+        }
+    }
+
+    @Test
+    void materialConsumptionConfirmationStillKeepsQuotaAndSupplyUncommitted() {
+        try (CivicDatabase database = database()) {
+            setup(database);
+            database.prepareMintBatch(
+                    BATCH, "mint-controller", "prepare-consume", MINT, PERIOD, NATION, RECIPE,
+                    300L, materials(3L), ACTOR, "Prepare material consumption", START + 1L);
+            StoredMintBatch processing = database.confirmMintBatchCustody(
+                    BATCH,
+                    "mint-controller",
+                    "custody-consume",
+                    "inventory-move:consume",
+                    START + 2L);
+            UUID operationId = UUID.fromString("2b050816-c6bd-40fc-997a-02a76949fd8e");
+            database.prepareMintBatchIssuance(
+                    operationId,
+                    BATCH,
+                    "mint-controller",
+                    "issue-consume",
+                    "Consume held Mint materials",
+                    processing.processingCompletesAtEpochMillis());
+            database.confirmMintBatchIssuanceExternal(
+                    operationId,
+                    "lc-mint-issuance:" + operationId,
+                    processing.processingCompletesAtEpochMillis() + 1L);
+
+            StoredMintIssuanceOperation consumed = database.confirmMintBatchMaterialsConsumed(
+                    operationId,
+                    "mint-material-consume:" + operationId,
+                    processing.processingCompletesAtEpochMillis() + 2L);
+            assertEquals("MATERIALS_CONSUMED", consumed.state());
+            assertEquals(
+                    "mint-material-consume:" + operationId,
+                    consumed.materialConsumptionReference());
+            assertEquals("COMMITTING", database.mintBatch(BATCH).state());
+            assertEquals("CONSUMED", database.mintBatch(BATCH).custodyState());
+            assertEquals(300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION).reservedMinorUnits());
+            assertEquals(0L, database.nationalIssuanceQuota(PERIOD, NATION).usedMinorUnits());
+            assertNull(database.monetarySupplyEvent("mint-controller", "issue-consume"));
+            assertEquals(
+                    consumed,
+                    database.confirmMintBatchMaterialsConsumed(
+                            operationId,
+                            "mint-material-consume:" + operationId,
+                            processing.processingCompletesAtEpochMillis() + 3L));
+            assertThrows(IllegalArgumentException.class, () ->
+                    database.confirmMintBatchMaterialsConsumed(
+                            operationId,
+                            "mint-material-consume:changed",
+                            processing.processingCompletesAtEpochMillis() + 3L));
+        }
+    }
+
+    @Test
+    void finalCommitAtomicallyUsesQuotaRecordsIssuanceAndReleasesMint() {
+        try (CivicDatabase database = database()) {
+            setup(database);
+            database.prepareMintBatch(
+                    BATCH, "mint-controller", "prepare-commit", MINT, PERIOD, NATION, RECIPE,
+                    300L, materials(3L), ACTOR, "Prepare final commit", START + 1L);
+            StoredMintBatch processing = database.confirmMintBatchCustody(
+                    BATCH,
+                    "mint-controller",
+                    "custody-commit",
+                    "inventory-move:commit",
+                    START + 2L);
+            UUID operationId = UUID.fromString("ba899ff2-c5b3-42a8-93fe-ddb943ceae3e");
+            database.prepareMintBatchIssuance(
+                    operationId,
+                    BATCH,
+                    "mint-controller",
+                    "issue-commit",
+                    "Commit completed Mint Batch",
+                    processing.processingCompletesAtEpochMillis());
+            database.confirmMintBatchIssuanceExternal(
+                    operationId,
+                    "lc-mint-issuance:" + operationId,
+                    processing.processingCompletesAtEpochMillis() + 1L);
+            database.confirmMintBatchMaterialsConsumed(
+                    operationId,
+                    "mint-material-consume:" + operationId,
+                    processing.processingCompletesAtEpochMillis() + 2L);
+
+            StoredMintIssuanceOperation committed = database.commitMintBatchIssuance(
+                    operationId, processing.processingCompletesAtEpochMillis() + 3L);
+            assertEquals("COMMITTED", committed.state());
+            assertEquals("COMMITTED", database.mintBatch(BATCH).state());
+            assertEquals("CONSUMED", database.mintBatch(BATCH).custodyState());
+            assertEquals("IDLE", database.registeredMint(MINT).transactionState());
+            assertEquals(0L,
+                    database.nationalIssuanceQuota(PERIOD, NATION).reservedMinorUnits());
+            assertEquals(300L,
+                    database.nationalIssuanceQuota(PERIOD, NATION).usedMinorUnits());
+            StoredMonetarySupplyEvent event =
+                    database.monetarySupplyEvent("mint-controller", "issue-commit");
+            assertEquals("ISSUANCE", event.changeKind());
+            assertEquals(300L, event.amountMinorUnits());
+            assertEquals("lc-mint-issuance:" + operationId, event.externalReference());
+            assertEquals(300L, database.cumulativeNetIssuanceMinorUnits());
+
+            assertEquals(
+                    committed,
+                    database.commitMintBatchIssuance(
+                            operationId, processing.processingCompletesAtEpochMillis() + 4L));
+            assertEquals(1, database.monetarySupplyEvents().size());
+            assertEquals(300L, database.cumulativeNetIssuanceMinorUnits());
+        }
+    }
     private List<StoredMintMaterialStack> materials(long diamondCount) {
         return List.of(
                 new StoredMintMaterialStack(

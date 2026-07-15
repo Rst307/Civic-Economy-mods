@@ -63,6 +63,7 @@ final class MintMaterialCustodyData extends SavedData {
             UUID mintId,
             UUID playerId,
             UUID returnOperationId,
+            UUID consumptionOperationId,
             String state,
             List<MintMaterialStack> manifest,
             List<ItemStack> heldStacks,
@@ -77,14 +78,23 @@ final class MintMaterialCustodyData extends SavedData {
 
         Operation withState(String newState) {
             return new Operation(
-                    operationId, batchId, mintId, playerId, returnOperationId, newState,
+                    operationId, batchId, mintId, playerId, returnOperationId,
+                    consumptionOperationId, newState,
                     manifest, heldStacks, takeMutations, returnMutations);
         }
 
         Operation withReturnPlan(UUID operationId, List<SlotMutation> mutations) {
             return new Operation(
-                    this.operationId, batchId, mintId, playerId, operationId, "RETURN_PLANNED",
+                    this.operationId, batchId, mintId, playerId, operationId,
+                    consumptionOperationId, "RETURN_PLANNED",
                     manifest, heldStacks, takeMutations, mutations);
+        }
+
+        Operation withConsumption(UUID operationId) {
+            return new Operation(
+                    this.operationId, batchId, mintId, playerId, returnOperationId,
+                    operationId, "CONSUMED", manifest, heldStacks,
+                    takeMutations, returnMutations);
         }
 
         CompoundTag save(HolderLookup.Provider registries) {
@@ -95,6 +105,9 @@ final class MintMaterialCustodyData extends SavedData {
             root.putUUID("PlayerId", playerId);
             if (returnOperationId != null) {
                 root.putUUID("ReturnOperationId", returnOperationId);
+            }
+            if (consumptionOperationId != null) {
+                root.putUUID("ConsumptionOperationId", consumptionOperationId);
             }
             root.putString("State", state);
             ListTag savedManifest = new ListTag();
@@ -132,6 +145,9 @@ final class MintMaterialCustodyData extends SavedData {
                     root.getUUID("MintId"),
                     root.getUUID("PlayerId"),
                     root.hasUUID("ReturnOperationId") ? root.getUUID("ReturnOperationId") : null,
+                    root.hasUUID("ConsumptionOperationId")
+                            ? root.getUUID("ConsumptionOperationId")
+                            : null,
                     root.getString("State"),
                     manifest,
                     loadStacks(root.getList("HeldStacks", Tag.TAG_COMPOUND), registries),

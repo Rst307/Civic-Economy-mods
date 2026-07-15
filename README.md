@@ -105,7 +105,7 @@ Civic Economy 是面向 Minecraft 1.21.1 NeoForge 多国家服务器的经济与
 
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、公共政策和恢复管理。
 
-`nation mint start` 只接受稳定请求 ID、Registered Mint ID、Issuance Quota Period ID 和面值。服务端从真实玩家、FTB Team、Registered Mint、锁定 Recipe Version、当前 Effective Territory 与玩家库存推导 Nation、位置和材料清单，并要求精确 Nation `MANAGE_ISSUANCE`；重复请求不得改变 Mint、Period、操作者或金额。`cancel` 仅返还该批次真实托管材料并在确认返还后释放额度。启动和取消目前不会向 LC 入账，也不会写入 Monetary Supply event；最终发行入口尚未开放。
+`nation mint start` 只接受稳定请求 ID、Registered Mint ID、Issuance Quota Period ID 和面值。服务端从真实玩家、FTB Team、Registered Mint、锁定 Recipe Version、当前 Effective Territory 与玩家库存推导 Nation、位置和材料清单，并要求精确 Nation `MANAGE_ISSUANCE`；重复请求不得改变 Mint、Period、操作者或金额。`cancel` 仅返还该批次真实托管材料并在确认返还后释放额度。处理截止后，服务端先持久化发行 intent，再用同一 operation UUID 向精确 National Treasury 执行真实 LC deposit，幂等确认材料消费，最后在单一 SQLite 事务中将 reserved quota 转为 used、写入唯一 `ISSUANCE` Monetary Supply event 并释放 Registered Mint；启动和每分钟恢复会继续处理所有 pending 窗口。游戏内最终发行管理入口仍待接入，不能将普通 LC 转账当作发行。
 
 `nation territory allowance` 使用查询时刻生效的持久化领土政策与同一时刻的正式 Effective Citizen 人口，显示基础区块、有效 Citizen 数、每人区块数、总免费额度和政策版本；它不读取 FTB Team 成员数量。
 

@@ -21,6 +21,7 @@ final class CivicFiscalAccountData extends SavedData {
 
     private final Map<AccountId, StoredAccount> accounts = new LinkedHashMap<>();
     private final Set<UUID> appliedPermanentDestructions = new HashSet<>();
+    private final Set<UUID> appliedMintIssuances = new HashSet<>();
 
     private CivicFiscalAccountData() {}
 
@@ -42,6 +43,10 @@ final class CivicFiscalAccountData extends SavedData {
         for (int index = 0; index < savedDestructions.size(); index++) {
             data.appliedPermanentDestructions.add(
                     UUID.fromString(savedDestructions.getString(index)));
+        }
+        ListTag savedIssuances = root.getList("AppliedMintIssuances", Tag.TAG_STRING);
+        for (int index = 0; index < savedIssuances.size(); index++) {
+            data.appliedMintIssuances.add(UUID.fromString(savedIssuances.getString(index)));
         }
         return data;
     }
@@ -80,6 +85,16 @@ final class CivicFiscalAccountData extends SavedData {
         }
     }
 
+    boolean wasMintIssuanceApplied(UUID issuanceId) {
+        return appliedMintIssuances.contains(issuanceId);
+    }
+
+    void recordMintIssuanceApplied(UUID issuanceId) {
+        if (appliedMintIssuances.add(issuanceId)) {
+            setDirty();
+        }
+    }
+
     @Override
     public CompoundTag save(CompoundTag root, HolderLookup.Provider registries) {
         ListTag savedAccounts = new ListTag();
@@ -98,6 +113,13 @@ final class CivicFiscalAccountData extends SavedData {
                 .map(net.minecraft.nbt.StringTag::valueOf)
                 .forEach(savedDestructions::add);
         root.put("AppliedPermanentDestructions", savedDestructions);
+        ListTag savedIssuances = new ListTag();
+        appliedMintIssuances.stream()
+                .map(UUID::toString)
+                .sorted()
+                .map(net.minecraft.nbt.StringTag::valueOf)
+                .forEach(savedIssuances::add);
+        root.put("AppliedMintIssuances", savedIssuances);
         return root;
     }
 

@@ -14,6 +14,7 @@ import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.mint.MintMaterialCustodyReturn;
+import org.civiceconomy.mint.MintMaterialCustodyConsumption;
 import org.civiceconomy.mint.MintMaterialCustodyTransfer;
 import org.civiceconomy.mint.MintMaterialStack;
 import org.civiceconomy.persistence.StoredMintRecipeIngredient;
@@ -179,6 +180,51 @@ public final class MintMaterialCustodyGameTests {
                 player.getInventory().getItem(0).getCount(),
                 "logs before custody phase");
         helper.succeed();
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void heldMaterialsAreConsumedExactlyOnceAndCannotBeReturned(
+            GameTestHelper helper) {
+        UUID playerId = UUID.randomUUID();
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(playerId, "civic-mint-consume"),
+                ClientInformation.createDefault());
+        player.getInventory().setItem(0, new ItemStack(Items.DIAMOND, 5));
+        UUID batchId = UUID.randomUUID();
+        UUID mintId = UUID.randomUUID();
+        MintMaterialStack material = new MintMaterialStack(
+                0, "EXACT_ITEM", "minecraft:diamond", "minecraft:diamond", 3L);
+        ServerPlayerMintMaterialCustody custody = new ServerPlayerMintMaterialCustody(
+                helper.getLevel().getServer(),
+                requestedId -> requestedId.equals(playerId) ? player : null,
+                () -> {});
+        custody.take(new MintMaterialCustodyTransfer(
+                batchId, batchId, mintId, playerId, List.of(material)));
+        MintMaterialCustodyConsumption consumption = new MintMaterialCustodyConsumption(
+                UUID.randomUUID(), batchId, mintId, playerId, List.of(material));
+
+        custody.consume(consumption);
+        custody.consume(consumption);
+
+        helper.assertValueEqual(
+                2,
+                player.getInventory().getItem(0).getCount(),
+                "diamonds after consumption replay");
+        helper.assertValueEqual(
+                "CONSUMED",
+                MintMaterialCustodyData.get(helper.getLevel().getServer())
+                        .operation(batchId)
+                        .state(),
+                "persisted consumed custody state");
+        try {
+            custody.returnToSource(new MintMaterialCustodyReturn(
+                    UUID.randomUUID(), batchId, mintId, playerId, List.of(material)));
+            helper.fail("Expected consumed Mint materials to reject return");
+        } catch (IllegalStateException expected) {
+            helper.succeed();
+        }
     }
 
     private static final class SimulatedInventoryCrash extends RuntimeException {}

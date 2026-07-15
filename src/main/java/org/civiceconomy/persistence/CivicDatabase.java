@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 50;
+    private static final int SCHEMA_VERSION = 51;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4552,6 +4552,368 @@ public final class CivicDatabase implements AutoCloseable {
             throw new IllegalStateException("Unable to read recoverable Mint Batches", failure);
         }
     }
+
+    public synchronized StoredMintIssuanceOperation prepareMintBatchIssuance(
+            UUID operationId,
+            UUID batchId,
+            String serviceIdentity,
+            String requestId,
+            String reason,
+            long preparedAtEpochMillis) {
+        if (operationId == null
+                || batchId == null
+                || serviceIdentity == null
+                || serviceIdentity.isBlank()
+                || requestId == null
+                || requestId.isBlank()
+                || reason == null
+                || reason.isBlank()
+                || preparedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint issuance preparation values are invalid");
+        }
+        StoredMintIssuanceOperation replay =
+                mintBatchIssuanceOperation(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.batchId().equals(batchId) || !replay.reason().equals(reason)) {
+                throw new IllegalArgumentException(
+                        "Mint issuance preparation replay changed its immutable payload");
+            }
+            return replay;
+        }
+        StoredMintBatch batch = mintBatch(batchId);
+        if (batch == null) {
+            throw new IllegalArgumentException("Unknown Mint Batch " + batchId);
+        }
+        if (!"PROCESSING".equals(batch.state())
+                || !"HELD".equals(batch.custodyState())
+                || batch.processingCompletesAtEpochMillis() == null
+                || preparedAtEpochMillis < batch.processingCompletesAtEpochMillis()) {
+            throw new IllegalStateException("Mint Batch is not ready for issuance");
+        }
+        String treasuryAccount = "nation:" + batch.nationId() + ":treasury";
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO mint_issuance_operation (
+                            operation_id, batch_id, service_identity, request_id,
+                            treasury_account, amount_minor_units, state, reason,
+                            prepared_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', ?, ?)
+                        """);
+                    PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch SET state = 'COMMITTING'
+                        WHERE batch_id = ? AND state = 'PROCESSING' AND custody_state = 'HELD'
+                        """)) {
+                insert.setString(1, operationId.toString());
+                insert.setString(2, batchId.toString());
+                insert.setString(3, serviceIdentity);
+                insert.setString(4, requestId);
+                insert.setString(5, treasuryAccount);
+                insert.setLong(6, batch.issuedMinorUnits());
+                insert.setString(7, reason);
+                insert.setLong(8, preparedAtEpochMillis);
+                insert.executeUpdate();
+                updateBatch.setString(1, batchId.toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch changed before issuance preparation");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatchIssuanceOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to prepare Mint issuance", failure);
+        }
+    }
+
+    public synchronized StoredMintIssuanceOperation mintBatchIssuanceOperation(
+            UUID operationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_issuance_operation WHERE operation_id = ?
+                """)) {
+            query.setString(1, operationId.toString());
+            return readMintIssuanceOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint issuance operation", failure);
+        }
+    }
+
+    public synchronized List<StoredMintIssuanceOperation> recoverableMintIssuanceOperations() {
+        List<StoredMintIssuanceOperation> operations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_issuance_operation
+                WHERE state != 'COMMITTED'
+                ORDER BY prepared_at_epoch_millis, operation_id
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    operations.add(new StoredMintIssuanceOperation(
+                            UUID.fromString(result.getString("operation_id")),
+                            UUID.fromString(result.getString("batch_id")),
+                            result.getString("service_identity"),
+                            result.getString("request_id"),
+                            result.getString("treasury_account"),
+                            result.getLong("amount_minor_units"),
+                            result.getString("state"),
+                            result.getString("external_reference"),
+                            result.getString("material_consumption_reference"),
+                            result.getString("reason"),
+                            result.getLong("prepared_at_epoch_millis"),
+                            optionalLong(result, "external_applied_at_epoch_millis"),
+                            optionalLong(result, "materials_consumed_at_epoch_millis"),
+                            optionalLong(result, "committed_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(operations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read recoverable Mint issuance operations", failure);
+        }
+    }
+
+    public synchronized StoredMintIssuanceOperation confirmMintBatchIssuanceExternal(
+            UUID operationId, String externalReference, long confirmedAtEpochMillis) {
+        if (operationId == null
+                || externalReference == null
+                || externalReference.isBlank()
+                || confirmedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint external issuance values are invalid");
+        }
+        StoredMintIssuanceOperation operation = mintBatchIssuanceOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException("Unknown Mint issuance operation " + operationId);
+        }
+        if (!"PREPARED".equals(operation.state())) {
+            if (!externalReference.equals(operation.externalReference())) {
+                throw new IllegalArgumentException(
+                        "Mint external issuance replay changed its immutable payload");
+            }
+            return operation;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement updateOperation = connection.prepareStatement("""
+                        UPDATE mint_issuance_operation
+                        SET state = 'EXTERNAL_APPLIED', external_reference = ?,
+                            external_applied_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'PREPARED'
+                        """);
+                    PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch SET custody_state = 'CONSUME_PENDING'
+                        WHERE batch_id = ? AND state = 'COMMITTING' AND custody_state = 'HELD'
+                        """)) {
+                updateOperation.setString(1, externalReference);
+                updateOperation.setLong(2, confirmedAtEpochMillis);
+                updateOperation.setString(3, operationId.toString());
+                if (updateOperation.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint issuance operation changed concurrently");
+                }
+                updateBatch.setString(1, operation.batchId().toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch is not awaiting material consumption");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatchIssuanceOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to confirm external Mint issuance", failure);
+        }
+    }
+
+    public synchronized StoredMintIssuanceOperation confirmMintBatchMaterialsConsumed(
+            UUID operationId, String materialConsumptionReference, long confirmedAtEpochMillis) {
+        if (operationId == null
+                || materialConsumptionReference == null
+                || materialConsumptionReference.isBlank()
+                || confirmedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint material consumption values are invalid");
+        }
+        StoredMintIssuanceOperation operation = mintBatchIssuanceOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException("Unknown Mint issuance operation " + operationId);
+        }
+        if (!"EXTERNAL_APPLIED".equals(operation.state())) {
+            if (!materialConsumptionReference.equals(operation.materialConsumptionReference())) {
+                throw new IllegalArgumentException(
+                        "Mint material consumption replay changed its immutable payload");
+            }
+            return operation;
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement updateOperation = connection.prepareStatement("""
+                        UPDATE mint_issuance_operation
+                        SET state = 'MATERIALS_CONSUMED', material_consumption_reference = ?,
+                            materials_consumed_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'EXTERNAL_APPLIED'
+                        """);
+                    PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch SET custody_state = 'CONSUMED'
+                        WHERE batch_id = ? AND state = 'COMMITTING'
+                          AND custody_state = 'CONSUME_PENDING'
+                        """)) {
+                updateOperation.setString(1, materialConsumptionReference);
+                updateOperation.setLong(2, confirmedAtEpochMillis);
+                updateOperation.setString(3, operationId.toString());
+                if (updateOperation.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint issuance operation changed concurrently");
+                }
+                updateBatch.setString(1, operation.batchId().toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch is not awaiting material consumption");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatchIssuanceOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to confirm Mint material consumption", failure);
+        }
+    }
+
+    public synchronized StoredMintIssuanceOperation commitMintBatchIssuance(
+            UUID operationId, long committedAtEpochMillis) {
+        if (operationId == null || committedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException("Mint issuance commit values are invalid");
+        }
+        StoredMintIssuanceOperation operation = mintBatchIssuanceOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException("Unknown Mint issuance operation " + operationId);
+        }
+        if ("COMMITTED".equals(operation.state())) {
+            StoredMonetarySupplyEvent event = monetarySupplyEventByExternalReference(
+                    "ISSUANCE", operation.externalReference());
+            if (event == null) {
+                throw new IllegalStateException(
+                        "Committed Mint issuance has no Monetary Supply event " + operationId);
+            }
+            return operation;
+        }
+        if (!"MATERIALS_CONSUMED".equals(operation.state())) {
+            throw new IllegalStateException("Mint issuance is not ready for final commit");
+        }
+        StoredMintBatch batch = mintBatch(operation.batchId());
+        if (batch == null
+                || !"COMMITTING".equals(batch.state())
+                || !"CONSUMED".equals(batch.custodyState())) {
+            throw new IllegalStateException("Mint Batch is not ready for final commit");
+        }
+        StoredIssuanceQuotaPeriod period = issuanceQuotaPeriod(batch.periodId());
+        if (period == null) {
+            throw new IllegalStateException("Mint Batch Issuance Quota Period is missing");
+        }
+        long nextSupply = Math.addExact(
+                cumulativeNetIssuanceMinorUnits(), operation.amountMinorUnits());
+        if (nextSupply > period.hardCapMinorUnits()) {
+            throw new org.civiceconomy.monetary.IssuanceHardCapExceededException();
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertEvent = connection.prepareStatement("""
+                        INSERT INTO monetary_supply_event (
+                            event_id, service_identity, request_id, change_kind,
+                            amount_minor_units, external_reference, reason,
+                            confirmed_at_epoch_millis
+                        ) VALUES (?, ?, ?, 'ISSUANCE', ?, ?, ?, ?)
+                        """);
+                    PreparedStatement updateSummary = connection.prepareStatement("""
+                        UPDATE monetary_supply_summary
+                        SET cumulative_net_issuance_minor_units = ? WHERE singleton = 1
+                        """);
+                    PreparedStatement updateQuota = connection.prepareStatement("""
+                        UPDATE national_issuance_quota
+                        SET reserved_minor_units = reserved_minor_units - ?,
+                            used_minor_units = used_minor_units + ?
+                        WHERE period_id = ? AND nation_id = ?
+                          AND reserved_minor_units >= ?
+                          AND reserved_minor_units + used_minor_units <= activated_minor_units
+                        """);
+                    PreparedStatement updateBatch = connection.prepareStatement("""
+                        UPDATE mint_batch SET state = 'COMMITTED'
+                        WHERE batch_id = ? AND state = 'COMMITTING' AND custody_state = 'CONSUMED'
+                        """);
+                    PreparedStatement updateMint = connection.prepareStatement("""
+                        UPDATE registered_mint SET transaction_state = 'IDLE'
+                        WHERE mint_id = ? AND transaction_state = 'PROCESSING'
+                        """);
+                    PreparedStatement updateOperation = connection.prepareStatement("""
+                        UPDATE mint_issuance_operation
+                        SET state = 'COMMITTED', committed_at_epoch_millis = ?
+                        WHERE operation_id = ? AND state = 'MATERIALS_CONSUMED'
+                        """)) {
+                insertEvent.setString(1, UUID.randomUUID().toString());
+                insertEvent.setString(2, operation.serviceIdentity());
+                insertEvent.setString(3, operation.requestId());
+                insertEvent.setLong(4, operation.amountMinorUnits());
+                insertEvent.setString(5, operation.externalReference());
+                insertEvent.setString(6, operation.reason());
+                insertEvent.setLong(7, committedAtEpochMillis);
+                insertEvent.executeUpdate();
+                updateSummary.setLong(1, nextSupply);
+                if (updateSummary.executeUpdate() != 1) {
+                    throw new IllegalStateException("Monetary Supply summary is missing");
+                }
+                updateQuota.setLong(1, operation.amountMinorUnits());
+                updateQuota.setLong(2, operation.amountMinorUnits());
+                updateQuota.setString(3, batch.periodId().toString());
+                updateQuota.setString(4, batch.nationId().toString());
+                updateQuota.setLong(5, operation.amountMinorUnits());
+                if (updateQuota.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch quota cannot be committed");
+                }
+                updateBatch.setString(1, batch.batchId().toString());
+                if (updateBatch.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint Batch changed before final commit");
+                }
+                updateMint.setString(1, batch.mintId().toString());
+                if (updateMint.executeUpdate() != 1) {
+                    throw new IllegalStateException("Registered Mint changed before final commit");
+                }
+                updateOperation.setLong(1, committedAtEpochMillis);
+                updateOperation.setString(2, operationId.toString());
+                if (updateOperation.executeUpdate() != 1) {
+                    throw new IllegalStateException("Mint issuance changed before final commit");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return mintBatchIssuanceOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to commit Mint issuance", failure);
+        }
+    }
+
+    public synchronized StoredMintIssuanceOperation mintBatchIssuanceOperation(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_issuance_operation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readMintIssuanceOperation(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint issuance request", failure);
+        }
+    }
+
     public synchronized List<StoredMintMaterialStack> mintBatchMaterials(UUID batchId) {
         List<StoredMintMaterialStack> materials = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""
@@ -4664,6 +5026,30 @@ public final class CivicDatabase implements AutoCloseable {
     private static Long optionalLong(ResultSet result, String column) throws SQLException {
         long value = result.getLong(column);
         return result.wasNull() ? null : value;
+    }
+
+    private static StoredMintIssuanceOperation readMintIssuanceOperation(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredMintIssuanceOperation(
+                    UUID.fromString(result.getString("operation_id")),
+                    UUID.fromString(result.getString("batch_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("treasury_account"),
+                    result.getLong("amount_minor_units"),
+                    result.getString("state"),
+                    result.getString("external_reference"),
+                    result.getString("material_consumption_reference"),
+                    result.getString("reason"),
+                    result.getLong("prepared_at_epoch_millis"),
+                    optionalLong(result, "external_applied_at_epoch_millis"),
+                    optionalLong(result, "materials_consumed_at_epoch_millis"),
+                    optionalLong(result, "committed_at_epoch_millis"));
+        }
     }
 
     public synchronized StoredIssuanceQuotaPeriod publishIssuanceQuotaPeriod(
@@ -9525,6 +9911,73 @@ public final class CivicDatabase implements AutoCloseable {
                         WHERE return_external_reference IS NOT NULL
                         """);
                 statement.execute("PRAGMA user_version = 50");
+            }
+            if (version < 51) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS mint_issuance_operation (
+                            operation_id TEXT PRIMARY KEY,
+                            batch_id TEXT NOT NULL UNIQUE REFERENCES mint_batch(batch_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            treasury_account TEXT NOT NULL
+                                CHECK (length(trim(treasury_account)) > 0),
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PREPARED', 'EXTERNAL_APPLIED',
+                                'MATERIALS_CONSUMED', 'COMMITTED'
+                            )),
+                            external_reference TEXT,
+                            material_consumption_reference TEXT,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            prepared_at_epoch_millis INTEGER NOT NULL
+                                CHECK (prepared_at_epoch_millis >= 0),
+                            external_applied_at_epoch_millis INTEGER,
+                            materials_consumed_at_epoch_millis INTEGER,
+                            committed_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((state = 'PREPARED'
+                                    AND external_reference IS NULL
+                                    AND material_consumption_reference IS NULL
+                                    AND external_applied_at_epoch_millis IS NULL
+                                    AND materials_consumed_at_epoch_millis IS NULL
+                                    AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'EXTERNAL_APPLIED'
+                                    AND external_reference IS NOT NULL
+                                    AND material_consumption_reference IS NULL
+                                    AND external_applied_at_epoch_millis IS NOT NULL
+                                    AND materials_consumed_at_epoch_millis IS NULL
+                                    AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'MATERIALS_CONSUMED'
+                                    AND external_reference IS NOT NULL
+                                    AND material_consumption_reference IS NOT NULL
+                                    AND external_applied_at_epoch_millis IS NOT NULL
+                                    AND materials_consumed_at_epoch_millis IS NOT NULL
+                                    AND committed_at_epoch_millis IS NULL)
+                                OR (state = 'COMMITTED'
+                                    AND external_reference IS NOT NULL
+                                    AND material_consumption_reference IS NOT NULL
+                                    AND external_applied_at_epoch_millis IS NOT NULL
+                                    AND materials_consumed_at_epoch_millis IS NOT NULL
+                                    AND committed_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS mint_issuance_external_reference
+                        ON mint_issuance_operation (external_reference)
+                        WHERE external_reference IS NOT NULL
+                        """);
+                statement.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS mint_issuance_material_reference
+                        ON mint_issuance_operation (material_consumption_reference)
+                        WHERE material_consumption_reference IS NOT NULL
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS mint_issuance_recovery
+                        ON mint_issuance_operation (state, prepared_at_epoch_millis, operation_id)
+                        WHERE state != 'COMMITTED'
+                        """);
+                statement.execute("PRAGMA user_version = 51");
             }
             connection.commit();
         } catch (SQLException failure) {

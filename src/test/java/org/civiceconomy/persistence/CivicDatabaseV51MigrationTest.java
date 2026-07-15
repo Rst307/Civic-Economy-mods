@@ -11,22 +11,22 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class CivicDatabaseV50MigrationTest {
+class CivicDatabaseV51MigrationTest {
     @TempDir Path temporaryDirectory;
 
     @Test
-    void v49DatabaseAddsCancellationRecoveryWithoutChangingPreparedBatch() throws Exception {
-        Path databaseFile = temporaryDirectory.resolve("schema-v49.sqlite3");
+    void v50DatabaseAddsIssuanceIntentWithoutChangingProcessingBatch() throws Exception {
+        Path databaseFile = temporaryDirectory.resolve("schema-v50.sqlite3");
         DatabaseIdentity identity = new DatabaseIdentity(
-                UUID.fromString("d0a50103-ed53-4c86-8fe8-df69040e267b"),
+                UUID.fromString("412c2dd8-f0f5-48d0-bfc0-64772e017464"),
                 "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20");
-        UUID nationId = UUID.fromString("d3583272-86d4-4760-a642-adb6b7e86bd7");
-        UUID periodId = UUID.fromString("46917873-0786-47d2-881f-5694b0377bc6");
-        UUID recipeId = UUID.fromString("c75474c0-5cd8-4e8b-b99a-ce0656bbe932");
-        UUID mintId = UUID.fromString("9de1e82e-d86d-49d7-86c5-34364dffbf30");
-        UUID batchId = UUID.fromString("20ed6d6d-725b-4757-a9a6-a15838691363");
-        UUID actor = UUID.fromString("3331c4a2-8a4d-46bf-b84b-f4a6d404ec6b");
-        long now = Instant.parse("2026-08-02T00:00:00Z").toEpochMilli();
+        UUID nationId = UUID.fromString("311b6263-e08a-4b66-bcc0-115fcb10c443");
+        UUID periodId = UUID.fromString("4e2e6463-56ac-4015-8018-afb796e51d43");
+        UUID recipeId = UUID.fromString("a6875390-381c-466e-b994-931cb16be73c");
+        UUID mintId = UUID.fromString("5552d4ae-8431-43cb-90f7-fe489b055ae4");
+        UUID batchId = UUID.fromString("25d29cee-15a8-4e5f-861f-86f5d832bf69");
+        UUID actor = UUID.fromString("f6ca3eff-c369-456e-b3e5-77d77b6d3426");
+        long now = Instant.parse("2026-08-03T00:00:00Z").toEpochMilli();
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             database.registerNation(nationId, "test", "nation", UUID.randomUUID(), now - 10L);
             database.publishIssuanceQuotaPeriod(
@@ -52,34 +52,34 @@ class CivicDatabaseV50MigrationTest {
                     List.of(new StoredMintMaterialStack(
                             0, "EXACT_ITEM", "minecraft:diamond", "minecraft:diamond", 3L)),
                     actor, "Prepared", now - 5L);
+            database.confirmMintBatchCustody(
+                    batchId, "mint", "custody", "inventory-move:migration", now - 4L);
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var statement = connection.createStatement()) {
-            statement.execute("DROP INDEX mint_batch_cancellation_request");
-            statement.execute("DROP INDEX mint_batch_return_request");
-            statement.execute("DROP INDEX mint_batch_return_reference");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN cancellation_service_identity");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN cancellation_request_id");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN cancellation_actor_player_id");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN cancellation_reason");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN cancellation_prepared_at_epoch_millis");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN return_service_identity");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN return_request_id");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN return_external_reference");
-            statement.execute("ALTER TABLE mint_batch DROP COLUMN cancelled_at_epoch_millis");
-            statement.execute("PRAGMA user_version = 49");
+            statement.execute("DROP TABLE mint_issuance_operation");
+            statement.execute("PRAGMA user_version = 50");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
             assertEquals(51, migrated.schemaVersion());
             StoredMintBatch batch = migrated.mintBatch(batchId);
-            assertEquals("PREPARING", batch.state());
-            assertEquals("EXTERNAL_PENDING", batch.custodyState());
-            assertEquals(300L, batch.issuedMinorUnits());
-            assertNull(batch.cancellationRequestId());
+            assertEquals("PROCESSING", batch.state());
+            assertEquals("HELD", batch.custodyState());
             assertEquals(300L,
                     migrated.nationalIssuanceQuota(periodId, nationId).reservedMinorUnits());
+            assertNull(migrated.mintBatchIssuanceOperation("mint", "issue"));
+
+            StoredMintIssuanceOperation prepared = migrated.prepareMintBatchIssuance(
+                    UUID.randomUUID(),
+                    batchId,
+                    "mint",
+                    "issue",
+                    "Complete migrated batch",
+                    batch.processingCompletesAtEpochMillis());
+            assertEquals("PREPARED", prepared.state());
+            assertEquals("COMMITTING", migrated.mintBatch(batchId).state());
         }
     }
 }

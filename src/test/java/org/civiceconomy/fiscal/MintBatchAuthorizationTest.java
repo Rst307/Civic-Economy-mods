@@ -346,5 +346,6 @@ class MintBatchAuthorizationTest {
         private final List<MintMaterialCustodyReturn> returns = new ArrayList<>();
         public void take(MintMaterialCustodyTransfer transfer) { transfers.add(transfer); }
         public void returnToSource(MintMaterialCustodyReturn operation) { returns.add(operation); }
+        public void consume(org.civiceconomy.mint.MintMaterialCustodyConsumption operation) {}
     }
 }

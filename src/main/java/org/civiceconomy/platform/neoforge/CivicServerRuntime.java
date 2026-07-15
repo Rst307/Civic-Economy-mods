@@ -34,6 +34,7 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMintIssuances;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBalances;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyTerritoryClearingAccountProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPublicMaintenanceFundProvisioner;
@@ -102,10 +103,12 @@ import org.civiceconomy.mint.EffectiveTerritoryMintAuthority;
 import org.civiceconomy.mint.MintBatch;
 import org.civiceconomy.mint.MintBatchCoordinator;
 import org.civiceconomy.mint.MintBatchRecovery;
+import org.civiceconomy.mint.MintIssuanceRecovery;
 import org.civiceconomy.mint.MintFiscalServiceProvisioner;
 import org.civiceconomy.mint.PendingMintMaterialOperation;
 import org.civiceconomy.mint.PendingMintMaterialReturn;
 import org.civiceconomy.mint.PendingMintMaterialTake;
+import org.civiceconomy.mint.PendingMintIssuanceStep;
 import org.civiceconomy.mint.PrepareMintBatch;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
@@ -544,6 +547,13 @@ public final class CivicServerRuntime {
                         ? CompletableFuture.completedFuture(replay.batch())
                         : cancelPreparedMintBatch(
                                 current, actor, (PreparedMintReturn) preparation, commandClock));
+    }
+
+    void recoverMintBatchesNowForGameTest() {
+        RuntimeState current = state;
+        if (current != null) {
+            scheduleMintBatchRecovery(current);
+        }
     }
 
     private CompletableFuture<MintBatch> cancelPreparedMintBatch(
@@ -1507,15 +1517,19 @@ public final class CivicServerRuntime {
             return;
         }
         Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
-        current.writer.submitDatabase(database ->
-                        new MintBatchRecovery(database, recoveryClock).pendingExternal())
-                .whenComplete((pending, failure) -> {
+        current.writer.submitDatabase(database -> new PendingMintRecoveryScan(
+                        new MintBatchRecovery(database, recoveryClock).pendingExternal(),
+                        new MintIssuanceRecovery(database, recoveryClock).pendingExternal()))
+                .whenComplete((scan, failure) -> {
                     if (failure != null) {
                         current.mintBatchRecoveryQueued.set(false);
                         LOGGER.error("Mint Batch recovery scan failed closed", failure);
                         return;
                     }
-                    recoverMintBatchOperations(current, pending, recoveryClock, 0, 0);
+                    recoverMintBatchOperations(
+                            current, scan.materials(), recoveryClock, 0, 0, () ->
+                                    recoverMintIssuanceOperations(
+                                            current, scan.issuances(), recoveryClock, 0, 0));
                 });
     }
 
@@ -1524,12 +1538,13 @@ public final class CivicServerRuntime {
             List<PendingMintMaterialOperation> pending,
             Clock recoveryClock,
             int index,
-            int recovered) {
+            int recovered,
+            Runnable next) {
         if (state != current || index >= pending.size()) {
-            current.mintBatchRecoveryQueued.set(false);
             if (recovered > 0) {
                 LOGGER.info("Recovered {} Mint Batch material operation(s)", recovered);
             }
+            next.run();
             return;
         }
         PendingMintMaterialOperation operation = pending.get(index);
@@ -1547,6 +1562,47 @@ public final class CivicServerRuntime {
                                 failure);
                     }
                     recoverMintBatchOperations(
+                            current,
+                            pending,
+                            recoveryClock,
+                            index + 1,
+                            failure == null ? recovered + 1 : recovered,
+                            next);
+                });
+    }
+
+    private void recoverMintIssuanceOperations(
+            RuntimeState current,
+            List<PendingMintIssuanceStep> pending,
+            Clock recoveryClock,
+            int index,
+            int recovered) {
+        if (state != current || index >= pending.size()) {
+            current.mintBatchRecoveryQueued.set(false);
+            if (recovered > 0) {
+                LOGGER.info("Recovered {} Mint issuance step(s)", recovered);
+            }
+            return;
+        }
+        PendingMintIssuanceStep operation = pending.get(index);
+        onServer(current, () -> {
+                    operation.apply(
+                            LightmansCurrencyMintIssuances.live(current.server.overworld()),
+                            current.mintCustody);
+                    return operation;
+                })
+                .thenCompose(applied -> current.writer.submitDatabase(database ->
+                        new MintIssuanceRecovery(database, recoveryClock)
+                                .confirmExternal(applied)))
+                .whenComplete((confirmed, failure) -> {
+                    if (failure != null) {
+                        LOGGER.warn(
+                                "Mint issuance {} recovery remains pending; material consumption "
+                                        + "may require the source player online",
+                                operation.operationId(),
+                                failure);
+                    }
+                    recoverMintIssuanceOperations(
                             current,
                             pending,
                             recoveryClock,
@@ -2080,6 +2136,10 @@ public final class CivicServerRuntime {
 
     private record PreparedMintReturn(PendingMintMaterialReturn pending, NationTeam team)
             implements MintCancellationPreparation {}
+
+    private record PendingMintRecoveryScan(
+            List<PendingMintMaterialOperation> materials,
+            List<PendingMintIssuanceStep> issuances) {}
 
     private record TerritoryPermitCompensationResult(int recovered, int expired) {}
 
