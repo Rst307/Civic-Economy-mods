@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 59;
+    private static final int SCHEMA_VERSION = 60;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -7980,6 +7980,108 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredFiscalBill> dueUnfundedFiscalBills(long nowEpochMillis) {
+        List<StoredFiscalBill> bills = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, 0 AS settled_minor_units
+                FROM fiscal_bill b
+                WHERE b.state = 'ISSUED'
+                  AND b.escrow_id IS NULL
+                  AND b.due_at_epoch_millis <= ?
+                ORDER BY b.due_at_epoch_millis, b.bill_id
+                """)) {
+            query.setLong(1, nowEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    bills.add(storedFiscalBill(result));
+                }
+            }
+            return List.copyOf(bills);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list overdue Fiscal Bills", failure);
+        }
+    }
+
+    public synchronized StoredFiscalBillExpiry fiscalBillExpiry(UUID billId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM fiscal_bill_expiry WHERE bill_id = ?
+                """)) {
+            query.setString(1, billId.toString());
+            return readFiscalBillExpiry(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Fiscal Bill expiry", failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill expireFiscalBill(
+            UUID expiryId,
+            UUID billId,
+            String serviceIdentity,
+            String requestId,
+            long expiredAtEpochMillis) {
+        try (PreparedStatement replayQuery = connection.prepareStatement("""
+                SELECT * FROM fiscal_bill_expiry
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            replayQuery.setString(1, serviceIdentity);
+            replayQuery.setString(2, requestId);
+            StoredFiscalBillExpiry replay = readFiscalBillExpiry(replayQuery);
+            if (replay != null) {
+                if (!replay.billId().equals(billId)) {
+                    throw new IllegalArgumentException(
+                            "Fiscal Bill expiry replay changed its Bill");
+                }
+                return fiscalBill(billId);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Fiscal Bill expiry replay", failure);
+        }
+        StoredFiscalBill bill = fiscalBill(billId);
+        if (bill == null) {
+            throw new IllegalArgumentException("Unknown Fiscal Bill " + billId);
+        }
+        if (!"ISSUED".equals(bill.state()) || bill.escrowId() != null) {
+            throw new IllegalStateException("Fiscal Bill is not unfunded: " + bill.state());
+        }
+        if (expiredAtEpochMillis < bill.dueAtEpochMillis()) {
+            throw new IllegalStateException("Fiscal Bill is not overdue " + billId);
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO fiscal_bill_expiry (
+                            expiry_id, bill_id, service_identity, request_id,
+                            expired_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement expire = connection.prepareStatement("""
+                        UPDATE fiscal_bill SET state = 'EXPIRED'
+                        WHERE bill_id = ? AND state = 'ISSUED' AND escrow_id IS NULL
+                        """)) {
+                audit.setString(1, expiryId.toString());
+                audit.setString(2, billId.toString());
+                audit.setString(3, serviceIdentity);
+                audit.setString(4, requestId);
+                audit.setLong(5, expiredAtEpochMillis);
+                audit.executeUpdate();
+                expire.setString(1, billId.toString());
+                if (expire.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Fiscal Bill state changed during expiry " + billId);
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return fiscalBill(billId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to expire Fiscal Bill " + billId, failure);
+        }
+    }
+
     public synchronized StoredFiscalBill fiscalBillFunding(String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
@@ -11804,6 +11906,21 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 59");
             }
+            if (version < 60) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS fiscal_bill_expiry (
+                            expiry_id TEXT PRIMARY KEY,
+                            bill_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_bill(bill_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            expired_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expired_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 60");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -13230,20 +13347,39 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            String escrowId = result.getString("escrow_id");
-            return new StoredFiscalBill(
+            return storedFiscalBill(result);
+        }
+    }
+
+    private static StoredFiscalBill storedFiscalBill(ResultSet result) throws SQLException {
+        String escrowId = result.getString("escrow_id");
+        return new StoredFiscalBill(
+                UUID.fromString(result.getString("bill_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                result.getString("payer_account"),
+                result.getString("beneficiary_account"),
+                result.getLong("amount_minor_units"),
+                result.getString("kind"),
+                result.getString("purpose"),
+                result.getLong("due_at_epoch_millis"),
+                escrowId == null ? null : UUID.fromString(escrowId),
+                result.getLong("settled_minor_units"),
+                result.getString("state"));
+    }
+
+    private static StoredFiscalBillExpiry readFiscalBillExpiry(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredFiscalBillExpiry(
+                    UUID.fromString(result.getString("expiry_id")),
                     UUID.fromString(result.getString("bill_id")),
                     result.getString("service_identity"),
                     result.getString("request_id"),
-                    result.getString("payer_account"),
-                    result.getString("beneficiary_account"),
-                    result.getLong("amount_minor_units"),
-                    result.getString("kind"),
-                    result.getString("purpose"),
-                    result.getLong("due_at_epoch_millis"),
-                    escrowId == null ? null : UUID.fromString(escrowId),
-                    result.getLong("settled_minor_units"),
-                    result.getString("state"));
+                    result.getLong("expired_at_epoch_millis"));
         }
     }
 

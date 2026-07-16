@@ -453,7 +453,7 @@ public final class FiscalLedger {
                 BudgetState.valueOf(stored.state()));
     }
 
-    private static FiscalBill toFiscalBill(StoredFiscalBill stored) {
+    static FiscalBill toFiscalBill(StoredFiscalBill stored) {
         return new FiscalBill(
                 stored.billId(),
                 new ServiceIdentity(stored.serviceIdentity()),

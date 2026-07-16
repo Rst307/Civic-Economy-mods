@@ -895,6 +895,7 @@ public final class CivicServerRuntimeGameTests {
         UUID escrowId = UUID.randomUUID();
         UUID reservationId = UUID.randomUUID();
         UUID budgetId = UUID.randomUUID();
+        UUID billId = UUID.randomUUID();
         long expiresAt = System.currentTimeMillis() + 250L;
         AtomicBoolean prepared = new AtomicBoolean();
         AtomicBoolean expiryTriggered = new AtomicBoolean();
@@ -911,7 +912,7 @@ public final class CivicServerRuntimeGameTests {
                             "contract:runtime-expiry",
                             "Runtime automatic Escrow expiry",
                             expiresAt);
-                    return database.createBudget(
+                    database.createBudget(
                             budgetId,
                             "civiceconomy-gametest",
                             "runtime-budget-expiry-" + budgetId,
@@ -919,6 +920,16 @@ public final class CivicServerRuntimeGameTests {
                             200L,
                             "PUBLIC_WORKS:RUNTIME_EXPIRY",
                             "Runtime automatic Budget draft expiry",
+                            expiresAt);
+                    return database.issueFiscalBill(
+                            billId,
+                            "civiceconomy-gametest",
+                            "runtime-bill-expiry-" + billId,
+                            "player:runtime-bill-expiry:payer",
+                            "nation:runtime-bill-expiry:treasury",
+                            150L,
+                            "FEE",
+                            "Runtime automatic Fiscal Bill expiry",
                             expiresAt);
                 })
                 .whenComplete((budget, failure) -> {
@@ -939,6 +950,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertTrue(expiryTriggered.get(), "automatic fiscal expiry triggered");
             assertEscrowAutomaticallyExpired(helper, databaseFile, escrowId);
             assertBudgetDraftAutomaticallyExpired(helper, databaseFile, budgetId);
+            assertFiscalBillAutomaticallyExpired(helper, databaseFile, billId);
         });
     }
 
@@ -3913,7 +3925,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(59, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(60, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -4319,6 +4331,35 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect automatic Budget draft expiry", failure);
+        }
+    }
+
+    private static void assertFiscalBillAutomaticallyExpired(
+            GameTestHelper helper, Path databaseFile, UUID billId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT bill.state, bill.escrow_id,
+                               expiry.service_identity, expiry.request_id
+                        FROM fiscal_bill bill
+                        JOIN fiscal_bill_expiry expiry
+                          ON expiry.bill_id = bill.bill_id
+                        WHERE bill.bill_id = ?
+                        """)) {
+            query.setString(1, billId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "automatic Fiscal Bill expiry audit");
+                helper.assertValueEqual("EXPIRED", result.getString(1), "Fiscal Bill state");
+                helper.assertTrue(result.getString(2) == null, "expired Bill has no Escrow");
+                helper.assertValueEqual(
+                        "civiceconomy-server", result.getString(3), "expiry service identity");
+                helper.assertValueEqual(
+                        "automatic-expiry:" + billId,
+                        result.getString(4),
+                        "expiry request identity");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect automatic Fiscal Bill expiry", failure);
         }
     }
 

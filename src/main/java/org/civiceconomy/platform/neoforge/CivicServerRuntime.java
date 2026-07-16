@@ -34,6 +34,7 @@ import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.BudgetDraftExpiryProcessor;
 import org.civiceconomy.fiscal.EscrowExpiryProcessor;
+import org.civiceconomy.fiscal.FiscalBillExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
@@ -1755,16 +1756,18 @@ public final class CivicServerRuntime {
         Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         current.writer.submitDatabase(database -> new FiscalExpiryResult(
                         new EscrowExpiryProcessor(database, scanClock).expireDue().size(),
-                        new BudgetDraftExpiryProcessor(database, scanClock).expireDue().size()))
+                        new BudgetDraftExpiryProcessor(database, scanClock).expireDue().size(),
+                        new FiscalBillExpiryProcessor(database, scanClock).expireDue().size()))
                 .whenComplete((result, failure) -> {
                     current.fiscalExpiryQueued.set(false);
                     if (failure != null) {
                         LOGGER.error("Automatic fiscal expiry failed closed", failure);
-                    } else if (result.escrows() > 0 || result.budgetDrafts() > 0) {
+                    } else if (result.escrows() > 0
+                            || result.budgetDrafts() > 0
+                            || result.fiscalBills() > 0) {
                         LOGGER.info(
-                                "Automatically expired {} Escrow(s) and {} Budget draft(s)",
-                                result.escrows(),
-                                result.budgetDrafts());
+                                "Automatically expired {} Escrow(s), {} Budget draft(s), and {} Fiscal Bill(s)",
+                                result.escrows(), result.budgetDrafts(), result.fiscalBills());
                     }
                 });
     }
@@ -2745,7 +2748,7 @@ public final class CivicServerRuntime {
             TreasuryWithdrawalCoordinator coordinator,
             List<TreasuryWithdrawal> withdrawals) {}
 
-    private record FiscalExpiryResult(int escrows, int budgetDrafts) {}
+    private record FiscalExpiryResult(int escrows, int budgetDrafts, int fiscalBills) {}
 
     private sealed interface MintCancellationPreparation
             permits MintCancellationReplay, PreparedMintReturn {}
