@@ -165,6 +165,45 @@ public final class BudgetDisbursementApprovalRegistry {
                 .toList();
     }
 
+    public BudgetDisbursementApproval cancel(
+            CancelBudgetDisbursementApproval request) {
+        StoredBudgetDisbursementApproval replay =
+                database.budgetDisbursementApprovalCancellation(
+                        request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.approvalRequestId().equals(request.approvalRequestId())
+                    || !replay.cancelledByPlayerId().equals(request.actorPlayerId())
+                    || !replay.cancellationReason().equals(request.reason())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toApproval(replay);
+        }
+        StoredBudgetDisbursementApproval existing =
+                database.budgetDisbursementApproval(request.approvalRequestId());
+        if (existing == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Budget Disbursement approval "
+                            + request.approvalRequestId());
+        }
+        if (!existing.serviceIdentity().equals(request.serviceIdentity().value())) {
+            throw new SecurityException(
+                    "Budget Disbursement approval belongs to another Service Identity");
+        }
+        if (!existing.state().equals("PENDING")) {
+            throw new IllegalStateException(
+                    "Budget Disbursement approval is already " + existing.state());
+        }
+        return toApproval(database.cancelBudgetDisbursementApproval(
+                UUID.randomUUID(),
+                request.approvalRequestId(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.actorPlayerId(),
+                request.reason(),
+                clock.millis()));
+    }
+
     private static void requirePayload(
             StoredBudgetDisbursementApproval stored,
             InitiateBudgetDisbursementApproval request) {
@@ -213,6 +252,11 @@ public final class BudgetDisbursementApprovalRegistry {
                 Instant.ofEpochMilli(stored.expiresAtEpochMillis()),
                 stored.expiredAtEpochMillis() == null
                         ? null
-                        : Instant.ofEpochMilli(stored.expiredAtEpochMillis()));
+                        : Instant.ofEpochMilli(stored.expiredAtEpochMillis()),
+                stored.cancelledByPlayerId(),
+                stored.cancellationReason(),
+                stored.cancelledAtEpochMillis() == null
+                        ? null
+                        : Instant.ofEpochMilli(stored.cancelledAtEpochMillis()));
     }
 }

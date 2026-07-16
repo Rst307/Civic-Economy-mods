@@ -116,6 +116,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation budget disbursement approve <approvalId> <requestId> <reason>
 /civic economy nation budget disbursement approval list
 /civic economy nation budget disbursement approval status <approvalId>
+/civic economy nation budget disbursement approval cancel <approvalId> <requestId> <reason>
 /civic economy nation budget disbursement policy status
 /civic economy nation budget disbursement policy history
 /civic economy nation budget disbursement policy schedule <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <thresholdMinorUnits> <requiredApprovals> <reason>
@@ -163,6 +164,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation budget disbursement approve` 允许另一名具有同一 Nation `APPROVE_PAYMENT` 的 effective Citizen 为仍为 `PENDING` 的精确审批投票；同一 Citizen 不能重复计票，达到发起时固定的人数后才会创建 Payment。`PENDING` 审批到期时由后台 SQLite 扫描转为 `EXPIRED`，不会创建 Payment 或调用 LC，并释放其占用的 Budget 授权容量。
 
 `nation budget disbursement approval list|status` 从真实命令玩家的 effective Citizenship 派生 Nation，并额外要求该 Nation 的精确 `APPROVE_PAYMENT`。列表只返回本国审批并按发起时间和审批 UUID 倒序稳定排列；foreign 与 unknown 审批 UUID 使用同一失败路径。状态显示固定的 Budget、收款账户、金额、发起人、理由、策略版本、所需人数、逐票操作者/理由/时间、到期与执行证据，以及当前玩家是否仍可投票。读取不会创建 Payment、投票、移动 LC 或推进审批/Budget 状态。
+
+`nation budget disbursement approval cancel` 允许具有同一 Nation 精确 `APPROVE_PAYMENT` 的 effective Citizen 使用稳定 request ID 取消仍为 `PENDING` 且尚未创建 Payment 的本国审批。服务端先从真实玩家和 effective Citizenship 派生 Nation，再以与 unknown UUID 相同的路径拒绝 foreign approval；SQLite 追加不可变 actor/reason/time 取消审计，并在读取时把原审批事实叠加显示为 `CANCELLED`。取消会立即释放该审批占用的 Budget 授权容量，但不会释放 Reservation、改变 Escrow 或 Budget 已结算状态、创建 Payment、调用 LC 或移动任何余额；严格重放不会重复释放容量，改变审批、操作者或理由会冲突，已取消审批不能再投票或执行。
 
 `nation budget disbursement policy status|history` 只要求真实玩家拥有 effective Citizenship，并从服务端派生其 Nation。状态返回查询时刻生效的策略；历史按生效时间、记录时间和策略 UUID 稳定排列，包含当前和未来版本、金额门槛、审批人数、有效期、操作者、理由与时间。读取不会激活未来策略或产生 SQLite 写入。
 

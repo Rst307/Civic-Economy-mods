@@ -851,6 +851,36 @@ public final class CivicServerRuntime {
                         current, commandClock, prepared));
     }
 
+    CompletableFuture<BudgetDisbursementApproval> cancelNationalBudgetDisbursementApproval(
+            ServerPlayer actor,
+            UUID approvalRequestId,
+            String requestId,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    var authorities = new NationFiscalAuthorityRegistry(
+                            database, provider, commandClock);
+                    return new NationBudgetDisbursementApprovalCoordinator(
+                                    database, provider, authorities, commandClock)
+                            .cancel(
+                                    actorPlayerId,
+                                    approvalRequestId,
+                                    requestId,
+                                    reason);
+                }));
+    }
+
     CompletableFuture<BudgetDisbursementApprovalPolicyVersion>
             scheduleBudgetDisbursementApprovalPolicy(
                     ServerPlayer actor,

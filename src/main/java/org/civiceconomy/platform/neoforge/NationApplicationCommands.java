@@ -250,6 +250,20 @@ final class NationApplicationCommands {
                                                                                         StringArgumentType.getString(
                                                                                                 context,
                                                                                                 "reason"))))))))));
+        var cancelApproval = Commands.literal("cancel")
+                .then(Commands.argument("approvalId", UuidArgument.uuid())
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "reason",
+                                                StringArgumentType.greedyString())
+                                        .executes(context -> cancelBudgetDisbursementApproval(
+                                                context.getSource(),
+                                                UuidArgument.getUuid(
+                                                        context, "approvalId"),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"),
+                                                StringArgumentType.getString(
+                                                        context, "reason"))))));
         var approval = Commands.literal("approval")
                 .then(Commands.literal("list")
                         .executes(context -> listBudgetDisbursementApprovals(
@@ -258,7 +272,8 @@ final class NationApplicationCommands {
                         .then(Commands.argument("approvalId", UuidArgument.uuid())
                                 .executes(context -> budgetDisbursementApprovalStatus(
                                         context.getSource(),
-                                        UuidArgument.getUuid(context, "approvalId")))));
+                                        UuidArgument.getUuid(context, "approvalId")))))
+                .then(cancelApproval);
         return Commands.literal("disbursement")
                 .then(request)
                 .then(approve)
@@ -517,6 +532,40 @@ final class NationApplicationCommands {
         return Command.SINGLE_SUCCESS;
     }
 
+    private static int cancelBudgetDisbursementApproval(
+            CommandSourceStack source,
+            UUID approvalRequestId,
+            String requestId,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .cancelNationalBudgetDisbursementApproval(
+                        player, approvalRequestId, requestId, reason)
+                .whenComplete((approval, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement approval cancellation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Cancelled Budget Disbursement Approval "
+                                                + approval.approvalRequestId()
+                                                + " actor=player:"
+                                                + approval.cancelledByPlayerId()
+                                                + " reason=\""
+                                                + approval.cancellationReason()
+                                                + "\" cancelledAt="
+                                                + approval.cancelledAt()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal(
+                        "Budget Disbursement approval cancellation queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
     private static String formatDisbursementOutcome(
             BudgetDisbursementApprovalOutcome outcome) {
         var approval = outcome.approval();
@@ -567,6 +616,9 @@ final class NationApplicationCommands {
                 + " approvedAt=" + approval.approvedAt()
                 + " executedAt=" + approval.executedAt()
                 + " expiredAt=" + approval.expiredAt()
+                + " cancelledBy=" + approval.cancelledByPlayerId()
+                + " cancellationReason=\"" + approval.cancellationReason() + "\""
+                + " cancelledAt=" + approval.cancelledAt()
                 + " votes=[" + votes + "]";
     }
 

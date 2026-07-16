@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 64;
+    private static final int SCHEMA_VERSION = 65;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -7421,8 +7421,14 @@ public final class CivicDatabase implements AutoCloseable {
             String state = requiredApprovals == 1 ? "APPROVED" : "PENDING";
             try (PreparedStatement active = connection.prepareStatement("""
                         SELECT COALESCE(SUM(amount_minor_units), 0)
-                        FROM budget_disbursement_approval_request
+                        FROM budget_disbursement_approval_request approval
                         WHERE budget_id = ? AND state IN ('PENDING', 'APPROVED')
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM budget_disbursement_approval_cancellation cancellation
+                              WHERE cancellation.approval_request_id =
+                                    approval.approval_request_id
+                          )
                         """);
                     PreparedStatement request = connection.prepareStatement("""
                         INSERT INTO budget_disbursement_approval_request (
@@ -7564,8 +7570,14 @@ public final class CivicDatabase implements AutoCloseable {
             connection.setAutoCommit(false);
             try (PreparedStatement query = connection.prepareStatement("""
                         SELECT approval_request_id
-                        FROM budget_disbursement_approval_request
+                        FROM budget_disbursement_approval_request approval
                         WHERE state = 'PENDING' AND expires_at_epoch_millis <= ?
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM budget_disbursement_approval_cancellation cancellation
+                              WHERE cancellation.approval_request_id =
+                                    approval.approval_request_id
+                          )
                         ORDER BY expires_at_epoch_millis, approval_request_id
                         """);
                     PreparedStatement expire = connection.prepareStatement("""
@@ -7600,6 +7612,86 @@ public final class CivicDatabase implements AutoCloseable {
                     "Unable to expire Budget Disbursement approvals", failure);
         }
         return due.stream().map(this::budgetDisbursementApproval).toList();
+    }
+
+    public synchronized StoredBudgetDisbursementApproval
+            budgetDisbursementApprovalCancellation(
+                    String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval_request_id
+                FROM budget_disbursement_approval_cancellation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next()
+                        ? budgetDisbursementApproval(UUID.fromString(
+                                result.getString("approval_request_id")))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Budget Disbursement approval cancellation", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApproval
+            cancelBudgetDisbursementApproval(
+                    UUID cancellationId,
+                    UUID approvalRequestId,
+                    String serviceIdentity,
+                    String requestId,
+                    UUID actorPlayerId,
+                    String reason,
+                    long cancelledAtEpochMillis) {
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            StoredBudgetDisbursementApproval approval =
+                    budgetDisbursementApproval(approvalRequestId);
+            if (approval == null) {
+                throw new IllegalArgumentException(
+                        "Unknown Budget Disbursement approval " + approvalRequestId);
+            }
+            if (!approval.state().equals("PENDING")) {
+                throw new IllegalStateException(
+                        "Budget Disbursement approval is " + approval.state());
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO budget_disbursement_approval_cancellation (
+                        cancellation_id, approval_request_id,
+                        service_identity, request_id, actor_player_id,
+                        reason, cancelled_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, cancellationId.toString());
+                insert.setString(2, approvalRequestId.toString());
+                insert.setString(3, serviceIdentity);
+                insert.setString(4, requestId);
+                insert.setString(5, actorPlayerId.toString());
+                insert.setString(6, reason);
+                insert.setLong(7, cancelledAtEpochMillis);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return budgetDisbursementApproval(approvalRequestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException(
+                            "Unable to cancel Budget Disbursement approval", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit(
+                    "Budget Disbursement approval cancellation", primaryFailure);
+        }
     }
 
     public synchronized StoredTreasuryWithdrawalApproval treasuryWithdrawalApproval(
@@ -12832,6 +12924,25 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 64");
             }
+            if (version < 65) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_disbursement_approval_cancellation (
+                            cancellation_id TEXT PRIMARY KEY,
+                            approval_request_id TEXT NOT NULL UNIQUE
+                                REFERENCES budget_disbursement_approval_request(
+                                    approval_request_id
+                                ),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            cancelled_at_epoch_millis INTEGER NOT NULL
+                                CHECK (cancelled_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 65");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -13211,6 +13322,25 @@ public final class CivicDatabase implements AutoCloseable {
             Long executedAt = result.wasNull() ? null : executedAtValue;
             long expiredAtValue = result.getLong("expired_at_epoch_millis");
             Long expiredAt = result.wasNull() ? null : expiredAtValue;
+            UUID cancelledByPlayerId = null;
+            String cancellationReason = null;
+            Long cancelledAt = null;
+            try (PreparedStatement cancellationQuery = connection.prepareStatement("""
+                    SELECT actor_player_id, reason, cancelled_at_epoch_millis
+                    FROM budget_disbursement_approval_cancellation
+                    WHERE approval_request_id = ?
+                    """)) {
+                cancellationQuery.setString(1, approvalRequestId.toString());
+                try (ResultSet cancellationResult = cancellationQuery.executeQuery()) {
+                    if (cancellationResult.next()) {
+                        cancelledByPlayerId = UUID.fromString(
+                                cancellationResult.getString("actor_player_id"));
+                        cancellationReason = cancellationResult.getString("reason");
+                        cancelledAt = cancellationResult.getLong(
+                                "cancelled_at_epoch_millis");
+                    }
+                }
+            }
             return new StoredBudgetDisbursementApproval(
                     approvalRequestId,
                     result.getString("service_identity"),
@@ -13224,12 +13354,15 @@ public final class CivicDatabase implements AutoCloseable {
                     UUID.fromString(result.getString("policy_id")),
                     result.getInt("required_approvals"),
                     votes,
-                    result.getString("state"),
+                    cancelledAt == null ? result.getString("state") : "CANCELLED",
                     result.getLong("initiated_at_epoch_millis"),
                     approvedAt,
                     executedAt,
                     result.getLong("expires_at_epoch_millis"),
-                    expiredAt);
+                    expiredAt,
+                    cancelledByPlayerId,
+                    cancellationReason,
+                    cancelledAt);
         }
     }
 

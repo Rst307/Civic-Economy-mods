@@ -95,4 +95,30 @@ public final class NationBudgetDisbursementApprovalCoordinator {
                 actorPlayerId,
                 reason));
     }
+
+    public BudgetDisbursementApproval cancel(
+            UUID actorPlayerId,
+            UUID approvalRequestId,
+            String requestId,
+            String reason) {
+        if (actorPlayerId == null || approvalRequestId == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement approval cancellation identity cannot be null");
+        }
+        var nationId = nations.findForCitizen(actorPlayerId)
+                .orElseThrow(() -> new SecurityException(
+                        "Budget Disbursement cancellation requires effective Citizenship"))
+                .nationId();
+        authorities.require(
+                nationId, actorPlayerId, NationFiscalPermission.APPROVE_PAYMENT);
+        BudgetDisbursementApprovalRegistry approvals =
+                new BudgetDisbursementApprovalRegistry(database, clock);
+        approvals.findForNation(approvalRequestId, nationId);
+        return approvals.cancel(new CancelBudgetDisbursementApproval(
+                SERVICE_IDENTITY,
+                requestId,
+                approvalRequestId,
+                actorPlayerId,
+                reason));
+    }
 }

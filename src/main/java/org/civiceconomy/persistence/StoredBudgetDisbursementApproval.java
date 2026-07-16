@@ -21,4 +21,7 @@ public record StoredBudgetDisbursementApproval(
         Long approvedAtEpochMillis,
         Long executedAtEpochMillis,
         long expiresAtEpochMillis,
-        Long expiredAtEpochMillis) {}
+        Long expiredAtEpochMillis,
+        UUID cancelledByPlayerId,
+        String cancellationReason,
+        Long cancelledAtEpochMillis) {}

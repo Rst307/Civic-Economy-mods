@@ -44,10 +44,13 @@ import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalRegistry;
 import org.civiceconomy.fiscal.ExternalPayment;
 import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.MoneyAmount;
+import org.civiceconomy.fiscal.InitiateBudgetDisbursementApproval;
+import org.civiceconomy.fiscal.NationBudgetDisbursementApprovalCoordinator;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
@@ -545,7 +548,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Budget Disbursement command actions");
         helper.assertValueEqual(
-                Set.of("list", "status"),
+                Set.of("list", "status", "cancel"),
                 economy.getChild("nation")
                         .getChild("budget")
                         .getChild("disbursement")
@@ -1158,6 +1161,8 @@ public final class CivicServerRuntimeGameTests {
         String unauthorizedRequestId = "unauthorized-budget-" + UUID.randomUUID();
         String requestId = "player-budget-" + UUID.randomUUID();
         String disbursementRequestId = "player-budget-disbursement-" + UUID.randomUUID();
+        String cancelledDisbursementRequestId =
+                "cancelled-player-budget-disbursement-" + UUID.randomUUID();
         UUID recipientPlayerId = UUID.randomUUID();
         long expiresAt = java.time.Instant.now()
                 .plus(java.time.Duration.ofDays(1L))
@@ -1170,6 +1175,7 @@ public final class CivicServerRuntimeGameTests {
                 new AtomicReference<>();
         AtomicReference<org.civiceconomy.fiscal.Budget> inspectedBudget =
                 new AtomicReference<>();
+        AtomicReference<UUID> cancelledDisbursementApprovalId = new AtomicReference<>();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean unauthorizedFinished = new AtomicBoolean();
         AtomicBoolean permissionReady = new AtomicBoolean();
@@ -1180,6 +1186,8 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean approvalCommandStarted = new AtomicBoolean();
         AtomicBoolean disbursementCommandStarted = new AtomicBoolean();
         AtomicBoolean disbursementInspectionCommandsStarted = new AtomicBoolean();
+        AtomicBoolean pendingDisbursementReady = new AtomicBoolean();
+        AtomicBoolean disbursementCancellationCommandStarted = new AtomicBoolean();
         AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -1648,6 +1656,120 @@ public final class CivicServerRuntimeGameTests {
                             100L,
                             playerBankBalance(recipientPlayerId),
                             "inspection does not move recipient LC");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                            long policyRecordedAt = setupClock.millis();
+                            database.scheduleBudgetDisbursementApprovalPolicy(
+                                    UUID.randomUUID(),
+                                    "civiceconomy-budget-disbursement-governance",
+                                    "gametest-cancellation-policy-" + UUID.randomUUID(),
+                                    nationId.get().value(),
+                                    actor.getUUID(),
+                                    java.util.List.of(
+                                            new org.civiceconomy.persistence
+                                                    .StoredBudgetDisbursementApprovalTier(
+                                                    0L, 2)),
+                                    java.time.Duration.ofDays(7L).toMillis(),
+                                    policyRecordedAt - 1L,
+                                    "Require two Citizens for cancellation GameTest",
+                                    policyRecordedAt);
+                            return new BudgetDisbursementApprovalRegistry(
+                                            database, setupClock)
+                                    .initiate(new InitiateBudgetDisbursementApproval(
+                                            NationBudgetDisbursementApprovalCoordinator
+                                                    .SERVICE_IDENTITY,
+                                            cancelledDisbursementRequestId,
+                                            nationId.get(),
+                                            budget.budgetId(),
+                                            new AccountId(
+                                                    "player:88888888-8888-8888-8888-888888888888"),
+                                            MoneyAmount.ofMinorUnits(200L),
+                                            actor.getUUID(),
+                                            "Cancelled GameTest public works authority"));
+                        })
+                        .whenComplete((approval, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                cancelledDisbursementApprovalId.set(
+                                        approval.approvalRequestId());
+                                pendingDisbursementReady.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "pending Budget Disbursement cancellation setup");
+                    helper.assertTrue(
+                            pendingDisbursementReady.get(),
+                            "pending Budget Disbursement cancellation setup complete");
+                    BudgetDisbursementRow pending = budgetDisbursementByRequest(
+                            databaseFile, cancelledDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "PENDING", pending.approvalState(), "pending cancellation state");
+                    helper.assertValueEqual(
+                            0, pending.paymentCount(), "pending cancellation has no Payment");
+                })
+                .thenExecute(() -> {
+                    try {
+                        String cancellationRequestId =
+                                "cancel-budget-disbursement-approval-" + UUID.randomUUID();
+                        String command =
+                                "civic economy nation budget disbursement approval cancel "
+                                        + cancelledDisbursementApprovalId.get()
+                                        + " " + cancellationRequestId
+                                        + " Cancel withdrawn GameTest procurement";
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement approval cancellation command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement approval cancellation replay result");
+                        disbursementCancellationCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Budget Disbursement approval cancellation");
+                    helper.assertTrue(
+                            disbursementCancellationCommandStarted.get(),
+                            "Budget Disbursement approval cancellation started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    BudgetDisbursementRow cancelled = budgetDisbursementByRequest(
+                            databaseFile, cancelledDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "CANCELLED",
+                            cancelled.approvalState(),
+                            "cancelled Budget Disbursement approval state");
+                    helper.assertValueEqual(
+                            0, cancelled.paymentCount(), "cancellation creates no Payment");
+                    helper.assertValueEqual(
+                            "PARTIALLY_SPENT",
+                            budget.state(),
+                            "approval cancellation preserves Budget state");
+                    helper.assertValueEqual(
+                            100L,
+                            budget.settledMinorUnits(),
+                            "approval cancellation preserves settled amount");
+                    helper.assertValueEqual(
+                            900L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "approval cancellation does not move Treasury LC");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(recipientPlayerId),
+                            "approval cancellation does not move recipient LC");
                 })
                 .thenExecute(() -> {
                     try {
@@ -5177,7 +5299,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(64, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(65, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -5925,7 +6047,8 @@ public final class CivicServerRuntimeGameTests {
                 var query = connection.prepareStatement("""
                         SELECT approval.approval_request_id, approval.budget_id,
                                approval.recipient_account, approval.amount_minor_units,
-                               approval.state,
+                               CASE WHEN cancellation.approval_request_id IS NULL
+                                    THEN approval.state ELSE 'CANCELLED' END,
                                payment.state,
                                (SELECT COUNT(*) FROM payment_transaction counted
                                 WHERE counted.service_identity = approval.service_identity
@@ -5934,6 +6057,9 @@ public final class CivicServerRuntimeGameTests {
                         LEFT JOIN payment_transaction payment
                           ON payment.service_identity = approval.service_identity
                          AND payment.request_id = approval.request_id
+                        LEFT JOIN budget_disbursement_approval_cancellation cancellation
+                          ON cancellation.approval_request_id =
+                             approval.approval_request_id
                         WHERE approval.service_identity = ? AND approval.request_id = ?
                         """)) {
             query.setString(1, "civiceconomy-budget-disbursement");

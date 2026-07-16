@@ -23,7 +23,10 @@ public record BudgetDisbursementApproval(
         Instant approvedAt,
         Instant executedAt,
         Instant expiresAt,
-        Instant expiredAt) {
+        Instant expiredAt,
+        UUID cancelledByPlayerId,
+        String cancellationReason,
+        Instant cancelledAt) {
     public BudgetDisbursementApproval {
         if (approvalRequestId == null || serviceIdentity == null || nationId == null
                 || budgetId == null || recipientAccount == null || amount == null

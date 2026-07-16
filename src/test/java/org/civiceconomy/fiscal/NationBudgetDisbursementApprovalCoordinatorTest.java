@@ -37,6 +37,8 @@ class NationBudgetDisbursementApprovalCoordinatorTest {
             UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     private static final UUID TEAM =
             UUID.fromString("11111111-1111-1111-1111-111111111111");
+    private static final NationId FOREIGN_NATION =
+            new NationId(UUID.fromString("99999999-9999-9999-9999-999999999999"));
 
     @TempDir Path temporaryDirectory;
 
@@ -156,6 +158,159 @@ class NationBudgetDisbursementApprovalCoordinatorTest {
                                     Clock.fixed(NOW.plusSeconds(60L), ZoneOffset.UTC))
                             .find(pending.approvalRequestId())
                             .approverPlayerIds());
+        }
+    }
+
+    @Test
+    void missingApprovePaymentAuthorityFailsBeforeCancellationAudit() {
+        try (CivicDatabase database = database()) {
+            Fixtures fixtures = fixtures(database);
+            fixtures.authorities().grant(new GrantNationFiscalPermission(
+                    new ServiceIdentity("civiceconomy-governance"),
+                    "grant-disbursement-cancellation-initiation",
+                    fixtures.nationId(),
+                    ACTOR,
+                    ACTOR,
+                    NationFiscalPermission.INITIATE_PAYMENT,
+                    "Authorize initiation but not cancellation"));
+            new BudgetDisbursementApprovalPolicyRegistry(database, CLOCK)
+                    .schedule(new ScheduleBudgetDisbursementApprovalPolicy(
+                            new ServiceIdentity("civiceconomy-budget-governance"),
+                            "schedule-cancellation-two-person-policy",
+                            fixtures.nationId(),
+                            ACTOR,
+                            java.util.List.of(new BudgetDisbursementApprovalTier(
+                                    MoneyAmount.ZERO, 2)),
+                            Duration.ofDays(7L),
+                            NOW.plusSeconds(60L),
+                            "Require two Citizens before cancellation test"));
+            Budget budget = approvedBudget(database, fixtures.nationId());
+            NationBudgetDisbursementApprovalCoordinator coordinator =
+                    new NationBudgetDisbursementApprovalCoordinator(
+                            database,
+                            fixtures.provider(),
+                            fixtures.authorities(),
+                            Clock.fixed(NOW.plusSeconds(60L), ZoneOffset.UTC));
+            BudgetDisbursementApproval pending = coordinator.initiate(
+                    ACTOR,
+                    budget.budgetId(),
+                    new AccountId("player:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                    MoneyAmount.ofMinorUnits(100L),
+                    "pending-cancellation-authorization",
+                    "Pending cancellation authorization milestone");
+
+            assertThrows(
+                    SecurityException.class,
+                    () -> coordinator.cancel(
+                            ACTOR,
+                            pending.approvalRequestId(),
+                            "unauthorized-cancellation",
+                            "Cannot cancel without APPROVE_PAYMENT"));
+
+            assertNull(database.budgetDisbursementApprovalCancellation(
+                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY.value(),
+                    "unauthorized-cancellation"));
+            assertEquals(
+                    "PENDING",
+                    new BudgetDisbursementApprovalRegistry(
+                                    database,
+                                    Clock.fixed(NOW.plusSeconds(60L), ZoneOffset.UTC))
+                            .find(pending.approvalRequestId())
+                            .state());
+        }
+    }
+
+    @Test
+    void foreignAndUnknownCancellationIdsShareOneFailClosedPath() {
+        try (CivicDatabase database = database()) {
+            Fixtures fixtures = fixtures(database);
+            fixtures.authorities().grant(new GrantNationFiscalPermission(
+                    new ServiceIdentity("civiceconomy-governance"),
+                    "grant-disbursement-cancellation-authority",
+                    fixtures.nationId(),
+                    ACTOR,
+                    ACTOR,
+                    NationFiscalPermission.APPROVE_PAYMENT,
+                    "Authorize Budget Disbursement cancellation"));
+            database.registerNation(
+                    FOREIGN_NATION.value(),
+                    "foreign-disbursement-cancellation",
+                    "register-foreign-disbursement-cancellation",
+                    UUID.fromString("88888888-8888-8888-8888-888888888888"),
+                    NOW.minusSeconds(120L).toEpochMilli());
+            UUID foreignBudgetId = UUID.randomUUID();
+            database.createBudget(
+                    foreignBudgetId,
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "create-foreign-cancellation-budget",
+                    "nation:" + FOREIGN_NATION.value() + ":treasury",
+                    300L,
+                    "PUBLIC_WORKS",
+                    "Foreign cancellation Budget",
+                    NOW.plus(Duration.ofDays(30L)).toEpochMilli());
+            database.approveBudget(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "approve-foreign-cancellation-budget",
+                    foreignBudgetId,
+                    ACTOR,
+                    "Approve foreign cancellation Budget",
+                    NOW.minusSeconds(60L).toEpochMilli());
+            new BudgetDisbursementApprovalPolicyRegistry(database, CLOCK)
+                    .schedule(new ScheduleBudgetDisbursementApprovalPolicy(
+                            new ServiceIdentity("civiceconomy-budget-governance"),
+                            "schedule-foreign-cancellation-policy",
+                            FOREIGN_NATION,
+                            ACTOR,
+                            java.util.List.of(new BudgetDisbursementApprovalTier(
+                                    MoneyAmount.ZERO, 2)),
+                            Duration.ofDays(7L),
+                            NOW.plusSeconds(60L),
+                            "Require two Citizens for foreign cancellation"));
+            Clock effectiveClock = Clock.fixed(NOW.plusSeconds(60L), ZoneOffset.UTC);
+            BudgetDisbursementApproval foreign =
+                    new BudgetDisbursementApprovalRegistry(database, effectiveClock)
+                            .initiate(new InitiateBudgetDisbursementApproval(
+                                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY,
+                                    "foreign-cancellation-approval",
+                                    FOREIGN_NATION,
+                                    foreignBudgetId,
+                                    new AccountId(
+                                            "player:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                                    MoneyAmount.ofMinorUnits(100L),
+                                    ACTOR,
+                                    "Foreign cancellation approval"));
+            NationBudgetDisbursementApprovalCoordinator coordinator =
+                    new NationBudgetDisbursementApprovalCoordinator(
+                            database,
+                            fixtures.provider(),
+                            fixtures.authorities(),
+                            effectiveClock);
+
+            SecurityException foreignFailure = assertThrows(
+                    SecurityException.class,
+                    () -> coordinator.cancel(
+                            ACTOR,
+                            foreign.approvalRequestId(),
+                            "cancel-foreign-approval",
+                            "Cannot cancel foreign approval"));
+            SecurityException unknownFailure = assertThrows(
+                    SecurityException.class,
+                    () -> coordinator.cancel(
+                            ACTOR,
+                            UUID.fromString("77777777-7777-7777-7777-777777777777"),
+                            "cancel-unknown-approval",
+                            "Cannot cancel unknown approval"));
+
+            assertEquals(foreignFailure.getMessage(), unknownFailure.getMessage());
+            assertNull(database.budgetDisbursementApprovalCancellation(
+                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY.value(),
+                    "cancel-foreign-approval"));
+            assertNull(database.budgetDisbursementApprovalCancellation(
+                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY.value(),
+                    "cancel-unknown-approval"));
         }
     }
 

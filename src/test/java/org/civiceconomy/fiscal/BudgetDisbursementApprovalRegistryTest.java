@@ -272,6 +272,81 @@ class BudgetDisbursementApprovalRegistryTest {
         }
     }
 
+    @Test
+    void pendingApprovalCancellationIsAuditedAndFreesAuthorizationCapacity() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            Budget budget = approvedBudget(database);
+            scheduleTwoPersonPolicy(database);
+            BudgetDisbursementApprovalRegistry approvals =
+                    new BudgetDisbursementApprovalRegistry(
+                            database, Clock.fixed(EFFECTIVE_AT, ZoneOffset.UTC));
+            BudgetDisbursementApproval pending = approvals.initiate(
+                    new InitiateBudgetDisbursementApproval(
+                            SERVICE,
+                            "cancelled-disbursement",
+                            NATION_ID,
+                            budget.budgetId(),
+                            RECIPIENT,
+                            MoneyAmount.ofMinorUnits(200L),
+                            INITIATOR,
+                            "Cancelled public works authority"));
+            CancelBudgetDisbursementApproval cancellation =
+                    new CancelBudgetDisbursementApproval(
+                            SERVICE,
+                            "cancel-disbursement-approval",
+                            pending.approvalRequestId(),
+                            INITIATOR,
+                            "Project procurement was withdrawn");
+
+            BudgetDisbursementApproval cancelled = approvals.cancel(cancellation);
+            BudgetDisbursementApproval replacement = approvals.initiate(
+                    new InitiateBudgetDisbursementApproval(
+                            SERVICE,
+                            "replacement-after-cancellation",
+                            NATION_ID,
+                            budget.budgetId(),
+                            new AccountId(
+                                    "player:77777777-7777-7777-7777-777777777777"),
+                            MoneyAmount.ofMinorUnits(200L),
+                            INITIATOR,
+                            "Replacement public works authority"));
+
+            assertEquals(cancelled, approvals.cancel(cancellation));
+            assertEquals("CANCELLED", cancelled.state());
+            assertEquals(INITIATOR, cancelled.cancelledByPlayerId());
+            assertEquals("Project procurement was withdrawn", cancelled.cancellationReason());
+            assertEquals(EFFECTIVE_AT, cancelled.cancelledAt());
+            assertEquals("PENDING", replacement.state());
+            assertNull(database.paymentTransaction("cancelled-disbursement"));
+            assertEquals("APPROVED", database.budget(budget.budgetId()).state());
+            assertEquals(
+                    "ACTIVE",
+                    database.reservationRecord(
+                                    database.escrow(budget.escrowId().orElseThrow())
+                                            .reservationId())
+                            .state());
+            assertThrows(
+                    IdempotencyConflictException.class,
+                    () -> approvals.cancel(new CancelBudgetDisbursementApproval(
+                            SERVICE,
+                            "cancel-disbursement-approval",
+                            pending.approvalRequestId(),
+                            INITIATOR,
+                            "Changed cancellation reason")));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> approvals.approve(new ApproveBudgetDisbursementApproval(
+                            SERVICE,
+                            "approve-cancelled-disbursement",
+                            pending.approvalRequestId(),
+                            SECOND_APPROVER,
+                            "Cancelled approval cannot be revived")));
+            assertNull(database.budgetDisbursementApprovalVote(
+                    SERVICE.value(), "approve-cancelled-disbursement"));
+        }
+    }
+
     private static Budget approvedBudget(CivicDatabase database) {
         UUID budgetId = UUID.randomUUID();
         database.createBudget(
