@@ -423,6 +423,78 @@ class BudgetDisbursementApprovalRegistryTest {
         }
     }
 
+    @Test
+    void approvedWithoutPaymentListsOnlyRecoverableExactServiceDecisions() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            Budget budget = approvedBudget(database);
+            scheduleTwoPersonPolicy(database);
+            BudgetDisbursementApprovalRegistry approvals =
+                    new BudgetDisbursementApprovalRegistry(
+                            database, Clock.fixed(EFFECTIVE_AT, ZoneOffset.UTC));
+            BudgetDisbursementApproval approved = approvals.initiate(
+                    new InitiateBudgetDisbursementApproval(
+                            SERVICE,
+                            "recover-approved-disbursement",
+                            NATION_ID,
+                            budget.budgetId(),
+                            RECIPIENT,
+                            MoneyAmount.ofMinorUnits(100L),
+                            INITIATOR,
+                            "Approved before process loss"));
+            approved = approvals.approve(new ApproveBudgetDisbursementApproval(
+                    SERVICE,
+                    "recover-approved-second-vote",
+                    approved.approvalRequestId(),
+                    SECOND_APPROVER,
+                    "Second approval committed before process loss"));
+            approvals.initiate(new InitiateBudgetDisbursementApproval(
+                    SERVICE,
+                    "still-pending-disbursement",
+                    NATION_ID,
+                    budget.budgetId(),
+                    new AccountId(
+                            "player:88888888-8888-8888-8888-888888888888"),
+                    MoneyAmount.ofMinorUnits(100L),
+                    INITIATOR,
+                    "Still waiting for a second Citizen"));
+            ServiceIdentity impostorService =
+                    new ServiceIdentity("impostor-budget-disbursement");
+            BudgetDisbursementApproval impostor = approvals.initiate(
+                    new InitiateBudgetDisbursementApproval(
+                            impostorService,
+                            "impostor-approved-disbursement",
+                            NATION_ID,
+                            budget.budgetId(),
+                            new AccountId(
+                                    "player:99999999-9999-9999-9999-999999999999"),
+                            MoneyAmount.ofMinorUnits(100L),
+                            INITIATOR,
+                            "Another Service Identity decision"));
+            approvals.approve(new ApproveBudgetDisbursementApproval(
+                    impostorService,
+                    "impostor-approved-second-vote",
+                    impostor.approvalRequestId(),
+                    SECOND_APPROVER,
+                    "Second impostor-service vote"));
+
+            assertEquals(
+                    List.of(approved),
+                    approvals.approvedWithoutPayment(SERVICE));
+
+            new BudgetDisbursementPaymentCoordinator(
+                            database,
+                            ignored -> {},
+                            authorization -> authorization.openSession(
+                                    BudgetDisbursementPaymentServiceProvisioner
+                                            .SERVICE_IDENTITY,
+                                    "civiceconomy"))
+                    .prepare(approved.approvalRequestId());
+
+            assertEquals(List.of(), approvals.approvedWithoutPayment(SERVICE));
+        }
+    }
+
     private static Budget approvedBudget(CivicDatabase database) {
         UUID budgetId = UUID.randomUUID();
         database.createBudget(

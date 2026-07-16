@@ -1,5 +1,6 @@
 package org.civiceconomy.fiscal;
 
+import java.util.List;
 import java.util.UUID;
 import java.util.function.Function;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -74,6 +75,16 @@ public final class BudgetDisbursementPaymentCoordinator {
                         approval.amount()));
         return new PreparedBudgetDisbursementPayment(
                 approvalRequestId, transaction, session);
+    }
+
+    public List<PreparedBudgetDisbursementPayment> prepareApprovedPending() {
+        return new BudgetDisbursementApprovalRegistry(
+                        database, java.time.Clock.systemUTC())
+                .approvedWithoutPayment(
+                        NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY)
+                .stream()
+                .map(approval -> prepare(approval.approvalRequestId()))
+                .toList();
     }
 
     public void applyExternal(PreparedBudgetDisbursementPayment prepared) {

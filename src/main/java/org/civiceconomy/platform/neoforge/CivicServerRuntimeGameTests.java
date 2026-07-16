@@ -1163,12 +1163,15 @@ public final class CivicServerRuntimeGameTests {
         String disbursementRequestId = "player-budget-disbursement-" + UUID.randomUUID();
         String cancelledDisbursementRequestId =
                 "cancelled-player-budget-disbursement-" + UUID.randomUUID();
+        String recoveryDisbursementRequestId =
+                "recovery-player-budget-disbursement-" + UUID.randomUUID();
         String tieredPolicyRequestId =
                 "tiered-budget-disbursement-policy-" + UUID.randomUUID();
         String unauthorizedTieredPolicyRequestId =
                 "unauthorized-tiered-budget-disbursement-policy-" + UUID.randomUUID();
         String tieredPolicyReason = "Tiered GameTest procurement governance";
         UUID recipientPlayerId = UUID.randomUUID();
+        UUID recoveryRecipientPlayerId = UUID.randomUUID();
         long expiresAt = java.time.Instant.now()
                 .plus(java.time.Duration.ofDays(1L))
                 .toEpochMilli();
@@ -1202,6 +1205,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean tieredPolicyCommandStarted = new AtomicBoolean();
         AtomicBoolean tieredPolicyReady = new AtomicBoolean();
         AtomicBoolean disbursementCancellationCommandStarted = new AtomicBoolean();
+        AtomicBoolean recoveryDisbursementReady = new AtomicBoolean();
         AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -1887,6 +1891,99 @@ public final class CivicServerRuntimeGameTests {
                             "approval cancellation does not move recipient LC");
                 })
                 .thenExecute(() -> {
+                    clearPlayerBank(recoveryRecipientPlayerId);
+                    runtime.submitDatabase(database -> {
+                                BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                                BudgetDisbursementApprovalRegistry approvals =
+                                        new BudgetDisbursementApprovalRegistry(
+                                                database,
+                                                java.time.Clock.fixed(
+                                                        java.time.Instant.ofEpochMilli(
+                                                                tieredPolicyEffectiveAt + 1L),
+                                                        java.time.ZoneOffset.UTC));
+                                var approval = approvals.initiate(
+                                        new InitiateBudgetDisbursementApproval(
+                                                NationBudgetDisbursementApprovalCoordinator
+                                                        .SERVICE_IDENTITY,
+                                                recoveryDisbursementRequestId,
+                                                nationId.get(),
+                                                budget.budgetId(),
+                                                new AccountId(
+                                                        "player:" + recoveryRecipientPlayerId),
+                                                MoneyAmount.ofMinorUnits(100L),
+                                                actor.getUUID(),
+                                                "Recover approved GameTest procurement"));
+                                return approvals.approve(
+                                        new org.civiceconomy.fiscal
+                                                .ApproveBudgetDisbursementApproval(
+                                                NationBudgetDisbursementApprovalCoordinator
+                                                        .SERVICE_IDENTITY,
+                                                "recovery-second-vote-" + UUID.randomUUID(),
+                                                approval.approvalRequestId(),
+                                                UUID.randomUUID(),
+                                                "Second approval committed before recovery"));
+                            })
+                            .whenComplete((approval, failure) -> {
+                                if (failure != null) {
+                                    asyncFailure.set(failure);
+                                } else if (!"APPROVED".equals(approval.state())) {
+                                    asyncFailure.set(new AssertionError(
+                                            "Recovery fixture did not reach APPROVED"));
+                                } else {
+                                    recoveryDisbursementReady.set(true);
+                                }
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Budget Disbursement recovery setup");
+                    helper.assertTrue(
+                            recoveryDisbursementReady.get(),
+                            "Budget Disbursement recovery fixture ready");
+                    BudgetDisbursementRow recoverable = budgetDisbursementByRequest(
+                            databaseFile, recoveryDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "APPROVED",
+                            recoverable.approvalState(),
+                            "recoverable approval committed before Payment");
+                    helper.assertValueEqual(
+                            0,
+                            recoverable.paymentCount(),
+                            "recoverable approval has no Payment before scan");
+                })
+                .thenExecute(runtime::triggerBudgetDisbursementRecovery)
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Budget Disbursement recovery");
+                    BudgetDisbursementRow recovered = budgetDisbursementByRequest(
+                            databaseFile, recoveryDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "EXECUTED",
+                            recovered.approvalState(),
+                            "recovery executes approved decision");
+                    helper.assertValueEqual(
+                            "CIVIC_COMMITTED",
+                            recovered.paymentState(),
+                            "recovery commits stable Payment");
+                    helper.assertValueEqual(
+                            1, recovered.paymentCount(), "recovery creates one Payment");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    helper.assertValueEqual(
+                            200L,
+                            budget.settledMinorUnits(),
+                            "recovery settles exact Budget amount");
+                    helper.assertValueEqual(
+                            800L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "recovery debits real Treasury LC exactly once");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(recoveryRecipientPlayerId),
+                            "recovery credits exact recipient once");
+                })
+                .thenExecute(() -> {
                     try {
                         BudgetRow budget = budgetByRequest(databaseFile, requestId);
                         String cancellationRequestId =
@@ -1943,13 +2040,13 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertValueEqual(
                             300L, cancellation.reservationAmount(), "original Reservation amount");
                     helper.assertValueEqual(
-                            100L, cancellation.settledAmount(), "preserved settled amount");
+                            200L, cancellation.settledAmount(), "preserved settled amount");
                     helper.assertValueEqual(
-                            200L,
+                            100L,
                             cancellation.reservationAmount() - cancellation.settledAmount(),
                             "only remaining Budget amount released");
                     helper.assertValueEqual(
-                            900L,
+                            800L,
                             LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
                                     .balance(new AccountId(budget.sourceAccount()))
                                     .minorUnits(),
@@ -1958,6 +2055,10 @@ public final class CivicServerRuntimeGameTests {
                             100L,
                             playerBankBalance(recipientPlayerId),
                             "Budget cancellation does not reverse executed Disbursement");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(recoveryRecipientPlayerId),
+                            "Budget cancellation does not reverse recovered Disbursement");
                 })
                 .thenSucceed();
     }

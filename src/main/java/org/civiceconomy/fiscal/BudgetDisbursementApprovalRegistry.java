@@ -104,6 +104,19 @@ public final class BudgetDisbursementApprovalRegistry {
                 .toList();
     }
 
+    public java.util.List<BudgetDisbursementApproval> approvedWithoutPayment(
+            ServiceIdentity serviceIdentity) {
+        if (serviceIdentity == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement recovery Service Identity cannot be null");
+        }
+        return database.approvedBudgetDisbursementApprovalsWithoutPayment(
+                        serviceIdentity.value())
+                .stream()
+                .map(BudgetDisbursementApprovalRegistry::toApproval)
+                .toList();
+    }
+
     public BudgetDisbursementApproval approve(
             ApproveBudgetDisbursementApproval request) {
         StoredBudgetDisbursementApproval replay =

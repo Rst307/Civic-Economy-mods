@@ -195,6 +195,60 @@ class BudgetDisbursementPaymentCoordinatorTest {
         }
     }
 
+    @Test
+    void approvedDecisionWithoutPaymentIsPreparedAndCommittedAfterRestart() {
+        UUID approvalRequestId;
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            Budget budget = approvedBudget(database);
+            BudgetDisbursementApproval approval =
+                    new BudgetDisbursementApprovalRegistry(
+                                    database, Clock.fixed(NOW, ZoneOffset.UTC))
+                            .initiate(new InitiateBudgetDisbursementApproval(
+                                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY,
+                                    "approved-before-payment-preparation",
+                                    NATION_ID,
+                                    budget.budgetId(),
+                                    RECIPIENT,
+                                    MoneyAmount.ofMinorUnits(100L),
+                                    ACTOR,
+                                    "Decision committed before process loss"));
+            approvalRequestId = approval.approvalRequestId();
+
+            assertEquals("APPROVED", approval.state());
+            assertNull(database.paymentTransaction(
+                    "approved-before-payment-preparation"));
+        }
+
+        List<ExternalPayment> effects = new ArrayList<>();
+        try (CivicDatabase reopened = database()) {
+            BudgetDisbursementPaymentCoordinator recovery =
+                    new BudgetDisbursementPaymentCoordinator(
+                            reopened,
+                            effects::add,
+                            authorization -> authorization.openSession(
+                                    BudgetDisbursementPaymentServiceProvisioner
+                                            .SERVICE_IDENTITY,
+                                    "civiceconomy"));
+
+            List<PreparedBudgetDisbursementPayment> prepared =
+                    recovery.prepareApprovedPending();
+
+            assertEquals(1, prepared.size());
+            assertEquals(approvalRequestId, prepared.getFirst().approvalRequestId());
+            recovery.applyExternal(prepared.getFirst());
+            recovery.commit(prepared.getFirst());
+            assertEquals(1, effects.size());
+            assertEquals(List.of(), recovery.prepareApprovedPending());
+            assertEquals(
+                    "EXECUTED",
+                    new BudgetDisbursementApprovalRegistry(
+                                    reopened, Clock.fixed(NOW, ZoneOffset.UTC))
+                            .find(approvalRequestId)
+                            .state());
+        }
+    }
+
     private static Budget approvedBudget(CivicDatabase database) {
         UUID budgetId = UUID.randomUUID();
         database.createBudget(

@@ -292,6 +292,7 @@ public final class CivicServerRuntime {
                 now);
         scheduleDatabaseBackupRecovery(state);
         scheduleFiscalExpiry(state);
+        scheduleBudgetDisbursementRecovery(state);
         scheduleTerritoryPermitMirrorRefresh(state);
         scheduleTerritoryForceLoadRestrictionRefresh(state);
         scheduleNationApplicationExpiry(state);
@@ -351,6 +352,7 @@ public final class CivicServerRuntime {
         if (current.ticksSinceFiscalExpiry >= FISCAL_EXPIRY_INTERVAL_TICKS) {
             current.ticksSinceFiscalExpiry = 0;
             scheduleFiscalExpiry(current);
+            scheduleBudgetDisbursementRecovery(current);
         }
         current.ticksSinceNationApplicationExpiry++;
         if (current.ticksSinceNationApplicationExpiry
@@ -2392,6 +2394,83 @@ public final class CivicServerRuntime {
                 });
     }
 
+    void triggerBudgetDisbursementRecovery() {
+        scheduleBudgetDisbursementRecovery(requireState());
+    }
+
+    private void scheduleBudgetDisbursementRecovery(RuntimeState current) {
+        if (state != current
+                || !current.budgetDisbursementRecoveryQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database ->
+                        new BudgetDisbursementApprovalRegistry(database, recoveryClock)
+                                .approvedWithoutPayment(
+                                        NationBudgetDisbursementApprovalCoordinator
+                                                .SERVICE_IDENTITY)
+                                .stream()
+                                .map(BudgetDisbursementApproval::approvalRequestId)
+                                .toList())
+                .whenComplete((approvalRequestIds, failure) -> {
+                    if (failure != null) {
+                        current.budgetDisbursementRecoveryQueued.set(false);
+                        LOGGER.error(
+                                "Budget Disbursement approval recovery scan failed closed",
+                                failure);
+                    } else {
+                        recoverBudgetDisbursements(
+                                current, approvalRequestIds, 0, 0);
+                    }
+                });
+    }
+
+    private void recoverBudgetDisbursements(
+            RuntimeState current,
+            List<UUID> approvalRequestIds,
+            int index,
+            int recovered) {
+        if (state != current || index >= approvalRequestIds.size()) {
+            current.budgetDisbursementRecoveryQueued.set(false);
+            if (state == current && recovered > 0) {
+                LOGGER.info(
+                        "Recovered {} approved Budget Disbursement payment(s)",
+                        recovered);
+            }
+            return;
+        }
+        UUID approvalRequestId = approvalRequestIds.get(index);
+        current.writer.submitDatabase(database -> {
+                    BudgetDisbursementPaymentCoordinator coordinator =
+                            new BudgetDisbursementPaymentCoordinator(
+                                    database,
+                                    LightmansCurrencyPayments.live(
+                                            current.server.overworld()));
+                    return new PreparedBudgetDisbursementRecovery(
+                            coordinator,
+                            coordinator.prepare(approvalRequestId));
+                })
+                .thenCompose(prepared -> onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.payment());
+                    return prepared;
+                }))
+                .thenCompose(prepared -> current.writer.submitDatabase(database ->
+                        prepared.coordinator().commit(prepared.payment())))
+                .whenComplete((transaction, failure) -> {
+                    if (failure != null) {
+                        LOGGER.warn(
+                                "Budget Disbursement approval {} remains pending recovery",
+                                approvalRequestId,
+                                failure);
+                    }
+                    recoverBudgetDisbursements(
+                            current,
+                            approvalRequestIds,
+                            index + 1,
+                            recovered + (failure == null ? 1 : 0));
+                });
+    }
+
     private void scheduleCitizenshipReconciliation(RuntimeState current) {
         if (!current.citizenshipReconciliationQueued.compareAndSet(false, true)) {
             return;
@@ -3338,6 +3417,8 @@ public final class CivicServerRuntime {
         private final ServerPlayerMintMaterialCustody mintCustody;
         private final long startedAtEpochMillis;
         private final AtomicBoolean fiscalExpiryQueued = new AtomicBoolean();
+        private final AtomicBoolean budgetDisbursementRecoveryQueued =
+                new AtomicBoolean();
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
@@ -3420,6 +3501,10 @@ public final class CivicServerRuntime {
 
     private record PreparedNationalBudgetDisbursement(
             BudgetDisbursementApproval approval,
+            BudgetDisbursementPaymentCoordinator coordinator,
+            PreparedBudgetDisbursementPayment payment) {}
+
+    private record PreparedBudgetDisbursementRecovery(
             BudgetDisbursementPaymentCoordinator coordinator,
             PreparedBudgetDisbursementPayment payment) {}
 

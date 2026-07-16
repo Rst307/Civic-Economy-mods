@@ -7381,6 +7381,46 @@ public final class CivicDatabase implements AutoCloseable {
                 .toList();
     }
 
+    public synchronized List<StoredBudgetDisbursementApproval>
+            approvedBudgetDisbursementApprovalsWithoutPayment(
+                    String serviceIdentity) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement recovery Service Identity cannot be blank");
+        }
+        List<UUID> approvalRequestIds = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval.approval_request_id
+                FROM budget_disbursement_approval_request approval
+                LEFT JOIN payment_transaction payment
+                  ON payment.service_identity = approval.service_identity
+                 AND payment.request_id = approval.request_id
+                LEFT JOIN budget_disbursement_approval_cancellation cancellation
+                  ON cancellation.approval_request_id = approval.approval_request_id
+                WHERE approval.service_identity = ?
+                  AND approval.state = 'APPROVED'
+                  AND payment.transaction_id IS NULL
+                  AND cancellation.cancellation_id IS NULL
+                ORDER BY approval.approved_at_epoch_millis,
+                         approval.approval_request_id
+                """)) {
+            query.setString(1, serviceIdentity);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    approvalRequestIds.add(UUID.fromString(
+                            result.getString("approval_request_id")));
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list approved Budget Disbursements awaiting Payment",
+                    failure);
+        }
+        return approvalRequestIds.stream()
+                .map(this::budgetDisbursementApproval)
+                .toList();
+    }
+
     public synchronized StoredBudgetDisbursementApproval budgetDisbursementApprovalVote(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""

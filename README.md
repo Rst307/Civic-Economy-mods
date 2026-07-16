@@ -160,7 +160,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `nation budget approve` 允许具有本国 `APPROVE_BUDGET` 的 effective Citizen 批准本国 National Treasury 的 `DRAFT`。同一 Citizen 可以编制并批准；服务端先校验真实玩家、FTB Team、Citizenship、Nation、权限和 Budget source，再在服务器线程读取真实 LC Treasury 余额，最后于 SQLite 单写线程原子创建唯一 Reservation/Escrow 并推进为 `APPROVED`。批准只预占可用额度，不移动 LC；actor、reason、request 和时间持久化审计，同 request replay 不会创建第二个 hold，改变 Budget、actor 或 reason 会冲突。
 
-`nation budget disbursement request` 允许具有本国 `INITIATE_PAYMENT` 的 effective Citizen 从一个本国已批准 Budget 发起精确拨款。服务端从真实玩家、FTB Team、Citizenship/Nation 和持久化 Budget 派生 National Treasury，只接受收款玩家 UUID、正金额、稳定 request ID 和理由；审批对象固定 Budget、收款账户、金额、发起人、政策版本、所需人数和到期时间。多个活动审批不能累计超过 Budget 的未结算 Reservation 余量。发起人自动投第一票；若固定门槛为一人，系统立即进入既有 SQLite `PREPARED` → 服务器线程真实 LC 转账 → SQLite `CIVIC_COMMITTED` 路径，并原子推进 Reservation、Escrow、Budget 与审批 `EXECUTED`。重放与恢复复用同一 Payment UUID，不会再次扣款。
+`nation budget disbursement request` 允许具有本国 `INITIATE_PAYMENT` 的 effective Citizen 从一个本国已批准 Budget 发起精确拨款。服务端从真实玩家、FTB Team、Citizenship/Nation 和持久化 Budget 派生 National Treasury，只接受收款玩家 UUID、正金额、稳定 request ID 和理由；审批对象固定 Budget、收款账户、金额、发起人、政策版本、所需人数和到期时间。多个活动审批不能累计超过 Budget 的未结算 Reservation 余量。发起人自动投第一票；若固定门槛为一人，系统立即进入既有 SQLite `PREPARED` → 服务器线程真实 LC 转账 → SQLite `CIVIC_COMMITTED` 路径，并原子推进 Reservation、Escrow、Budget 与审批 `EXECUTED`。如果进程在审批已持久化为 `APPROVED`、但尚未创建 Payment 的窗口停止，启动和每分钟恢复扫描会按精确内部 Service Identity 逐条补建同一稳定 Payment、在服务器线程执行真实 LC、再由 SQLite 单写线程提交；单条失败不会阻断其他审批，`PENDING`、`CANCELLED`、`EXPIRED`、已有 Payment 或已执行决定不会被该扫描重写。
 
 `nation budget disbursement approve` 允许另一名具有同一 Nation `APPROVE_PAYMENT` 的 effective Citizen 为仍为 `PENDING` 的精确审批投票；同一 Citizen 不能重复计票，达到发起时固定的人数后才会创建 Payment。`PENDING` 审批到期时由后台 SQLite 扫描转为 `EXPIRED`，不会创建 Payment 或调用 LC，并释放其占用的 Budget 授权容量。
 
