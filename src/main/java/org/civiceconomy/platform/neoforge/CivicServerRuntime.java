@@ -37,6 +37,7 @@ import org.civiceconomy.fiscal.EscrowExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalBillExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.FiscalBill;
+import org.civiceconomy.fiscal.FiscalBillCancellationCoordinator;
 import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
 import org.civiceconomy.fiscal.FiscalBillFundingCoordinator;
 import org.civiceconomy.fiscal.FiscalBillInspection;
@@ -653,6 +654,16 @@ public final class CivicServerRuntime {
                     return new FiscalBillInspection(database)
                             .statusForPayer(actorPlayerId, billId);
                 }));
+    }
+
+    CompletableFuture<FiscalBill> cancelPlayerFiscalBill(
+            ServerPlayer actor, UUID billId, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return current.writer.submitDatabase(database ->
+                new FiscalBillCancellationCoordinator(database, commandClock)
+                        .cancel(actorPlayerId, billId, requestId, reason));
     }
 
     CompletableFuture<List<FiscalBill>> nationFiscalBills(ServerPlayer actor) {

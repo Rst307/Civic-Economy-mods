@@ -45,6 +45,8 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.ExternalPayment;
+import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
@@ -532,7 +534,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Fiscal Bill command actions");
         helper.assertValueEqual(
-                Set.of("list", "status", "fund", "pay"),
+                Set.of("list", "status", "fund", "pay", "cancel"),
                 economy.getChild("bill").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -1122,6 +1124,7 @@ public final class CivicServerRuntimeGameTests {
         UUID payerId = payer.getUUID();
         String unauthorizedRequestId = "unauthorized-bill-" + UUID.randomUUID();
         String requestId = "player-bill-" + UUID.randomUUID();
+        String cancellationIssueRequestId = "player-cancel-bill-" + UUID.randomUUID();
         long dueAt = java.time.Instant.now().plus(java.time.Duration.ofDays(1L)).toEpochMilli();
         AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
@@ -1136,6 +1139,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<org.civiceconomy.fiscal.FiscalBill> nationBill =
                 new AtomicReference<>();
         AtomicReference<UUID> billId = new AtomicReference<>();
+        AtomicReference<UUID> cancellationBillId = new AtomicReference<>();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean unauthorizedFinished = new AtomicBoolean();
         AtomicBoolean permissionReady = new AtomicBoolean();
@@ -1146,6 +1150,9 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean fundingCommandsStarted = new AtomicBoolean();
         AtomicBoolean paymentCommandsStarted = new AtomicBoolean();
+        AtomicBoolean cancellationBillIssued = new AtomicBoolean();
+        AtomicBoolean cancellationFundingCommandsStarted = new AtomicBoolean();
+        AtomicBoolean cancellationCommandsStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1439,7 +1446,8 @@ public final class CivicServerRuntimeGameTests {
                             billId.get(),
                             payerId,
                             "fund-player-bill-" + billId.get(),
-                            "nation:" + nationId.get().value() + ":treasury");
+                            "nation:" + nationId.get().value() + ":treasury",
+                            300L);
                     helper.assertValueEqual(
                             1_000L,
                             playerBankBalance(payerId),
@@ -1484,6 +1492,109 @@ public final class CivicServerRuntimeGameTests {
                                     .balance(new AccountId(beneficiary))
                                     .minorUnits(),
                             "Fiscal Bill payment credits persisted beneficiary once");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            var stored = database.issueFiscalBill(
+                                    UUID.randomUUID(),
+                                    FiscalBillFiscalServiceProvisioner
+                                            .SERVICE_IDENTITY
+                                            .value(),
+                                    cancellationIssueRequestId,
+                                    "player:" + payerId,
+                                    "nation:" + nationId.get().value() + ":treasury",
+                                    100L,
+                                    FiscalBillKind.FEE.name(),
+                                    "Cancelled player fee",
+                                    java.time.Instant.now()
+                                            .plus(java.time.Duration.ofDays(1L))
+                                            .toEpochMilli());
+                            cancellationBillId.set(stored.billId());
+                            cancellationBillIssued.set(true);
+                            return null;
+                        })
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "cancellation Bill issuance");
+                    helper.assertTrue(cancellationBillIssued.get(), "cancellation Bill issued");
+                    helper.assertTrue(cancellationBillId.get() != null, "cancellation Bill ID");
+                })
+                .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
+                    try {
+                        String command = "civic economy bill fund " + cancellationBillId.get()
+                                + " fund-cancel-bill-" + cancellationBillId.get();
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        int first = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        int replay = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        helper.assertValueEqual(
+                                1, first, "cancellation Bill funding command result");
+                        helper.assertValueEqual(
+                                1, replay, "cancellation Bill funding replay result");
+                        cancellationFundingCommandsStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "cancellation Bill funding command");
+                    helper.assertTrue(
+                            cancellationFundingCommandsStarted.get(),
+                            "cancellation Bill funding commands started");
+                    assertFundedFiscalBill(
+                            helper,
+                            databaseFile,
+                            cancellationBillId.get(),
+                            payerId,
+                            "fund-cancel-bill-" + cancellationBillId.get(),
+                            "nation:" + nationId.get().value() + ":treasury",
+                            100L);
+                })
+                .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
+                    try {
+                        String command = "civic economy bill cancel "
+                                + cancellationBillId.get()
+                                + " cancel-player-bill-" + cancellationBillId.get()
+                                + " Payer withdrew the fee";
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        int first = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        int replay = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        helper.assertValueEqual(1, first, "Fiscal Bill cancellation result");
+                        helper.assertValueEqual(1, replay, "Fiscal Bill cancellation replay");
+                        cancellationCommandsStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill cancellation command");
+                    helper.assertTrue(
+                            cancellationCommandsStarted.get(),
+                            "Fiscal Bill cancellation commands started");
+                    assertCancelledFiscalBill(
+                            helper,
+                            databaseFile,
+                            cancellationBillId.get(),
+                            "cancel-player-bill-" + cancellationBillId.get(),
+                            "Payer withdrew the fee");
+                    helper.assertValueEqual(
+                            700L,
+                            playerBankBalance(payerId),
+                            "Fiscal Bill cancellation does not move payer LC");
+                    helper.assertValueEqual(
+                            300L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(
+                                            "nation:" + nationId.get().value() + ":treasury"))
+                                    .minorUnits(),
+                            "Fiscal Bill cancellation does not move beneficiary LC");
                 })
                 .thenSucceed();
     }
@@ -4783,7 +4894,8 @@ public final class CivicServerRuntimeGameTests {
             UUID billId,
             UUID payerId,
             String fundingRequestId,
-            String beneficiaryAccount) {
+            String beneficiaryAccount,
+            long amountMinorUnits) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
                 var query = connection.prepareStatement("""
                         SELECT b.state, b.funding_service_identity, b.funding_request_id,
@@ -4818,13 +4930,59 @@ public final class CivicServerRuntimeGameTests {
                 helper.assertValueEqual("RESERVED", result.getString(6), "Escrow state");
                 helper.assertValueEqual(
                         "player:" + payerId, result.getString(7), "Reservation payer");
-                helper.assertValueEqual(300L, result.getLong(8), "Reservation amount");
+                helper.assertValueEqual(
+                        amountMinorUnits, result.getLong(8), "Reservation amount");
                 helper.assertValueEqual("ACTIVE", result.getString(9), "Reservation state");
                 helper.assertValueEqual(1, result.getInt(10), "one funding Reservation");
                 helper.assertValueEqual(1, result.getInt(11), "one funding Escrow");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect funded Fiscal Bill", failure);
+        }
+    }
+
+    private static void assertCancelledFiscalBill(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID billId,
+            String cancellationRequestId,
+            String reason) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT b.state, e.state, r.state, r.settled_minor_units,
+                               rr.reason,
+                               (SELECT COUNT(*) FROM reservation_release
+                                WHERE service_identity = ? AND request_id = ?),
+                               (SELECT COUNT(*) FROM payment_transaction
+                                WHERE reservation_id = r.reservation_id)
+                        FROM fiscal_bill b
+                        JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                        JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                        JOIN reservation_release rr
+                          ON rr.reservation_id = r.reservation_id
+                        WHERE b.bill_id = ?
+                          AND rr.service_identity = ?
+                          AND rr.request_id = ?
+                        """)) {
+            String serviceIdentity = "civiceconomy-fiscal-bill-cancellation";
+            query.setString(1, serviceIdentity);
+            query.setString(2, cancellationRequestId);
+            query.setString(3, billId.toString());
+            query.setString(4, serviceIdentity);
+            query.setString(5, cancellationRequestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "cancelled Fiscal Bill row");
+                helper.assertValueEqual("CANCELLED", result.getString(1), "cancelled Bill state");
+                helper.assertValueEqual("RELEASED", result.getString(2), "cancelled Escrow state");
+                helper.assertValueEqual(
+                        "RELEASED", result.getString(3), "cancelled Reservation state");
+                helper.assertValueEqual(0L, result.getLong(4), "cancelled settled amount");
+                helper.assertValueEqual(reason, result.getString(5), "cancellation reason");
+                helper.assertValueEqual(1, result.getInt(6), "one cancellation release");
+                helper.assertValueEqual(0, result.getInt(7), "cancellation creates no payment");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect cancelled Fiscal Bill", failure);
         }
     }
 

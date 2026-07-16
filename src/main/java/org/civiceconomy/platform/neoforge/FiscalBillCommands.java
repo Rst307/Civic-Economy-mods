@@ -44,7 +44,21 @@ final class FiscalBillCommands {
                                                 context.getSource(),
                                                 UuidArgument.getUuid(context, "billId"),
                                                 StringArgumentType.getString(
-                                                        context, "requestId"))))));
+                                                        context, "requestId"))))))
+                .then(Commands.literal("cancel")
+                        .then(Commands.argument("billId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> cancel(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "billId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))));
     }
 
     private static int listForPayer(CommandSourceStack source)
@@ -120,6 +134,26 @@ final class FiscalBillCommands {
                     }
                 }));
         source.sendSuccess(() -> Component.literal("Fiscal Bill payment queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int cancel(
+            CommandSourceStack source, UUID billId, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .cancelPlayerFiscalBill(player, billId, requestId, reason)
+                .whenComplete((bill, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Fiscal Bill cancellation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Cancelled " + formatFiscalBill(bill)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Fiscal Bill cancellation queued"), false);
         return Command.SINGLE_SUCCESS;
     }
 
