@@ -133,6 +133,41 @@ public final class PaymentCoordinator {
         return transaction;
     }
 
+    PaymentTransaction confirmRecovery(PaymentTransaction prepared) {
+        java.util.Objects.requireNonNull(prepared, "Payment transaction cannot be null");
+        requireSessionIdentity(prepared.serviceIdentity());
+        PaymentTransaction transaction = toTransaction(
+                database.paymentTransaction(prepared.transactionId()));
+        if (!transaction.serviceIdentity().equals(prepared.serviceIdentity())
+                || !transaction.requestId().equals(prepared.requestId())
+                || !transaction.reservationId().equals(prepared.reservationId())
+                || !transaction.sourceAccount().equals(prepared.sourceAccount())
+                || !transaction.recipientAccount().equals(prepared.recipientAccount())
+                || !transaction.amount().equals(prepared.amount())
+                || transaction.kind() != PaymentKind.PAYMENT) {
+            throw new IdempotencyConflictException(
+                    prepared.serviceIdentity(), prepared.requestId());
+        }
+        long recoveredAt = System.currentTimeMillis();
+        if (transaction.state() == TransactionState.PREPARED) {
+            database.markExternalAppliedDuringRecovery(
+                    transaction.transactionId(), recoveredAt);
+            transaction = toTransaction(
+                    database.paymentTransaction(transaction.transactionId()));
+        }
+        if (transaction.state() == TransactionState.EXTERNAL_APPLIED) {
+            commit(transaction, true);
+            transaction = toTransaction(
+                    database.paymentTransaction(transaction.transactionId()));
+        }
+        if (transaction.state() != TransactionState.CIVIC_COMMITTED) {
+            throw new IllegalStateException(
+                    "Payment transaction has inconsistent recovery state "
+                            + transaction.transactionId());
+        }
+        return transaction;
+    }
+
     public PaymentTransaction refund(RefundPayment request, FailurePoint failurePoint) {
         requireSessionIdentity(request.serviceIdentity());
         StoredPaymentTransaction original = database.paymentTransaction(request.originalTransactionId());
@@ -376,7 +411,7 @@ public final class PaymentCoordinator {
         }
     }
 
-    private static PaymentTransaction toTransaction(StoredPaymentTransaction stored) {
+    static PaymentTransaction toTransaction(StoredPaymentTransaction stored) {
         return new PaymentTransaction(
                 stored.transactionId(),
                 new ServiceIdentity(stored.serviceIdentity()),

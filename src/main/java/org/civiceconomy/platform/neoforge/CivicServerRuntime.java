@@ -38,6 +38,8 @@ import org.civiceconomy.fiscal.BudgetFiscalServiceProvisioner;
 import org.civiceconomy.fiscal.BudgetDisbursementApproval;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalOutcome;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalStatus;
+import org.civiceconomy.fiscal.BudgetDisbursementRecoveryInspection;
+import org.civiceconomy.fiscal.BudgetDisbursementRecoveryStatus;
 import org.civiceconomy.fiscal.BudgetDisbursementInspection;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyRegistry;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyVersion;
@@ -1414,6 +1416,16 @@ public final class CivicServerRuntime {
                         .status(TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY));
     }
 
+    CompletableFuture<BudgetDisbursementRecoveryStatus>
+            budgetDisbursementRecoveryStatus() {
+        RuntimeState current = requireState();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return current.writer.submitDatabase(database ->
+                new BudgetDisbursementRecoveryInspection(database, commandClock)
+                        .status(NationBudgetDisbursementApprovalCoordinator
+                                .SERVICE_IDENTITY));
+    }
+
     CompletableFuture<MintBatch> startMintBatch(
             ServerPlayer actor,
             String requestId,
@@ -2430,13 +2442,12 @@ public final class CivicServerRuntime {
             List<UUID> approvalRequestIds,
             int index,
             int recovered) {
-        if (state != current || index >= approvalRequestIds.size()) {
+        if (state != current) {
             current.budgetDisbursementRecoveryQueued.set(false);
-            if (state == current && recovered > 0) {
-                LOGGER.info(
-                        "Recovered {} approved Budget Disbursement payment(s)",
-                        recovered);
-            }
+            return;
+        }
+        if (index >= approvalRequestIds.size()) {
+            scanIncompleteBudgetDisbursements(current, recovered);
             return;
         }
         UUID approvalRequestId = approvalRequestIds.get(index);
@@ -2468,6 +2479,95 @@ public final class CivicServerRuntime {
                             approvalRequestIds,
                             index + 1,
                             recovered + (failure == null ? 1 : 0));
+                });
+    }
+
+    private void scanIncompleteBudgetDisbursements(
+            RuntimeState current, int recoveredApproved) {
+        current.writer.submitDatabase(database ->
+                        database.incompleteBudgetDisbursementPayments(
+                                        NationBudgetDisbursementApprovalCoordinator
+                                                .SERVICE_IDENTITY
+                                                .value())
+                                .stream()
+                                .map(org.civiceconomy.persistence.StoredPaymentTransaction
+                                        ::transactionId)
+                                .toList())
+                .whenComplete((transactionIds, failure) -> {
+                    if (failure != null) {
+                        current.budgetDisbursementRecoveryQueued.set(false);
+                        LOGGER.error(
+                                "Incomplete Budget Disbursement payment recovery scan failed closed",
+                                failure);
+                    } else {
+                        recoverIncompleteBudgetDisbursements(
+                                current,
+                                transactionIds,
+                                0,
+                                recoveredApproved,
+                                0);
+                    }
+                });
+    }
+
+    private void recoverIncompleteBudgetDisbursements(
+            RuntimeState current,
+            List<UUID> transactionIds,
+            int index,
+            int recoveredApproved,
+            int recoveredIncomplete) {
+        if (state != current) {
+            current.budgetDisbursementRecoveryQueued.set(false);
+            return;
+        }
+        if (index >= transactionIds.size()) {
+            current.budgetDisbursementRecoveryQueued.set(false);
+            if (recoveredApproved > 0 || recoveredIncomplete > 0) {
+                LOGGER.info(
+                        "Recovered {} approved-without-Payment and {} incomplete Budget Disbursement payment(s)",
+                        recoveredApproved,
+                        recoveredIncomplete);
+            }
+            return;
+        }
+        UUID transactionId = transactionIds.get(index);
+        current.writer.submitDatabase(database -> {
+                    BudgetDisbursementPaymentCoordinator coordinator =
+                            new BudgetDisbursementPaymentCoordinator(
+                                    database,
+                                    LightmansCurrencyPayments.live(
+                                            current.server.overworld()));
+                    PreparedBudgetDisbursementPayment payment =
+                            coordinator.recoverableIncomplete().stream()
+                                    .filter(candidate -> candidate.transaction()
+                                            .transactionId()
+                                            .equals(transactionId))
+                                    .findFirst()
+                                    .orElseThrow(() -> new IllegalStateException(
+                                            "Budget Disbursement payment is no longer recoverable "
+                                                    + transactionId));
+                    return new PreparedBudgetDisbursementRecovery(
+                            coordinator, payment);
+                })
+                .thenCompose(prepared -> onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.payment());
+                    return prepared;
+                }))
+                .thenCompose(prepared -> current.writer.submitDatabase(database ->
+                        prepared.coordinator().commitRecovery(prepared.payment())))
+                .whenComplete((transaction, failure) -> {
+                    if (failure != null) {
+                        LOGGER.warn(
+                                "Incomplete Budget Disbursement payment {} remains pending recovery",
+                                transactionId,
+                                failure);
+                    }
+                    recoverIncompleteBudgetDisbursements(
+                            current,
+                            transactionIds,
+                            index + 1,
+                            recoveredApproved,
+                            recoveredIncomplete + (failure == null ? 1 : 0));
                 });
     }
 

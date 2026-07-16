@@ -87,6 +87,32 @@ public final class BudgetDisbursementPaymentCoordinator {
                 .toList();
     }
 
+    public List<PreparedBudgetDisbursementPayment> recoverableIncomplete() {
+        FiscalAuthorization authorization = new FiscalAuthorization(database);
+        FiscalServiceSession session = sessionFactory.apply(authorization);
+        session.requireIdentity(
+                BudgetDisbursementPaymentServiceProvisioner.SERVICE_IDENTITY);
+        return database.incompleteBudgetDisbursementPayments(
+                        BudgetDisbursementPaymentServiceProvisioner
+                                .SERVICE_IDENTITY
+                                .value())
+                .stream()
+                .map(stored -> {
+                    var approval = database.budgetDisbursementApproval(
+                            stored.serviceIdentity(), stored.requestId());
+                    if (approval == null) {
+                        throw new IllegalStateException(
+                                "Incomplete Budget Disbursement Payment has no exact approval "
+                                        + stored.transactionId());
+                    }
+                    return new PreparedBudgetDisbursementPayment(
+                            approval.approvalRequestId(),
+                            PaymentCoordinator.toTransaction(stored),
+                            session);
+                })
+                .toList();
+    }
+
     public void applyExternal(PreparedBudgetDisbursementPayment prepared) {
         requirePrepared(prepared);
         PaymentCoordinator.authorized(database, externalPayments, prepared.session())
@@ -97,6 +123,13 @@ public final class BudgetDisbursementPaymentCoordinator {
         requirePrepared(prepared);
         return PaymentCoordinator.authorized(database, externalPayments, prepared.session())
                 .confirmExternalApplied(prepared.transaction());
+    }
+
+    public PaymentTransaction commitRecovery(
+            PreparedBudgetDisbursementPayment prepared) {
+        requirePrepared(prepared);
+        return PaymentCoordinator.authorized(database, externalPayments, prepared.session())
+                .confirmRecovery(prepared.transaction());
     }
 
     private static void requirePrepared(PreparedBudgetDisbursementPayment prepared) {

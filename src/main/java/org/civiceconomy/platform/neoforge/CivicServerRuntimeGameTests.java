@@ -45,6 +45,8 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalRegistry;
+import org.civiceconomy.fiscal.BudgetDisbursementPaymentCoordinator;
+import org.civiceconomy.fiscal.BudgetFiscalServiceProvisioner;
 import org.civiceconomy.fiscal.ExternalPayment;
 import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
 import org.civiceconomy.fiscal.FiscalBillKind;
@@ -501,6 +503,20 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "read-only Treasury Withdrawal recovery actions");
+        helper.assertValueEqual(
+                Set.of("recovery"),
+                economy.getChild("admin").getChild("budget-disbursement")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted Budget Disbursement recovery inspection actions");
+        helper.assertValueEqual(
+                Set.of("status"),
+                economy.getChild("admin").getChild("budget-disbursement")
+                        .getChild("recovery").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "read-only Budget Disbursement recovery actions");
         helper.assertValueEqual(
                 Set.of("status", "trigger", "restore"),
                 backup.getChildren().stream()
@@ -1147,7 +1163,7 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
-    @GameTest(template = "empty", timeoutTicks = 600, batch = "runtime-budget-command")
+    @GameTest(template = "empty", timeoutTicks = 1200, batch = "runtime-budget-command")
     public static void authorizedNationPlayerCreatesExactBudgetDraftOffThread(
             GameTestHelper helper) {
         ServerPlayer actor = new ServerPlayer(
@@ -1165,6 +1181,8 @@ public final class CivicServerRuntimeGameTests {
                 "cancelled-player-budget-disbursement-" + UUID.randomUUID();
         String recoveryDisbursementRequestId =
                 "recovery-player-budget-disbursement-" + UUID.randomUUID();
+        String preparedRecoveryDisbursementRequestId =
+                "prepared-recovery-player-budget-disbursement-" + UUID.randomUUID();
         String tieredPolicyRequestId =
                 "tiered-budget-disbursement-policy-" + UUID.randomUUID();
         String unauthorizedTieredPolicyRequestId =
@@ -1172,6 +1190,7 @@ public final class CivicServerRuntimeGameTests {
         String tieredPolicyReason = "Tiered GameTest procurement governance";
         UUID recipientPlayerId = UUID.randomUUID();
         UUID recoveryRecipientPlayerId = UUID.randomUUID();
+        UUID preparedRecoveryRecipientPlayerId = UUID.randomUUID();
         long expiresAt = java.time.Instant.now()
                 .plus(java.time.Duration.ofDays(1L))
                 .toEpochMilli();
@@ -1206,6 +1225,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean tieredPolicyReady = new AtomicBoolean();
         AtomicBoolean disbursementCancellationCommandStarted = new AtomicBoolean();
         AtomicBoolean recoveryDisbursementReady = new AtomicBoolean();
+        AtomicBoolean preparedRecoveryDisbursementReady = new AtomicBoolean();
         AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -1984,6 +2004,141 @@ public final class CivicServerRuntimeGameTests {
                             "recovery credits exact recipient once");
                 })
                 .thenExecute(() -> {
+                    clearPlayerBank(preparedRecoveryRecipientPlayerId);
+                    runtime.submitDatabase(database -> {
+                                UUID preparedBudgetId = UUID.randomUUID();
+                                String preparedBudgetRequestId =
+                                        "prepared-recovery-budget-" + UUID.randomUUID();
+                                AccountId treasury = new AccountId(
+                                        "nation:" + nationId.get().value() + ":treasury");
+                                database.createBudget(
+                                        preparedBudgetId,
+                                        BudgetFiscalServiceProvisioner
+                                                .SERVICE_IDENTITY
+                                                .value(),
+                                        preparedBudgetRequestId,
+                                        treasury.value(),
+                                        100L,
+                                        "PUBLIC_WORKS",
+                                        "Prepared recovery GameTest Budget",
+                                        expiresAt);
+                                database.approveBudget(
+                                        UUID.randomUUID(),
+                                        UUID.randomUUID(),
+                                        UUID.randomUUID(),
+                                        BudgetFiscalServiceProvisioner
+                                                .SERVICE_IDENTITY
+                                                .value(),
+                                        "approve-" + preparedBudgetRequestId,
+                                        preparedBudgetId,
+                                        actor.getUUID(),
+                                        "Approve prepared recovery Budget",
+                                        java.time.Instant.now().toEpochMilli());
+                                BudgetDisbursementApprovalRegistry approvals =
+                                        new BudgetDisbursementApprovalRegistry(
+                                                database,
+                                                java.time.Clock.fixed(
+                                                        java.time.Instant.ofEpochMilli(
+                                                                tieredPolicyEffectiveAt + 1L),
+                                                        java.time.ZoneOffset.UTC));
+                                var approval = approvals.initiate(
+                                        new InitiateBudgetDisbursementApproval(
+                                                NationBudgetDisbursementApprovalCoordinator
+                                                        .SERVICE_IDENTITY,
+                                                preparedRecoveryDisbursementRequestId,
+                                                nationId.get(),
+                                                preparedBudgetId,
+                                                new AccountId(
+                                                        "player:"
+                                                                + preparedRecoveryRecipientPlayerId),
+                                                MoneyAmount.ofMinorUnits(100L),
+                                                actor.getUUID(),
+                                                "Recover an already prepared payment"));
+                                approval = approvals.approve(
+                                        new org.civiceconomy.fiscal
+                                                .ApproveBudgetDisbursementApproval(
+                                                NationBudgetDisbursementApprovalCoordinator
+                                                        .SERVICE_IDENTITY,
+                                                "prepared-recovery-second-vote-"
+                                                        + UUID.randomUUID(),
+                                                approval.approvalRequestId(),
+                                                UUID.randomUUID(),
+                                                "Second approval before Payment preparation"));
+                                new BudgetDisbursementPaymentCoordinator(
+                                                database, ignored -> {})
+                                        .prepare(approval.approvalRequestId());
+                                return approval;
+                            })
+                            .whenComplete((approval, failure) -> {
+                                if (failure != null) {
+                                    asyncFailure.set(failure);
+                                } else {
+                                    preparedRecoveryDisbursementReady.set(true);
+                                }
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Prepared Budget Disbursement recovery setup");
+                    helper.assertTrue(
+                            preparedRecoveryDisbursementReady.get(),
+                            "Prepared Budget Disbursement recovery fixture ready");
+                    BudgetDisbursementRow recoverable = budgetDisbursementByRequest(
+                            databaseFile, preparedRecoveryDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "APPROVED",
+                            recoverable.approvalState(),
+                            "prepared recovery approval remains approved");
+                    helper.assertValueEqual(
+                            "PREPARED",
+                            recoverable.paymentState(),
+                            "prepared recovery Payment exists before scan");
+                })
+                .thenExecute(() -> helper.getLevel()
+                        .getServer()
+                        .getCommands()
+                        .performPrefixedCommand(
+                                helper.getLevel().getServer().createCommandSourceStack(),
+                                "civic economy admin budget-disbursement recovery status"))
+                .thenWaitUntil(() -> {
+                    BudgetDisbursementRow inspected = budgetDisbursementByRequest(
+                            databaseFile, preparedRecoveryDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "APPROVED",
+                            inspected.approvalState(),
+                            "recovery inspection preserves approval state");
+                    helper.assertValueEqual(
+                            "PREPARED",
+                            inspected.paymentState(),
+                            "recovery inspection preserves Payment state");
+                })
+                .thenExecute(runtime::triggerBudgetDisbursementRecovery)
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Prepared Budget Disbursement recovery");
+                    BudgetDisbursementRow recovered = budgetDisbursementByRequest(
+                            databaseFile, preparedRecoveryDisbursementRequestId);
+                    helper.assertValueEqual(
+                            "EXECUTED",
+                            recovered.approvalState(),
+                            "prepared recovery executes approved decision");
+                    helper.assertValueEqual(
+                            "CIVIC_COMMITTED",
+                            recovered.paymentState(),
+                            "prepared recovery commits stable Payment");
+                    helper.assertValueEqual(
+                            700L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(
+                                            "nation:" + nationId.get().value() + ":treasury"))
+                                    .minorUnits(),
+                            "prepared recovery debits real Treasury LC once");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(preparedRecoveryRecipientPlayerId),
+                            "prepared recovery credits exact recipient once");
+                })
+                .thenExecute(() -> {
                     try {
                         BudgetRow budget = budgetByRequest(databaseFile, requestId);
                         String cancellationRequestId =
@@ -2046,7 +2201,7 @@ public final class CivicServerRuntimeGameTests {
                             cancellation.reservationAmount() - cancellation.settledAmount(),
                             "only remaining Budget amount released");
                     helper.assertValueEqual(
-                            800L,
+                            700L,
                             LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
                                     .balance(new AccountId(budget.sourceAccount()))
                                     .minorUnits(),
@@ -2059,6 +2214,10 @@ public final class CivicServerRuntimeGameTests {
                             100L,
                             playerBankBalance(recoveryRecipientPlayerId),
                             "Budget cancellation does not reverse recovered Disbursement");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(preparedRecoveryRecipientPlayerId),
+                            "Budget cancellation does not reverse prepared recovery Disbursement");
                 })
                 .thenSucceed();
     }

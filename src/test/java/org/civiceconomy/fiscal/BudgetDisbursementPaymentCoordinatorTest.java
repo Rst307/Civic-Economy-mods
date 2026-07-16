@@ -138,6 +138,7 @@ class BudgetDisbursementPaymentCoordinatorTest {
         ExternalPayments idempotentExternal = payment -> applied.add(payment.transactionId());
         UUID approvalRequestId;
         UUID budgetId;
+        UUID transactionId;
         try (CivicDatabase database = database()) {
             registerNation(database);
             Budget budget = approvedBudget(database);
@@ -165,6 +166,7 @@ class BudgetDisbursementPaymentCoordinatorTest {
                                     "civiceconomy"));
             PreparedBudgetDisbursementPayment prepared =
                     coordinator.prepare(approvalRequestId);
+            transactionId = prepared.transaction().transactionId();
 
             coordinator.applyExternal(prepared);
             database.markExternalApplied(prepared.transaction().transactionId());
@@ -179,9 +181,34 @@ class BudgetDisbursementPaymentCoordinatorTest {
         }
 
         try (CivicDatabase reopened = database()) {
-            new PaymentCoordinator(reopened, idempotentExternal).recoverIncomplete();
+            BudgetDisbursementPaymentCoordinator recovery =
+                    new BudgetDisbursementPaymentCoordinator(
+                            reopened,
+                            idempotentExternal,
+                            authorization -> authorization.openSession(
+                                    BudgetDisbursementPaymentServiceProvisioner
+                                            .SERVICE_IDENTITY,
+                                    "civiceconomy"));
+            List<PreparedBudgetDisbursementPayment> recoverable =
+                    recovery.recoverableIncomplete();
+
+            assertEquals(1, recoverable.size());
+            assertEquals(transactionId, recoverable.getFirst().transaction().transactionId());
+            assertEquals(
+                    TransactionState.EXTERNAL_APPLIED,
+                    recoverable.getFirst().transaction().state());
+            recovery.applyExternal(recoverable.getFirst());
+            PaymentTransaction committed = recovery.commitRecovery(recoverable.getFirst());
 
             assertEquals(1, applied.size());
+            assertEquals(TransactionState.CIVIC_COMMITTED, committed.state());
+            assertEquals(
+                    List.of(RecoveryAction.RECOVERY_CIVIC_COMMITTED),
+                    new PaymentCoordinator(reopened, idempotentExternal)
+                            .recoveryAudit(transactionId)
+                            .stream()
+                            .map(RecoveryAuditEntry::action)
+                            .toList());
             assertEquals(
                     "EXECUTED",
                     new BudgetDisbursementApprovalRegistry(
@@ -192,6 +219,102 @@ class BudgetDisbursementPaymentCoordinatorTest {
             assertEquals(BudgetState.PARTIALLY_SPENT, recovered.state());
             assertEquals(MoneyAmount.ofMinorUnits(100L), recovered.settledAmount());
             assertEquals(MoneyAmount.ofMinorUnits(200L), recovered.remainingAmount());
+        }
+    }
+
+    @Test
+    void incompleteRecoveryListsOnlyPaymentsOwnedByTheExactServiceIdentity() {
+        List<ExternalPayment> effects = new ArrayList<>();
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            Budget exactBudget = approvedBudget(database, "exact-recovery");
+            BudgetDisbursementApproval exactApproval =
+                    new BudgetDisbursementApprovalRegistry(
+                                    database, Clock.fixed(NOW, ZoneOffset.UTC))
+                            .initiate(new InitiateBudgetDisbursementApproval(
+                                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY,
+                                    "exact-incomplete-payment",
+                                    NATION_ID,
+                                    exactBudget.budgetId(),
+                                    RECIPIENT,
+                                    MoneyAmount.ofMinorUnits(100L),
+                                    ACTOR,
+                                    "Exact Service Identity recovery"));
+            BudgetDisbursementPaymentCoordinator coordinator =
+                    new BudgetDisbursementPaymentCoordinator(
+                            database,
+                            effects::add,
+                            authorization -> authorization.openSession(
+                                    BudgetDisbursementPaymentServiceProvisioner
+                                            .SERVICE_IDENTITY,
+                                    "civiceconomy"));
+            PreparedBudgetDisbursementPayment exact =
+                    coordinator.prepare(exactApproval.approvalRequestId());
+
+            ServiceIdentity impostor = new ServiceIdentity("impostor-budget-disbursement");
+            Budget impostorBudget = approvedBudget(database, "impostor-recovery");
+            BudgetDisbursementApproval impostorApproval =
+                    new BudgetDisbursementApprovalRegistry(
+                                    database, Clock.fixed(NOW, ZoneOffset.UTC))
+                            .initiate(new InitiateBudgetDisbursementApproval(
+                                    impostor,
+                                    "impostor-incomplete-payment",
+                                    NATION_ID,
+                                    impostorBudget.budgetId(),
+                                    RECIPIENT,
+                                    MoneyAmount.ofMinorUnits(100L),
+                                    ACTOR,
+                                    "Another authorized service cannot be recovered here"));
+            UUID impostorReservationId = FiscalLedger.toEscrow(
+                            database.escrow(database.budget(impostorBudget.budgetId()).escrowId()))
+                    .reservationId();
+            var impostorPayment = database.preparePayment(
+                    impostor.value(),
+                    impostorApproval.requestId(),
+                    impostorReservationId,
+                    RECIPIENT.value(),
+                    100L);
+
+            List<PreparedBudgetDisbursementPayment> recoverable =
+                    coordinator.recoverableIncomplete();
+
+            assertEquals(1, recoverable.size());
+            assertEquals(exact.approvalRequestId(), recoverable.getFirst().approvalRequestId());
+            assertEquals(
+                    exact.transaction().transactionId(),
+                    recoverable.getFirst().transaction().transactionId());
+            assertEquals(
+                    NationBudgetDisbursementApprovalCoordinator.SERVICE_IDENTITY,
+                    recoverable.getFirst().transaction().serviceIdentity());
+            coordinator.applyExternal(recoverable.getFirst());
+            PaymentTransaction committed =
+                    coordinator.commitRecovery(recoverable.getFirst());
+            assertEquals(TransactionState.CIVIC_COMMITTED, committed.state());
+            assertEquals(1, effects.size());
+            assertEquals(
+                    exact.transaction().transactionId(),
+                    effects.getFirst().transactionId());
+            assertEquals(
+                    List.of(
+                            RecoveryAction.RECOVERY_EXTERNAL_APPLIED,
+                            RecoveryAction.RECOVERY_CIVIC_COMMITTED),
+                    new PaymentCoordinator(database, effects::add)
+                            .recoveryAudit(exact.transaction().transactionId())
+                            .stream()
+                            .map(RecoveryAuditEntry::action)
+                            .toList());
+            assertEquals(List.of(), coordinator.recoverableIncomplete());
+            assertEquals(
+                    TransactionState.PREPARED,
+                    PaymentCoordinator.toTransaction(database.paymentTransaction(
+                                    impostorPayment.transactionId()))
+                            .state());
+            assertEquals(
+                    "APPROVED",
+                    new BudgetDisbursementApprovalRegistry(
+                                    database, Clock.fixed(NOW, ZoneOffset.UTC))
+                            .find(impostorApproval.approvalRequestId())
+                            .state());
         }
     }
 
@@ -250,11 +373,15 @@ class BudgetDisbursementPaymentCoordinatorTest {
     }
 
     private static Budget approvedBudget(CivicDatabase database) {
+        return approvedBudget(database, "payment");
+    }
+
+    private static Budget approvedBudget(CivicDatabase database, String requestSuffix) {
         UUID budgetId = UUID.randomUUID();
         database.createBudget(
                 budgetId,
                 BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
-                "create-payment-budget",
+                "create-" + requestSuffix + "-budget",
                 TREASURY.value(),
                 300L,
                 "PUBLIC_WORKS",
@@ -265,7 +392,7 @@ class BudgetDisbursementPaymentCoordinatorTest {
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
-                "approve-payment-budget",
+                "approve-" + requestSuffix + "-budget",
                 budgetId,
                 ACTOR,
                 "Approve payment Budget",

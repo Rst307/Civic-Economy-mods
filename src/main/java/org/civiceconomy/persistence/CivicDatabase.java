@@ -10239,6 +10239,41 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredPaymentTransaction>
+            incompleteBudgetDisbursementPayments(String serviceIdentity) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement recovery Service Identity cannot be blank");
+        }
+        List<StoredPaymentTransaction> transactions = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT payment.*
+                FROM payment_transaction payment
+                JOIN budget_disbursement_approval_request approval
+                  ON approval.service_identity = payment.service_identity
+                 AND approval.request_id = payment.request_id
+                LEFT JOIN budget_disbursement_approval_cancellation cancellation
+                  ON cancellation.approval_request_id = approval.approval_request_id
+                WHERE payment.service_identity = ?
+                  AND payment.kind = 'PAYMENT'
+                  AND payment.state IN ('PREPARED', 'EXTERNAL_APPLIED')
+                  AND approval.state = 'APPROVED'
+                  AND cancellation.cancellation_id IS NULL
+                ORDER BY payment.rowid
+                """)) {
+            query.setString(1, serviceIdentity);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    transactions.add(readPayment(result));
+                }
+            }
+            return List.copyOf(transactions);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read incomplete Budget Disbursement payments", failure);
+        }
+    }
+
     @Override
     public void close() {
         try {

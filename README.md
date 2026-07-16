@@ -160,7 +160,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `nation budget approve` 允许具有本国 `APPROVE_BUDGET` 的 effective Citizen 批准本国 National Treasury 的 `DRAFT`。同一 Citizen 可以编制并批准；服务端先校验真实玩家、FTB Team、Citizenship、Nation、权限和 Budget source，再在服务器线程读取真实 LC Treasury 余额，最后于 SQLite 单写线程原子创建唯一 Reservation/Escrow 并推进为 `APPROVED`。批准只预占可用额度，不移动 LC；actor、reason、request 和时间持久化审计，同 request replay 不会创建第二个 hold，改变 Budget、actor 或 reason 会冲突。
 
-`nation budget disbursement request` 允许具有本国 `INITIATE_PAYMENT` 的 effective Citizen 从一个本国已批准 Budget 发起精确拨款。服务端从真实玩家、FTB Team、Citizenship/Nation 和持久化 Budget 派生 National Treasury，只接受收款玩家 UUID、正金额、稳定 request ID 和理由；审批对象固定 Budget、收款账户、金额、发起人、政策版本、所需人数和到期时间。多个活动审批不能累计超过 Budget 的未结算 Reservation 余量。发起人自动投第一票；若固定门槛为一人，系统立即进入既有 SQLite `PREPARED` → 服务器线程真实 LC 转账 → SQLite `CIVIC_COMMITTED` 路径，并原子推进 Reservation、Escrow、Budget 与审批 `EXECUTED`。如果进程在审批已持久化为 `APPROVED`、但尚未创建 Payment 的窗口停止，启动和每分钟恢复扫描会按精确内部 Service Identity 逐条补建同一稳定 Payment、在服务器线程执行真实 LC、再由 SQLite 单写线程提交；单条失败不会阻断其他审批，`PENDING`、`CANCELLED`、`EXPIRED`、已有 Payment 或已执行决定不会被该扫描重写。
+`nation budget disbursement request` 允许具有本国 `INITIATE_PAYMENT` 的 effective Citizen 从一个本国已批准 Budget 发起精确拨款。服务端从真实玩家、FTB Team、Citizenship/Nation 和持久化 Budget 派生 National Treasury，只接受收款玩家 UUID、正金额、稳定 request ID 和理由；审批对象固定 Budget、收款账户、金额、发起人、政策版本、所需人数和到期时间。多个活动审批不能累计超过 Budget 的未结算 Reservation 余量。发起人自动投第一票；若固定门槛为一人，系统立即进入既有 SQLite `PREPARED` → 服务器线程真实 LC 转账 → SQLite `CIVIC_COMMITTED` 路径，并原子推进 Reservation、Escrow、Budget 与审批 `EXECUTED`。启动和每分钟恢复扫描按精确内部 Service Identity 覆盖两个崩溃窗口：审批已持久化为 `APPROVED` 但尚未创建 Payment 时补建同一稳定 Payment；Payment 已存在于 `PREPARED` 或 `EXTERNAL_APPLIED` 时保留原 transaction UUID 与 LC applied marker，只在服务器线程执行或确认真实 LC，再由 SQLite 单写线程原子推进 Payment、Reservation、Escrow、Budget 与审批。单条失败不会阻断其他工作，另一个财政服务的 session 即使拥有同一国库授权也不能扫描或恢复这些 Payment。
 
 `nation budget disbursement approve` 允许另一名具有同一 Nation `APPROVE_PAYMENT` 的 effective Citizen 为仍为 `PENDING` 的精确审批投票；同一 Citizen 不能重复计票，达到发起时固定的人数后才会创建 Payment。`PENDING` 审批到期时由后台 SQLite 扫描转为 `EXPIRED`，不会创建 Payment 或调用 LC，并释放其占用的 Budget 授权容量。
 
@@ -171,6 +171,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation budget disbursement policy status|history` 只要求真实玩家拥有 effective Citizenship，并从服务端派生其 Nation。状态返回查询时刻生效的策略；历史按生效时间、记录时间和策略 UUID 稳定排列，包含当前和未来版本、金额门槛、审批人数、有效期、操作者、理由与时间。读取不会激活未来策略或产生 SQLite 写入。
 
 `nation budget disbursement policy schedule|schedule-tiered` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`，并只允许未来生效、正数审批有效期和每层 1–16 名审批人。简单命令中，`thresholdMinorUnits=0` 表示所有拨款使用指定人数；正阈值表示低于阈值保持单人、达到或超过阈值使用指定人数。多层命令的 `tierSpec` 使用未加空格的 `minimumAmount:requiredApprovals` 逗号序列，例如 `0:1,500:2,2000:3`；第一层必须从零开始，金额严格递增，格式、负数、溢出和越界人数都会在命令解析时拒绝。策略版本、完整层级、操作者、理由、生效时间和有效期持久化审计；稳定 request ID 严格重放，每个新审批只固定创建时生效的版本和对应金额层级，后续策略不能改写旧审批。
+
+OP/控制台的 `admin budget-disbursement recovery status` 只读取精确内部服务下的 `APPROVED`-without-Payment 决定和已有 `PREPARED`/`EXTERNAL_APPLIED` Payment，显示固定审批、transaction、账户、金额与状态证据；该读取不打开执行 session、不创建或推进 Payment，也不调用 LC，自动生命周期恢复仍是唯一执行路径。
 
 `nation budget cancel` 允许具有本国 `APPROVE_BUDGET` 的 effective Citizen 取消本国 National Treasury 中仍为 `APPROVED` 或 `PARTIALLY_SPENT` 的 Budget。服务端从真实玩家、FTB Team、Citizenship 和 Nation 推导精确 Treasury，在注册内部服务前拒绝 foreign Budget；SQLite 在一个事务中记录 actor/reason/time 审计、释放唯一 Reservation 和 Escrow、保留已结算金额并把 Budget 推进为 `RELEASED`。取消只释放未支付逻辑 hold，不移动 LC；存在 `PREPARED`、`EXTERNAL_APPLIED` 或补偿中的 Payment 时失败关闭，同 request replay 不会产生第二次 release。
 
@@ -223,6 +225,7 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin mint correction apply <incidentId> <requestId> <evidenceReference> <reason>
 /civic economy admin mint correction status <incidentId>
 /civic economy admin withdrawal recovery status
+/civic economy admin budget-disbursement recovery status
 /civic economy admin backup status
 /civic economy admin backup trigger <requestId> <reason>
 /civic economy admin backup restore status

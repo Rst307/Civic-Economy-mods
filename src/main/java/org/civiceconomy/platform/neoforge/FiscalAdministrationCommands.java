@@ -18,6 +18,8 @@ import net.minecraft.network.chat.Component;
 import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalStatus;
+import org.civiceconomy.fiscal.BudgetDisbursementRecoveryStatus;
 import org.civiceconomy.fiscal.ChangeFiscalServiceState;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.FiscalCapability;
@@ -77,11 +79,17 @@ public final class FiscalAdministrationCommands {
                         .then(Commands.literal("status")
                                 .executes(context -> withdrawalRecoveryStatus(
                                         context.getSource()))));
+        var budgetDisbursement = Commands.literal("budget-disbursement")
+                .then(Commands.literal("recovery")
+                        .then(Commands.literal("status")
+                                .executes(context -> budgetDisbursementRecoveryStatus(
+                                        context.getSource()))));
         var admin = Commands.literal("admin")
                 .requires(source -> source.hasPermission(Commands.LEVEL_ADMINS))
                 .then(service)
                 .then(mint)
                 .then(withdrawal)
+                .then(budgetDisbursement)
                 .then(databaseBackupCommand())
                 .then(territoryPolicyCommand());
         var civic = Commands.literal("civic")
@@ -149,6 +157,51 @@ public final class FiscalAdministrationCommands {
                         .collect(Collectors.joining("; "));
         return "Treasury Withdrawal recovery approvedWithoutOperation=[" + approved
                 + "] preparedOperations=[" + prepared
+                + "]; inspection is read-only and automatic recovery remains authoritative";
+    }
+
+    private static int budgetDisbursementRecoveryStatus(
+            CommandSourceStack source) {
+        CivicServerRuntime.current().budgetDisbursementRecoveryStatus()
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        sendFailure(source, failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        formatBudgetDisbursementRecovery(status)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal(
+                        "Budget Disbursement recovery status queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatBudgetDisbursementRecovery(
+            BudgetDisbursementRecoveryStatus status) {
+        String approved = status.approvedWithoutPayment().isEmpty()
+                ? "none"
+                : status.approvedWithoutPayment().stream()
+                        .map(approval -> NationApplicationCommands
+                                .formatDisbursementApprovalStatus(
+                                        new BudgetDisbursementApprovalStatus(
+                                                approval, false)))
+                        .collect(Collectors.joining("; "));
+        String incomplete = status.incompletePayments().isEmpty()
+                ? "none"
+                : status.incompletePayments().stream()
+                        .map(payment -> payment.transactionId()
+                                + "=" + payment.state()
+                                + ":request=" + payment.requestId()
+                                + ":source=" + payment.sourceAccount().value()
+                                + ":recipient=" + payment.recipientAccount().value()
+                                + ":amount=" + payment.amount().minorUnits())
+                        .collect(Collectors.joining("; "));
+        return "Budget Disbursement recovery approvedWithoutPayment=[" + approved
+                + "] incompletePayments=[" + incomplete
                 + "]; inspection is read-only and automatic recovery remains authoritative";
     }
 
