@@ -347,6 +347,82 @@ class BudgetDisbursementApprovalRegistryTest {
         }
     }
 
+    @Test
+    void tieredPolicyReplayIsStrictAndNewApprovalsPinTheirAmountTier() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            Budget budget = approvedBudget(database);
+            BudgetDisbursementApprovalPolicyRegistry policies =
+                    new BudgetDisbursementApprovalPolicyRegistry(
+                            database, Clock.fixed(SCHEDULED_AT, ZoneOffset.UTC));
+            ScheduleBudgetDisbursementApprovalPolicy request =
+                    new ScheduleBudgetDisbursementApprovalPolicy(
+                            new ServiceIdentity("civiceconomy-budget-governance"),
+                            "schedule-tiered-disbursement",
+                            NATION_ID,
+                            INITIATOR,
+                            List.of(
+                                    new BudgetDisbursementApprovalTier(MoneyAmount.ZERO, 1),
+                                    new BudgetDisbursementApprovalTier(
+                                            MoneyAmount.ofMinorUnits(100L), 2),
+                                    new BudgetDisbursementApprovalTier(
+                                            MoneyAmount.ofMinorUnits(250L), 3)),
+                            Duration.ofDays(7L),
+                            EFFECTIVE_AT,
+                            "Scale approvals with procurement amount");
+            BudgetDisbursementApprovalPolicyVersion scheduled = policies.schedule(request);
+            BudgetDisbursementApprovalRegistry beforePolicy =
+                    new BudgetDisbursementApprovalRegistry(
+                            database,
+                            Clock.fixed(EFFECTIVE_AT.minusMillis(1L), ZoneOffset.UTC));
+            BudgetDisbursementApproval earlier = beforePolicy.initiate(
+                    new InitiateBudgetDisbursementApproval(
+                            SERVICE,
+                            "before-tiered-policy",
+                            NATION_ID,
+                            budget.budgetId(),
+                            RECIPIENT,
+                            MoneyAmount.ofMinorUnits(50L),
+                            INITIATOR,
+                            "Small procurement before policy activation"));
+            BudgetDisbursementApprovalRegistry afterPolicy =
+                    new BudgetDisbursementApprovalRegistry(
+                            database, Clock.fixed(EFFECTIVE_AT, ZoneOffset.UTC));
+            BudgetDisbursementApproval tiered = afterPolicy.initiate(
+                    new InitiateBudgetDisbursementApproval(
+                            SERVICE,
+                            "after-tiered-policy",
+                            NATION_ID,
+                            budget.budgetId(),
+                            new AccountId(
+                                    "player:77777777-7777-7777-7777-777777777777"),
+                            MoneyAmount.ofMinorUnits(200L),
+                            INITIATOR,
+                            "Mid-sized procurement after policy activation"));
+
+            assertEquals(scheduled, policies.schedule(request));
+            assertEquals(1, earlier.requiredApprovals());
+            assertEquals(
+                    new UUID(0L, 0L),
+                    earlier.policyId());
+            assertEquals(2, tiered.requiredApprovals());
+            assertEquals(scheduled.policyId(), tiered.policyId());
+            assertEquals(earlier, afterPolicy.find(earlier.approvalRequestId()));
+            assertThrows(
+                    IdempotencyConflictException.class,
+                    () -> policies.schedule(new ScheduleBudgetDisbursementApprovalPolicy(
+                            request.serviceIdentity(),
+                            request.requestId(),
+                            request.nationId(),
+                            request.actorPlayerId(),
+                            List.of(new BudgetDisbursementApprovalTier(
+                                    MoneyAmount.ZERO, 2)),
+                            request.approvalLifetime(),
+                            request.effectiveAt(),
+                            request.reason())));
+        }
+    }
+
     private static Budget approvedBudget(CivicDatabase database) {
         UUID budgetId = UUID.randomUUID();
         database.createBudget(

@@ -558,7 +558,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Budget Disbursement approval inspection actions");
         helper.assertValueEqual(
-                Set.of("status", "history", "schedule"),
+                Set.of("status", "history", "schedule", "schedule-tiered"),
                 economy.getChild("nation")
                         .getChild("budget")
                         .getChild("disbursement")
@@ -1163,6 +1163,11 @@ public final class CivicServerRuntimeGameTests {
         String disbursementRequestId = "player-budget-disbursement-" + UUID.randomUUID();
         String cancelledDisbursementRequestId =
                 "cancelled-player-budget-disbursement-" + UUID.randomUUID();
+        String tieredPolicyRequestId =
+                "tiered-budget-disbursement-policy-" + UUID.randomUUID();
+        String unauthorizedTieredPolicyRequestId =
+                "unauthorized-tiered-budget-disbursement-policy-" + UUID.randomUUID();
+        String tieredPolicyReason = "Tiered GameTest procurement governance";
         UUID recipientPlayerId = UUID.randomUUID();
         long expiresAt = java.time.Instant.now()
                 .plus(java.time.Duration.ofDays(1L))
@@ -1170,14 +1175,21 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
+        AtomicReference<Throwable> unauthorizedTieredPolicyFailure =
+                new AtomicReference<>();
         AtomicReference<Throwable> changedReplayFailure = new AtomicReference<>();
         AtomicReference<java.util.List<org.civiceconomy.fiscal.Budget>> inspectedBudgets =
                 new AtomicReference<>();
         AtomicReference<org.civiceconomy.fiscal.Budget> inspectedBudget =
                 new AtomicReference<>();
         AtomicReference<UUID> cancelledDisbursementApprovalId = new AtomicReference<>();
+        AtomicReference<org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyVersion>
+                tieredPolicy = new AtomicReference<>();
+        AtomicReference<org.civiceconomy.fiscal.BudgetDisbursementApproval>
+                pendingTieredApproval = new AtomicReference<>();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean unauthorizedFinished = new AtomicBoolean();
+        AtomicBoolean unauthorizedTieredPolicyFinished = new AtomicBoolean();
         AtomicBoolean permissionReady = new AtomicBoolean();
         AtomicBoolean commandStarted = new AtomicBoolean();
         AtomicBoolean changedReplayFinished = new AtomicBoolean();
@@ -1187,6 +1199,8 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean disbursementCommandStarted = new AtomicBoolean();
         AtomicBoolean disbursementInspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean pendingDisbursementReady = new AtomicBoolean();
+        AtomicBoolean tieredPolicyCommandStarted = new AtomicBoolean();
+        AtomicBoolean tieredPolicyReady = new AtomicBoolean();
         AtomicBoolean disbursementCancellationCommandStarted = new AtomicBoolean();
         AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
@@ -1197,6 +1211,7 @@ public final class CivicServerRuntimeGameTests {
         CivicServerRuntime runtime = CivicServerRuntime.current();
         java.time.Instant now = java.time.Instant.now();
         java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+        long tieredPolicyEffectiveAt = now.plusSeconds(30L).toEpochMilli();
 
         runtime.submitDatabase(database -> {
                     NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
@@ -1268,6 +1283,38 @@ public final class CivicServerRuntimeGameTests {
                             !fiscalServiceExists(databaseFile, "civiceconomy-budget"),
                             "unauthorized Budget draft creates no internal service");
                 })
+                .thenExecute(() -> runtime.scheduleTieredBudgetDisbursementApprovalPolicy(
+                                actor,
+                                unauthorizedTieredPolicyRequestId,
+                                now.plusSeconds(60L).toEpochMilli(),
+                                java.time.Duration.ofDays(7L).toMillis(),
+                                java.util.List.of(
+                                        new org.civiceconomy.fiscal
+                                                .BudgetDisbursementApprovalTier(
+                                                MoneyAmount.ZERO, 1),
+                                        new org.civiceconomy.fiscal
+                                                .BudgetDisbursementApprovalTier(
+                                                MoneyAmount.ofMinorUnits(100L), 2)),
+                                "Unauthorized tiered Budget Disbursement policy")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Unauthorized tiered policy unexpectedly succeeded"));
+                            } else {
+                                unauthorizedTieredPolicyFailure.set(rootCause(failure));
+                            }
+                            unauthorizedTieredPolicyFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Unauthorized tiered policy");
+                    helper.assertTrue(
+                            unauthorizedTieredPolicyFinished.get(),
+                            "unauthorized tiered policy completed");
+                    helper.assertTrue(
+                            unauthorizedTieredPolicyFailure.get() instanceof SecurityException,
+                            "unauthorized tiered policy fails at exact Nation permission");
+                })
                 .thenExecute(() -> runtime.submitDatabase(database -> {
                             NationRegistry nations = new NationRegistry(
                                     database, snapshot(teamSnapshot));
@@ -1322,6 +1369,14 @@ public final class CivicServerRuntimeGameTests {
                                     actor.getUUID(),
                                     NationFiscalPermission.APPROVE_PAYMENT,
                                     "Authorize Budget Disbursement approval inspection"));
+                            authorities.grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "budget-disbursement-policy-authority-" + UUID.randomUUID(),
+                                    nationId.get(),
+                                    actor.getUUID(),
+                                    actor.getUUID(),
+                                    NationFiscalPermission.MANAGE_APPROVAL_POLICY,
+                                    "Authorize Budget Disbursement policy governance"));
                             return null;
                         })
                         .whenComplete((ignored, failure) -> {
@@ -1657,25 +1712,76 @@ public final class CivicServerRuntimeGameTests {
                             playerBankBalance(recipientPlayerId),
                             "inspection does not move recipient LC");
                 })
+                .thenExecute(() -> {
+                    try {
+                        String command =
+                                "civic economy nation budget disbursement policy schedule-tiered "
+                                        + tieredPolicyRequestId + " "
+                                        + tieredPolicyEffectiveAt
+                                        + " 604800000 0:1,100:2,250:3 "
+                                        + tieredPolicyReason;
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "tiered Budget Disbursement policy command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "tiered Budget Disbursement policy replay result");
+                        tieredPolicyCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenExecute(() -> runtime.budgetDisbursementApprovalPolicyHistory(actor)
+                        .whenComplete((policies, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            policies.stream()
+                                    .filter(policy -> policy.reason().equals(tieredPolicyReason))
+                                    .findFirst()
+                                    .ifPresent(tieredPolicy::set);
+                            tieredPolicyReady.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "tiered Budget Disbursement policy");
+                    helper.assertTrue(
+                            tieredPolicyCommandStarted.get(),
+                            "tiered Budget Disbursement policy command started");
+                    helper.assertTrue(tieredPolicyReady.get(), "tiered policy history ready");
+                    var policy = tieredPolicy.get();
+                    helper.assertTrue(policy != null, "tiered policy persisted exactly once");
+                    helper.assertValueEqual(
+                            java.util.List.of(
+                                    new org.civiceconomy.fiscal.BudgetDisbursementApprovalTier(
+                                            MoneyAmount.ZERO, 1),
+                                    new org.civiceconomy.fiscal.BudgetDisbursementApprovalTier(
+                                            MoneyAmount.ofMinorUnits(100L), 2),
+                                    new org.civiceconomy.fiscal.BudgetDisbursementApprovalTier(
+                                            MoneyAmount.ofMinorUnits(250L), 3)),
+                            policy.tiers(),
+                            "persisted Budget Disbursement policy tiers");
+                    helper.assertValueEqual(
+                            java.time.Duration.ofDays(7L),
+                            policy.approvalLifetime(),
+                            "persisted Budget Disbursement policy lifetime");
+                })
                 .thenExecute(() -> runtime.submitDatabase(database -> {
                             BudgetRow budget = budgetByRequest(databaseFile, requestId);
-                            long policyRecordedAt = setupClock.millis();
-                            database.scheduleBudgetDisbursementApprovalPolicy(
-                                    UUID.randomUUID(),
-                                    "civiceconomy-budget-disbursement-governance",
-                                    "gametest-cancellation-policy-" + UUID.randomUUID(),
-                                    nationId.get().value(),
-                                    actor.getUUID(),
-                                    java.util.List.of(
-                                            new org.civiceconomy.persistence
-                                                    .StoredBudgetDisbursementApprovalTier(
-                                                    0L, 2)),
-                                    java.time.Duration.ofDays(7L).toMillis(),
-                                    policyRecordedAt - 1L,
-                                    "Require two Citizens for cancellation GameTest",
-                                    policyRecordedAt);
                             return new BudgetDisbursementApprovalRegistry(
-                                            database, setupClock)
+                                            database,
+                                            java.time.Clock.fixed(
+                                                    java.time.Instant.ofEpochMilli(
+                                                            tieredPolicyEffectiveAt + 1L),
+                                                    java.time.ZoneOffset.UTC))
                                     .initiate(new InitiateBudgetDisbursementApproval(
                                             NationBudgetDisbursementApprovalCoordinator
                                                     .SERVICE_IDENTITY,
@@ -1692,6 +1798,7 @@ public final class CivicServerRuntimeGameTests {
                             if (failure != null) {
                                 asyncFailure.set(failure);
                             } else {
+                                pendingTieredApproval.set(approval);
                                 cancelledDisbursementApprovalId.set(
                                         approval.approvalRequestId());
                                 pendingDisbursementReady.set(true);
@@ -1707,6 +1814,14 @@ public final class CivicServerRuntimeGameTests {
                             databaseFile, cancelledDisbursementRequestId);
                     helper.assertValueEqual(
                             "PENDING", pending.approvalState(), "pending cancellation state");
+                    helper.assertValueEqual(
+                            tieredPolicy.get().policyId(),
+                            pendingTieredApproval.get().policyId(),
+                            "pending approval pins tiered policy");
+                    helper.assertValueEqual(
+                            2,
+                            pendingTieredApproval.get().requiredApprovals(),
+                            "200-unit disbursement selects two-person tier");
                     helper.assertValueEqual(
                             0, pending.paymentCount(), "pending cancellation has no Payment");
                 })

@@ -28,6 +28,7 @@ import org.civiceconomy.fiscal.Budget;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalOutcome;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyVersion;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalStatus;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalTier;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
@@ -204,6 +205,28 @@ final class NationApplicationCommands {
                                                         context, "requestId"),
                                                 StringArgumentType.getString(
                                                         context, "reason"))))));
+        var tieredPolicyReason = Commands.argument(
+                        "reason", StringArgumentType.greedyString())
+                .executes(context -> scheduleTieredBudgetDisbursementPolicy(
+                        context.getSource(),
+                        StringArgumentType.getString(context, "requestId"),
+                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                        LongArgumentType.getLong(context, "approvalLifetimeMillis"),
+                        BudgetDisbursementApprovalTierArgumentType.getTiers(
+                                context, "tierSpec"),
+                        StringArgumentType.getString(context, "reason")));
+        var tieredPolicy = Commands.argument(
+                        "requestId", StringArgumentType.word())
+                .then(Commands.argument(
+                                "effectiveAtEpochMillis",
+                                LongArgumentType.longArg(0L))
+                        .then(Commands.argument(
+                                        "approvalLifetimeMillis",
+                                        LongArgumentType.longArg(1L))
+                                .then(Commands.argument(
+                                                "tierSpec",
+                                                BudgetDisbursementApprovalTierArgumentType.tiers())
+                                        .then(tieredPolicyReason))));
         var policy = Commands.literal("policy")
                 .then(Commands.literal("status")
                         .executes(context -> budgetDisbursementPolicyStatus(
@@ -249,7 +272,8 @@ final class NationApplicationCommands {
                                                                                                 "requiredApprovals"),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
-                                                                                                "reason"))))))))));
+                                                                                                "reason"))))))))))
+                .then(Commands.literal("schedule-tiered").then(tieredPolicy));
         var cancelApproval = Commands.literal("cancel")
                 .then(Commands.argument("approvalId", UuidArgument.uuid())
                         .then(Commands.argument("requestId", StringArgumentType.word())
@@ -445,6 +469,41 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(
                 () -> Component.literal("Budget Disbursement policy queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleTieredBudgetDisbursementPolicy(
+            CommandSourceStack source,
+            String requestId,
+            long effectiveAtEpochMillis,
+            long approvalLifetimeMillis,
+            List<BudgetDisbursementApprovalTier> tiers,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .scheduleTieredBudgetDisbursementApprovalPolicy(
+                        player,
+                        requestId,
+                        effectiveAtEpochMillis,
+                        approvalLifetimeMillis,
+                        tiers,
+                        reason)
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(
+                                source,
+                                "Tiered Budget Disbursement policy",
+                                failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatDisbursementPolicy(policy)),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Tiered Budget Disbursement policy queued"),
+                false);
         return Command.SINGLE_SUCCESS;
     }
 

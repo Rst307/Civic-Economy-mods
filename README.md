@@ -120,6 +120,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation budget disbursement policy status
 /civic economy nation budget disbursement policy history
 /civic economy nation budget disbursement policy schedule <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <thresholdMinorUnits> <requiredApprovals> <reason>
+/civic economy nation budget disbursement policy schedule-tiered <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <tierSpec> <reason>
 /civic economy nation budget cancel <budgetId> <requestId> <reason>
 /civic economy nation budget list
 /civic economy nation budget status <budgetId>
@@ -169,7 +170,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `nation budget disbursement policy status|history` 只要求真实玩家拥有 effective Citizenship，并从服务端派生其 Nation。状态返回查询时刻生效的策略；历史按生效时间、记录时间和策略 UUID 稳定排列，包含当前和未来版本、金额门槛、审批人数、有效期、操作者、理由与时间。读取不会激活未来策略或产生 SQLite 写入。
 
-`nation budget disbursement policy schedule` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`，并只允许未来生效、正数审批有效期和 1–16 名审批人。`thresholdMinorUnits=0` 表示所有拨款使用指定人数；正阈值表示低于阈值保持单人、达到或超过阈值使用指定人数。策略版本、操作者、理由、生效时间和门槛持久化审计；每个新审批只固定创建时生效的版本，后续策略不能改写旧审批。
+`nation budget disbursement policy schedule|schedule-tiered` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`，并只允许未来生效、正数审批有效期和每层 1–16 名审批人。简单命令中，`thresholdMinorUnits=0` 表示所有拨款使用指定人数；正阈值表示低于阈值保持单人、达到或超过阈值使用指定人数。多层命令的 `tierSpec` 使用未加空格的 `minimumAmount:requiredApprovals` 逗号序列，例如 `0:1,500:2,2000:3`；第一层必须从零开始，金额严格递增，格式、负数、溢出和越界人数都会在命令解析时拒绝。策略版本、完整层级、操作者、理由、生效时间和有效期持久化审计；稳定 request ID 严格重放，每个新审批只固定创建时生效的版本和对应金额层级，后续策略不能改写旧审批。
 
 `nation budget cancel` 允许具有本国 `APPROVE_BUDGET` 的 effective Citizen 取消本国 National Treasury 中仍为 `APPROVED` 或 `PARTIALLY_SPENT` 的 Budget。服务端从真实玩家、FTB Team、Citizenship 和 Nation 推导精确 Treasury，在注册内部服务前拒绝 foreign Budget；SQLite 在一个事务中记录 actor/reason/time 审计、释放唯一 Reservation 和 Escrow、保留已结算金额并把 Budget 推进为 `RELEASED`。取消只释放未支付逻辑 hold，不移动 LC；存在 `PREPARED`、`EXTERNAL_APPLIED` 或补偿中的 Payment 时失败关闭，同 request replay 不会产生第二次 release。
 

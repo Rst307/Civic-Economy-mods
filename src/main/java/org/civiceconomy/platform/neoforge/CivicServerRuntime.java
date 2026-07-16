@@ -890,9 +890,6 @@ public final class CivicServerRuntime {
                     long thresholdMinorUnits,
                     int requiredApprovals,
                     String reason) {
-        RuntimeState current = requireState();
-        UUID actorPlayerId = actor.getUUID();
-        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         List<BudgetDisbursementApprovalTier> tiers = thresholdMinorUnits == 0L
                 ? List.of(new BudgetDisbursementApprovalTier(
                         MoneyAmount.ZERO, requiredApprovals))
@@ -901,6 +898,27 @@ public final class CivicServerRuntime {
                         new BudgetDisbursementApprovalTier(
                                 MoneyAmount.ofMinorUnits(thresholdMinorUnits),
                                 requiredApprovals));
+        return scheduleTieredBudgetDisbursementApprovalPolicy(
+                actor,
+                requestId,
+                effectiveAtEpochMillis,
+                approvalLifetimeMillis,
+                tiers,
+                reason);
+    }
+
+    CompletableFuture<BudgetDisbursementApprovalPolicyVersion>
+            scheduleTieredBudgetDisbursementApprovalPolicy(
+                    ServerPlayer actor,
+                    String requestId,
+                    long effectiveAtEpochMillis,
+                    long approvalLifetimeMillis,
+                    List<BudgetDisbursementApprovalTier> tiers,
+                    String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        List<BudgetDisbursementApprovalTier> requestedTiers = List.copyOf(tiers);
         return onServer(current, () -> requireActorTeam(actorPlayerId))
                 .thenCompose(team -> current.writer.submitDatabase(database -> {
                     NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
@@ -926,7 +944,7 @@ public final class CivicServerRuntime {
                                     requestId,
                                     nation.nationId(),
                                     actorPlayerId,
-                                    tiers,
+                                    requestedTiers,
                                     Duration.ofMillis(approvalLifetimeMillis),
                                     Instant.ofEpochMilli(effectiveAtEpochMillis),
                                     reason));
