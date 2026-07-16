@@ -32,7 +32,10 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.Budget;
 import org.civiceconomy.fiscal.BudgetDraftExpiryProcessor;
+import org.civiceconomy.fiscal.BudgetFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.CreateBudget;
 import org.civiceconomy.fiscal.EscrowExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalBillExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalAuthorization;
@@ -595,6 +598,56 @@ public final class CivicServerRuntime {
                                     kind,
                                     purpose,
                                     Instant.ofEpochMilli(dueAtEpochMillis)));
+                }));
+    }
+
+    CompletableFuture<Budget> createNationalBudgetDraft(
+            ServerPlayer actor,
+            String requestId,
+            long amountMinorUnits,
+            String budgetCode,
+            long expiresAtEpochMillis,
+            String purpose) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.DRAFT_BUDGET);
+                    AccountId treasury = nationalTreasury(nation.nationId());
+                    FiscalAuthorization authorization = new FiscalAuthorization(database);
+                    new BudgetFiscalServiceProvisioner(authorization)
+                            .ensureAuthorized(treasury);
+                    var session = authorization.openSession(
+                            BudgetFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    return FiscalLedger.authorized(
+                                    database,
+                                    ignored -> MoneyAmount.ZERO,
+                                    commandClock,
+                                    session)
+                            .createBudget(new CreateBudget(
+                                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    requestId,
+                                    treasury,
+                                    MoneyAmount.ofMinorUnits(amountMinorUnits),
+                                    budgetCode,
+                                    purpose,
+                                    Instant.ofEpochMilli(expiresAtEpochMillis)));
                 }));
     }
 

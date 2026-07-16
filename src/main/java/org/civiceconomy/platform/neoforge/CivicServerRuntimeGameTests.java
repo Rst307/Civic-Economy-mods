@@ -51,6 +51,7 @@ import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
+import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyNationalTreasuryProvisioner;
 import org.civiceconomy.integration.lightmanscurrency.FiscalAccountKind;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.nation.OnlineTimeLedger;
@@ -518,6 +519,7 @@ public final class CivicServerRuntimeGameTests {
                         "population",
                         "role",
                         "bill",
+                        "budget",
                         "mint",
                         "territory",
                         "treasury"),
@@ -525,6 +527,14 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
+        helper.assertValueEqual(
+                Set.of("create"),
+                economy.getChild("nation")
+                        .getChild("budget")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Budget command actions");
         helper.assertValueEqual(
                 Set.of("issue", "list", "status"),
                 economy.getChild("nation")
@@ -1103,6 +1113,222 @@ public final class CivicServerRuntimeGameTests {
             assertNationFiscalPermissionGranted(
                     helper, databaseFile, team.getId(), head.getUUID());
         });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 600, batch = "runtime-budget-command")
+    public static void authorizedNationPlayerCreatesExactBudgetDraftOffThread(
+            GameTestHelper helper) {
+        ServerPlayer actor = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-budget-drafter"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(actor);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String unauthorizedRequestId = "unauthorized-budget-" + UUID.randomUUID();
+        String requestId = "player-budget-" + UUID.randomUUID();
+        long expiresAt = java.time.Instant.now()
+                .plus(java.time.Duration.ofDays(1L))
+                .toEpochMilli();
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
+        AtomicReference<Throwable> changedReplayFailure = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean unauthorizedFinished = new AtomicBoolean();
+        AtomicBoolean permissionReady = new AtomicBoolean();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicBoolean changedReplayFinished = new AtomicBoolean();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "budget-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    new CitizenshipRegistry(
+                                    database, java.time.Duration.ofDays(7L), setupClock)
+                            .join(new JoinCitizenship(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "budget-citizenship-" + UUID.randomUUID(),
+                                    actor.getUUID(),
+                                    nation.nationId()));
+                    return nation.nationId();
+                })
+                .whenComplete((registeredNationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                nationId.set(registeredNationId);
+                                var treasury = new AccountId(
+                                        "nation:" + registeredNationId.value() + ":treasury");
+                                LightmansCurrencyNationalTreasuryProvisioner
+                                        .forLevel(helper.getLevel())
+                                        .ensureExists(registeredNationId, treasury);
+                                setupReady.set(true);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget setup");
+                    helper.assertTrue(setupReady.get(), "Budget setup complete");
+                })
+                .thenExecute(() -> runtime.createNationalBudgetDraft(
+                                actor,
+                                unauthorizedRequestId,
+                                300L,
+                                "PUBLIC_WORKS",
+                                expiresAt,
+                                "Unauthorized public works Budget")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Unauthorized Budget draft unexpectedly succeeded"));
+                            } else {
+                                unauthorizedFailure.set(rootCause(failure));
+                            }
+                            unauthorizedFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Unauthorized Budget draft");
+                    helper.assertTrue(
+                            unauthorizedFinished.get(),
+                            "unauthorized Budget draft completed");
+                    helper.assertTrue(
+                            unauthorizedFailure.get() instanceof SecurityException,
+                            "unauthorized Budget draft fails at Nation fiscal permission");
+                    helper.assertTrue(
+                            budgetByRequest(databaseFile, unauthorizedRequestId) == null,
+                            "unauthorized Budget draft creates no row");
+                    helper.assertTrue(
+                            !fiscalServiceExists(databaseFile, "civiceconomy-budget"),
+                            "unauthorized Budget draft creates no internal service");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            NationRegistry nations = new NationRegistry(
+                                    database, snapshot(teamSnapshot));
+                            var provider = new FtbTeamsNationProvider(
+                                    nations,
+                                    new CitizenshipRegistry(
+                                            database,
+                                            java.time.Duration.ofDays(7L),
+                                            setupClock),
+                                    new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                                    snapshot(teamSnapshot));
+                            new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                                    .grant(new GrantNationFiscalPermission(
+                                            new ServiceIdentity("civiceconomy-gametest"),
+                                            "budget-draft-authority-" + UUID.randomUUID(),
+                                            nationId.get(),
+                                            actor.getUUID(),
+                                            actor.getUUID(),
+                                            NationFiscalPermission.DRAFT_BUDGET,
+                                            "Authorize real player Budget drafting"));
+                            return null;
+                        })
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                permissionReady.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget permission");
+                    helper.assertTrue(permissionReady.get(), "Budget permission ready");
+                })
+                .thenExecute(() -> {
+                    try {
+                        String command = "civic economy nation budget create " + requestId
+                                + " 300 PUBLIC_WORKS " + expiresAt
+                                + " GameTest public works allocation";
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget draft command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget draft replay command result");
+                        commandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget draft command");
+                    helper.assertTrue(commandStarted.get(), "Budget draft command started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    helper.assertTrue(budget != null, "durable Budget draft");
+                    helper.assertValueEqual(
+                            "nation:" + nationId.get().value() + ":treasury",
+                            budget.sourceAccount(),
+                            "Budget source derived from formal Nation");
+                    helper.assertValueEqual(300L, budget.amountMinorUnits(), "Budget amount");
+                    helper.assertValueEqual("PUBLIC_WORKS", budget.budgetCode(), "Budget code");
+                    helper.assertValueEqual(
+                            "GameTest public works allocation",
+                            budget.purpose(),
+                            "Budget purpose");
+                    helper.assertValueEqual(expiresAt, budget.expiresAt(), "Budget expiry");
+                    helper.assertValueEqual("DRAFT", budget.state(), "Budget draft state");
+                    helper.assertTrue(budget.escrowId() == null, "Budget draft has no Escrow");
+                    helper.assertValueEqual(
+                            0L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "Budget draft moves no LC");
+                })
+                .thenExecute(() -> runtime.createNationalBudgetDraft(
+                                actor,
+                                requestId,
+                                301L,
+                                "PUBLIC_WORKS",
+                                expiresAt,
+                                "GameTest public works allocation")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Changed Budget replay unexpectedly succeeded"));
+                            } else {
+                                changedReplayFailure.set(rootCause(failure));
+                            }
+                            changedReplayFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Changed Budget replay");
+                    helper.assertTrue(changedReplayFinished.get(), "changed replay completed");
+                    helper.assertTrue(
+                            changedReplayFailure.get()
+                                    instanceof org.civiceconomy.fiscal.IdempotencyConflictException,
+                            "changed Budget replay conflicts");
+                    helper.assertValueEqual(
+                            300L,
+                            budgetByRequest(databaseFile, requestId).amountMinorUnits(),
+                            "changed replay preserves original Budget");
+                })
+                .thenSucceed();
     }
 
     @GameTest(template = "empty", timeoutTicks = 500)
@@ -5224,6 +5450,47 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static BudgetRow budgetByRequest(Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT source_account, amount_minor_units, budget_code, purpose,
+                               expires_at_epoch_millis, state, escrow_id
+                        FROM fiscal_budget
+                        WHERE service_identity = ? AND request_id = ?
+                        """)) {
+            query.setString(1, "civiceconomy-budget");
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new BudgetRow(
+                                result.getString(1),
+                                result.getLong(2),
+                                result.getString(3),
+                                result.getString(4),
+                                result.getLong(5),
+                                result.getString(6),
+                                result.getString(7))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Budget draft", failure);
+        }
+    }
+
+    private static boolean fiscalServiceExists(Path databaseFile, String serviceIdentity) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT 1 FROM fiscal_service WHERE service_identity = ?
+                        """)) {
+            query.setString(1, serviceIdentity);
+            try (var result = query.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Fiscal Service", failure);
+        }
+    }
+
     private static void assertCitizenshipCorrectionGraceStarted(
             GameTestHelper helper,
             Path databaseFile,
@@ -5410,4 +5677,13 @@ public final class CivicServerRuntimeGameTests {
             int requiredApprovals,
             int approvalCount,
             UUID policyId) {}
+
+    private record BudgetRow(
+            String sourceAccount,
+            long amountMinorUnits,
+            String budgetCode,
+            String purpose,
+            long expiresAt,
+            String state,
+            String escrowId) {}
 }

@@ -90,12 +90,71 @@ final class NationApplicationCommands {
                 .then(Commands.literal("population")
                         .executes(context -> population(context.getSource())))
                 .then(roleCommand())
+                .then(budgetCommand())
                 .then(billCommand())
                 .then(mintCommand())
                 .then(territoryCommand())
                 .then(treasuryCommand())
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> budgetCommand() {
+        var purpose = Commands.argument("purpose", StringArgumentType.greedyString())
+                .executes(context -> createBudgetDraft(
+                        context.getSource(),
+                        StringArgumentType.getString(context, "requestId"),
+                        LongArgumentType.getLong(context, "amountMinorUnits"),
+                        StringArgumentType.getString(context, "budgetCode"),
+                        LongArgumentType.getLong(context, "expiresAtEpochMillis"),
+                        StringArgumentType.getString(context, "purpose")));
+        var expires = Commands.argument(
+                        "expiresAtEpochMillis", LongArgumentType.longArg(0L))
+                .then(purpose);
+        var code = Commands.argument("budgetCode", StringArgumentType.word())
+                .then(expires);
+        var amount = Commands.argument(
+                        "amountMinorUnits", LongArgumentType.longArg(1L))
+                .then(code);
+        var request = Commands.argument("requestId", StringArgumentType.word())
+                .then(amount);
+        return Commands.literal("budget")
+                .then(Commands.literal("create").then(request));
+    }
+
+    private static int createBudgetDraft(
+            CommandSourceStack source,
+            String requestId,
+            long amountMinorUnits,
+            String budgetCode,
+            long expiresAtEpochMillis,
+            String purpose)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .createNationalBudgetDraft(
+                        player,
+                        requestId,
+                        amountMinorUnits,
+                        budgetCode,
+                        expiresAtEpochMillis,
+                        purpose)
+                .whenComplete((budget, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget draft creation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Created Budget draft " + budget.budgetId()
+                                                + " source=" + budget.sourceAccount().value()
+                                                + " amount=" + budget.amount().minorUnits()
+                                                + " code=" + budget.budgetCode()
+                                                + " expiresAt=" + budget.expiresAt()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Budget draft creation queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> billCommand() {

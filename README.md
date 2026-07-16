@@ -110,6 +110,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation role list
 /civic economy nation role grant <playerUuid> <permission> <reason>
 /civic economy nation role revoke <grantUuid> <reason>
+/civic economy nation budget create <requestId> <amountMinorUnits> <budgetCode> <expiresAtEpochMillis> <purpose>
 /civic economy nation bill issue <requestId> <payerUuid> <amountMinorUnits> <kind> <dueAtEpochMillis> <purpose>
 /civic economy nation bill list
 /civic economy nation bill status <billId>
@@ -139,6 +140,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。
 
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、审批策略、公共政策和恢复管理。
+
+`nation budget create` 创建一条不移动 LC、也不创建 Reservation 或 Escrow 的 National Treasury Budget draft。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导精确来源国库，并在注册内部 Budget 服务前要求该 Citizen 具有本国 `DRAFT_BUDGET`。命令只接受稳定请求 ID、正金额、预算代码、未来到期时间和用途；调用者不能提交 Nation、Team 或来源账户。同一请求重放返回原 draft，改变任一字段会冲突。
 
 `nation bill issue` 创建一张不移动 LC、也不创建 Reservation 或 Escrow 的手动 Fiscal Bill。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导授权与收款方，要求精确 Nation `INITIATE_PAYMENT`，并把 beneficiary 固定为该 Nation 的 National Treasury。命令只接受 payer 的玩家 UUID，来源账户固定派生为 `player:<UUID>`；调用者不能提交 Nation、Team、来源账户或重定向 beneficiary。同一稳定 `requestId` 重放返回原 Bill，改变 payer、金额、种类、用途或到期时间会失败。
 
