@@ -124,6 +124,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation treasury withdraw policy status
 /civic economy nation treasury withdraw policy history
 /civic economy nation treasury withdraw policy schedule <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <thresholdMinorUnits> <requiredApprovals> <reason>
+/civic economy nation treasury withdraw policy schedule-tiered <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <tierSpec> <reason>
 /civic economy nation treasury destroy <requestId> <amountMinorUnits> <reason>
 /civic economy nation territory allowance
 /civic economy nation territory prepare <requestId>
@@ -161,7 +162,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `nation treasury withdraw` 把精确 National Treasury 的 LC 银行余额等额转换为交付给当前获授权玩家的实体 LC 硬币，不是付款、发行、永久销毁或免费赠款。命令只接受稳定请求 ID、正金额和审计理由；服务端推导真实玩家、FTB Team、正式 Citizenship/Nation 与来源国库，并要求该玩家拥有 `MANAGE_WITHDRAWAL`。请求会按发起时生效的 Withdrawal Approval Policy 固定政策版本、所需人数和到期时间，并自动记录发起人的第一票；人数不足时只保留 `PENDING` 审批，不创建提现操作、不扣 LC。其他具有同一 Nation `MANAGE_WITHDRAWAL` 的正式 Citizen 使用 `withdraw approve` 对精确 approval UUID 审批，同一 Citizen 不能重复计票；达到人数后，提现操作永久绑定该审批决定。具有同一精确权限的当前正式 Citizen 可以用稳定 request ID 取消仍为 `PENDING` 或尚未产生 Withdrawal Operation 的 `APPROVED` 决定；取消只写入不可变审计并转为 `CANCELLED`，不移动 LC、不退款、不释放资金，也不能补偿或改写已有 Operation。首次外部执行会先在目标玩家 inventory 副本上按固定 LC 面额精确模拟容量，容量不足时国库不扣款；持久化操作、国库扣款 marker 和玩家现金交付 marker 共同保证重放只补齐缺失步骤。提现不改变 Cumulative Net Issuance，调用者也不能指定 Nation、Team、来源账户或目标玩家。
 
-`withdraw policy schedule` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`。策略只能未来生效，`approvalLifetimeMillis` 必须为正；`thresholdMinorUnits=0` 表示所有提现都需要指定人数，正阈值表示低于阈值保持单人、达到或超过阈值需要 `requiredApprovals`（1–16）名不同 Citizen。策略版本、操作者、门槛、人数、审批有效时长、生效时间和理由都会持久化审计；相同 request ID 改变任一字段会冲突。每个新审批只读取创建时生效的政策并固定计算出的到期时间，后续政策版本不会改写旧审批。
+`withdraw policy schedule|schedule-tiered` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`。策略只能未来生效，`approvalLifetimeMillis` 必须为正。简单命令中，`thresholdMinorUnits=0` 表示所有提现都需要指定人数，正阈值表示低于阈值保持单人、达到或超过阈值需要 `requiredApprovals`（1–16）名不同 Citizen。多层命令的 `tierSpec` 使用未加空格的 `minimumAmount:requiredApprovals` 逗号序列，例如 `0:1,500:2,2000:3`；第一层必须从零开始，金额必须严格递增，每层人数必须为 1–16。策略版本、操作者、全部层级、审批有效时长、生效时间和理由都会持久化审计；相同 request ID 改变任一字段会冲突。每个新审批只读取创建时生效的政策并固定计算出的到期时间，后续策略版本不会改写旧审批。
 
 `withdraw policy status|history` 只从真实玩家当前有效 Citizenship 推导 Nation，任何正式 Citizen 都可查看本国当前政策以及按生效时间排序的全部当前/未来版本，不能提交 Nation 或账户作用域；历史显示操作者、理由、层级、有效时长和时间戳，且不触发政策生效或任何写操作。`withdraw approval list|status` 进一步要求同一 Nation 的精确 `MANAGE_WITHDRAWAL`，只返回本国审批，并显示发起人、金额、策略、所需人数、每名审批人及其理由/时间、`PENDING`/`APPROVED`/`EXECUTED` 状态和当前玩家是否仍可审批；外部 Nation 的真实 approval UUID 也会失败关闭。OP/控制台的 `admin withdrawal recovery status` 只读取已批准但尚未创建 Operation 的决定及仍为 `PREPARED` 的 Operation，不会触发、准备或提交提现，自动恢复仍是唯一执行路径。
 

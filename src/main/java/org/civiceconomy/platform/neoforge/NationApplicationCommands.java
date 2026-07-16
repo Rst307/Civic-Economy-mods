@@ -10,6 +10,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -26,6 +27,7 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
+import org.civiceconomy.fiscal.WithdrawalApprovalTier;
 import org.civiceconomy.integration.ftb.FtbChunksAdapter;
 import dev.ftb.mods.ftbchunks.api.FTBChunksAPI;
 import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
@@ -329,6 +331,24 @@ final class NationApplicationCommands {
                 .then(lifetime);
         var request = Commands.argument("requestId", StringArgumentType.word())
                 .then(effective);
+        var tieredReason = Commands.argument("reason", StringArgumentType.greedyString())
+                .executes(context -> scheduleTieredTreasuryWithdrawalPolicy(
+                        context.getSource(),
+                        StringArgumentType.getString(context, "requestId"),
+                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                        LongArgumentType.getLong(context, "approvalLifetimeMillis"),
+                        WithdrawalApprovalTierArgumentType.getTiers(context, "tierSpec"),
+                        StringArgumentType.getString(context, "reason")));
+        var tierSpec = Commands.argument("tierSpec", WithdrawalApprovalTierArgumentType.tiers())
+                .then(tieredReason);
+        var tieredLifetime = Commands.argument(
+                        "approvalLifetimeMillis", LongArgumentType.longArg(1L))
+                .then(tierSpec);
+        var tieredEffective = Commands.argument(
+                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                .then(tieredLifetime);
+        var tieredRequest = Commands.argument("requestId", StringArgumentType.word())
+                .then(tieredEffective);
         return Commands.literal("policy")
                 .then(Commands.literal("status")
                         .executes(context -> treasuryWithdrawalPolicyStatus(
@@ -336,7 +356,8 @@ final class NationApplicationCommands {
                 .then(Commands.literal("history")
                         .executes(context -> treasuryWithdrawalPolicyHistory(
                                 context.getSource())))
-                .then(Commands.literal("schedule").then(request));
+                .then(Commands.literal("schedule").then(request))
+                .then(Commands.literal("schedule-tiered").then(tieredRequest));
     }
 
     private static int treasuryWithdrawalPolicyStatus(CommandSourceStack source)
@@ -591,6 +612,44 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(
                 () -> Component.literal("Treasury Withdrawal approval policy queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleTieredTreasuryWithdrawalPolicy(
+            CommandSourceStack source,
+            String requestId,
+            long effectiveAtEpochMillis,
+            long approvalLifetimeMillis,
+            List<WithdrawalApprovalTier> tiers,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .scheduleTieredWithdrawalApprovalPolicy(
+                        player,
+                        requestId,
+                        approvalLifetimeMillis,
+                        tiers,
+                        effectiveAtEpochMillis,
+                        reason)
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Tiered Treasury Withdrawal approval policy", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled tiered Withdrawal Approval Policy "
+                                                + policy.policyId()
+                                                + " effectiveAt=" + policy.effectiveAt()
+                                                + " approvalLifetime="
+                                                + policy.approvalLifetime()
+                                                + " tiers=" + policy.tiers()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Tiered Treasury Withdrawal approval policy queued"),
                 false);
         return Command.SINGLE_SUCCESS;
     }

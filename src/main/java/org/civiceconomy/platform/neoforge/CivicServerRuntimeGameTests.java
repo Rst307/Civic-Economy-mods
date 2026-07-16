@@ -573,7 +573,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Treasury Withdrawal approval actions");
         helper.assertValueEqual(
-                Set.of("schedule", "status", "history"),
+                Set.of("schedule", "schedule-tiered", "status", "history"),
                 economy.getChild("nation")
                         .getChild("treasury")
                         .getChild("withdraw")
@@ -2147,6 +2147,7 @@ public final class CivicServerRuntimeGameTests {
         String policyRequestId = "future-withdrawal-policy-" + UUID.randomUUID();
         String reason = "GameTest governed Treasury Withdrawal";
         AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<UUID> activePolicyId = new AtomicReference<>();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean policyCommandStarted = new AtomicBoolean();
@@ -2213,7 +2214,7 @@ public final class CivicServerRuntimeGameTests {
                             approver.getUUID(),
                             NationFiscalPermission.MANAGE_WITHDRAWAL,
                             "Approve governed Treasury Withdrawal"));
-                    new org.civiceconomy.fiscal.WithdrawalApprovalPolicyRegistry(
+                    var activePolicy = new org.civiceconomy.fiscal.WithdrawalApprovalPolicyRegistry(
                                     database,
                                     Clock.fixed(
                                             now.minus(java.time.Duration.ofDays(2)),
@@ -2230,6 +2231,7 @@ public final class CivicServerRuntimeGameTests {
                                     java.time.Duration.ofDays(7L),
                                     now.minus(java.time.Duration.ofDays(1)),
                                     "Require two distinct Citizens"));
+                    activePolicyId.set(activePolicy.policyId());
                     return nation.nationId();
                 })
                 .whenComplete((registeredNationId, failure) ->
@@ -2260,9 +2262,10 @@ public final class CivicServerRuntimeGameTests {
                 .thenExecute(() -> {
                     try {
                         long effectiveAt = now.plus(java.time.Duration.ofDays(7)).toEpochMilli();
-                        String command = "civic economy nation treasury withdraw policy schedule "
+                        String command = "civic economy nation treasury withdraw policy schedule-tiered "
                                 + policyRequestId + " " + effectiveAt
-                                + " 259200000 500 3 Future governed Withdrawal policy";
+                                + " 259200000 0:1,500:2,2000:3"
+                                + " Future governed Withdrawal policy";
                         helper.assertValueEqual(
                                 1,
                                 helper.getLevel().getServer().getCommands().getDispatcher()
@@ -2271,6 +2274,14 @@ public final class CivicServerRuntimeGameTests {
                                                 initiator.createCommandSourceStack()
                                                         .withSuppressedOutput()),
                                 "Withdrawal policy schedule command result");
+                        helper.assertValueEqual(
+                                1,
+                                helper.getLevel().getServer().getCommands().getDispatcher()
+                                        .execute(
+                                                command,
+                                                initiator.createCommandSourceStack()
+                                                        .withSuppressedOutput()),
+                                "Withdrawal tiered policy replay command result");
                         policyCommandStarted.set(true);
                     } catch (Throwable failure) {
                         asyncFailure.set(failure);
@@ -2283,6 +2294,14 @@ public final class CivicServerRuntimeGameTests {
                             259_200_000L,
                             withdrawalApprovalPolicyLifetime(databaseFile, policyRequestId),
                             "future-effective Withdrawal policy pins three-day lifetime");
+                    helper.assertValueEqual(
+                            "0:1,500:2,2000:3",
+                            withdrawalApprovalPolicyTiers(databaseFile, policyRequestId),
+                            "future-effective Withdrawal policy persists ordered tiers");
+                    helper.assertValueEqual(
+                            1,
+                            withdrawalApprovalPolicyCount(databaseFile, policyRequestId),
+                            "tiered policy replay persists one policy version");
                 })
                 .thenExecute(() -> {
                     try {
@@ -2310,6 +2329,14 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertTrue(approval != null, "durable Withdrawal approval request");
                     helper.assertValueEqual("PENDING", approval.state(), "pending approval state");
                     helper.assertValueEqual(2, approval.requiredApprovals(), "pinned approval count");
+                    helper.assertValueEqual(
+                            activePolicyId.get(),
+                            approval.policyId(),
+                            "existing active policy remains pinned after future schedule");
+                    helper.assertValueEqual(
+                            604_800_000L,
+                            treasuryWithdrawalApprovalLifetime(databaseFile, withdrawalRequestId),
+                            "existing approval keeps original seven-day expiry");
                     helper.assertValueEqual(1, approval.approvalCount(), "initiator approval count");
                     helper.assertTrue(
                             treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId) == null,
@@ -4072,7 +4099,8 @@ public final class CivicServerRuntimeGameTests {
                         SELECT approval.approval_request_id,
                                approval.state,
                                approval.required_approvals,
-                               COUNT(vote.vote_id)
+                               COUNT(vote.vote_id),
+                               approval.policy_id
                         FROM treasury_withdrawal_approval_request approval
                         LEFT JOIN treasury_withdrawal_approval_vote vote
                           ON vote.approval_request_id = approval.approval_request_id
@@ -4080,7 +4108,8 @@ public final class CivicServerRuntimeGameTests {
                           AND approval.request_id = ?
                         GROUP BY approval.approval_request_id,
                                  approval.state,
-                                 approval.required_approvals
+                                 approval.required_approvals,
+                                 approval.policy_id
                         """)) {
             query.setString(
                     1,
@@ -4094,7 +4123,8 @@ public final class CivicServerRuntimeGameTests {
                                 UUID.fromString(result.getString(1)),
                                 result.getString(2),
                                 result.getInt(3),
-                                result.getInt(4))
+                                result.getInt(4),
+                                UUID.fromString(result.getString(5)))
                         : null;
             }
         } catch (SQLException failure) {
@@ -4123,6 +4153,84 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect Withdrawal Approval Policy", failure);
+        }
+    }
+
+    private static String withdrawalApprovalPolicyTiers(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT tier.minimum_amount_minor_units,
+                               tier.required_approvals
+                        FROM withdrawal_approval_policy policy
+                        JOIN withdrawal_approval_policy_tier tier
+                          ON tier.policy_id = policy.policy_id
+                        WHERE policy.service_identity = ? AND policy.request_id = ?
+                        ORDER BY tier.minimum_amount_minor_units
+                        """)) {
+            query.setString(1, "civiceconomy-withdrawal-governance");
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                var tiers = new java.util.ArrayList<String>();
+                while (result.next()) {
+                    tiers.add(result.getLong(1) + ":" + result.getInt(2));
+                }
+                return String.join(",", tiers);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Withdrawal Approval Policy tiers", failure);
+        }
+    }
+
+    private static int withdrawalApprovalPolicyCount(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM withdrawal_approval_policy
+                        WHERE service_identity = ? AND request_id = ?
+                        """)) {
+            query.setString(1, "civiceconomy-withdrawal-governance");
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next() ? result.getInt(1) : 0;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Withdrawal Approval Policy replay", failure);
+        }
+    }
+
+    private static long treasuryWithdrawalApprovalLifetime(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT expiry.expires_at_epoch_millis
+                                   - approval.initiated_at_epoch_millis
+                        FROM treasury_withdrawal_approval_request approval
+                        JOIN treasury_withdrawal_approval_expiry expiry
+                          ON expiry.approval_request_id = approval.approval_request_id
+                        WHERE approval.service_identity = ? AND approval.request_id = ?
+                        """)) {
+            query.setString(
+                    1,
+                    org.civiceconomy.fiscal.TreasuryWithdrawalFiscalServiceProvisioner
+                            .SERVICE_IDENTITY
+                            .value());
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                if (!result.next()) {
+                    throw new IllegalStateException(
+                            "Unknown Treasury Withdrawal approval request " + requestId);
+                }
+                return result.getLong(1);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Treasury Withdrawal approval lifetime", failure);
         }
     }
 
@@ -5300,5 +5408,6 @@ public final class CivicServerRuntimeGameTests {
             UUID approvalRequestId,
             String state,
             int requiredApprovals,
-            int approvalCount) {}
+            int approvalCount,
+            UUID policyId) {}
 }
