@@ -74,9 +74,26 @@ public final class TreasuryWithdrawalCoordinator {
             Clock clock,
             ServerLevel level,
             Function<UUID, ServerPlayer> players) {
+        return live(
+                database,
+                session,
+                clock,
+                level,
+                players,
+                TreasuryWithdrawalProgressObserver.NONE);
+    }
+
+    public static TreasuryWithdrawalCoordinator live(
+            CivicDatabase database,
+            FiscalServiceSession session,
+            Clock clock,
+            ServerLevel level,
+            Function<UUID, ServerPlayer> players,
+            TreasuryWithdrawalProgressObserver progressObserver) {
         return new TreasuryWithdrawalCoordinator(
                 database,
-                withdrawal -> LightmansCurrencyTreasuryWithdrawals.live(level, players)
+                withdrawal -> LightmansCurrencyTreasuryWithdrawals.live(
+                                level, players, progressObserver)
                         .apply(withdrawal),
                 session,
                 clock);

@@ -97,7 +97,18 @@ Budget Disbursement 匹配世界进程重启演练为每个崩溃窗口分别使
 .\gradlew.bat runGameTestServer -PbudgetDisbursementRestartDrill=verify --no-daemon --console=plain
 ```
 
-这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。Budget Disbursement 演练使用独立 GameTest namespace，因此 matched-world `verify` 只重跑该恢复测试，不会让其他测试用旧世界数据重新初始化。
+National Treasury Withdrawal 匹配世界进程重启演练同样为两个崩溃窗口分别使用干净的 `run/world`。第一组在真实国库扣款及其 marker 已刷盘、玩家现金尚未交付时以退出码 `90` 终止；第二组在玩家 inventory 现金与交付 marker 已刷盘、SQLite 仍为 `PREPARED` 时以退出码 `91` 终止。每组的 `verify` 必须紧接着复用同一个世界：
+
+```powershell
+.\gradlew.bat runGameTestServer -PtreasuryWithdrawalRestartDrill=prepare-debit --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PtreasuryWithdrawalRestartDrill=verify --no-daemon --console=plain
+
+# 删除任务自有的 run/world，开始第二个独立窗口
+.\gradlew.bat runGameTestServer -PtreasuryWithdrawalRestartDrill=prepare-delivery --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PtreasuryWithdrawalRestartDrill=verify --no-daemon --console=plain
+```
+
+这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。Budget Disbursement 与 Treasury Withdrawal 演练各使用独立 GameTest namespace，因此 matched-world `verify` 只重跑对应恢复测试，不会让其他测试用旧世界数据重新初始化。
 
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
 

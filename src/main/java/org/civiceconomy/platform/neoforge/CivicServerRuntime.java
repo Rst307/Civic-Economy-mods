@@ -1165,7 +1165,9 @@ public final class CivicServerRuntime {
                                     current.server.overworld(),
                                     playerId -> actorPlayerId.equals(playerId)
                                             ? actor
-                                            : current.server.getPlayerList().getPlayer(playerId));
+                                            : current.server.getPlayerList().getPlayer(playerId),
+                                    TreasuryWithdrawalProcessRestartDrill.observer(
+                                            current.server));
                     TreasuryWithdrawal prepared = coordinator.prepare(
                             new ConfirmTreasuryWithdrawal(
                                     TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY,
@@ -1246,7 +1248,9 @@ public final class CivicServerRuntime {
                                     commandClock,
                                     current.server.overworld(),
                                     playerId -> current.server.getPlayerList()
-                                            .getPlayer(playerId));
+                                            .getPlayer(playerId),
+                                    TreasuryWithdrawalProcessRestartDrill.observer(
+                                            current.server));
                     TreasuryWithdrawal prepared =
                             coordinator.prepareApproved(approvalRequestId);
                     return new PreparedApprovedTreasuryWithdrawal(
@@ -1600,6 +1604,13 @@ public final class CivicServerRuntime {
         RuntimeState current = state;
         if (current != null) {
             scheduleMintBatchRecovery(current);
+        }
+    }
+
+    void recoverTreasuryWithdrawalsNowForGameTest() {
+        RuntimeState current = state;
+        if (current != null) {
+            scheduleTreasuryWithdrawalRecovery(current);
         }
     }
 
@@ -2814,7 +2825,10 @@ public final class CivicServerRuntime {
                                     database,
                                     session,
                                     recoveryClock,
-                                    current.server.overworld());
+                                    current.server.overworld(),
+                                    current.server.getPlayerList()::getPlayer,
+                                    TreasuryWithdrawalProcessRestartDrill.observer(
+                                            current.server));
                     List<TreasuryWithdrawal> withdrawals = new ArrayList<>(
                             coordinator.prepareApprovedPending());
                     withdrawals.addAll(

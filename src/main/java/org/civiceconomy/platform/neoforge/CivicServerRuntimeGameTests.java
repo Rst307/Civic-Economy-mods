@@ -1,6 +1,8 @@
 package org.civiceconomy.platform.neoforge;
 
 import com.mojang.authlib.GameProfile;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.github.lightman314.lightmanscurrency.api.money.bank.BankAPI;
 import io.github.lightman314.lightmanscurrency.api.money.coins.CoinAPI;
 import io.github.lightman314.lightmanscurrency.api.money.MoneyAPI;
@@ -10,7 +12,9 @@ import io.github.lightman314.lightmanscurrency.common.data.types.BankDataCache;
 import dev.ftb.mods.ftbteams.api.FTBTeamsAPI;
 import dev.ftb.mods.ftbteams.api.Team;
 import dev.ftb.mods.ftbteams.api.TeamRank;
+import dev.ftb.mods.ftbteams.data.AbstractTeam;
 import dev.ftb.mods.ftbteams.data.AbstractTeamBase;
+import dev.ftb.mods.ftbteams.data.PlayerTeam;
 import dev.ftb.mods.ftbteams.data.TeamManagerImpl;
 import dev.ftb.mods.ftbchunks.api.ClaimedChunk;
 import dev.ftb.mods.ftbchunks.api.FTBChunksAPI;
@@ -34,8 +38,11 @@ import java.util.stream.Collectors;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.Connection;
+import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.CommonListenerCookie;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.item.ItemStack;
@@ -544,6 +551,181 @@ public final class CivicServerRuntimeGameTests {
                     "restarted Budget Disbursement credits recipient once");
             assertRestartedBudgetDisbursementAccounting(
                     helper, databaseFile, marker);
+        });
+    }
+
+    static void prepareTreasuryWithdrawalProcessRestart(
+            GameTestHelper helper) {
+        UUID playerId = UUID.randomUUID();
+        ServerPlayer player = connectMockServerPlayer(
+                helper, playerId, "civic-wd-restart");
+        player.getInventory().clearContent();
+        player.getInventory().setChanged();
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String requestId = TreasuryWithdrawalProcessRestartDrill.REQUEST_PREFIX
+                + UUID.randomUUID();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean withdrawalStarted = new AtomicBoolean();
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock =
+                java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(
+                            database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "withdrawal-restart-nation-" + UUID.randomUUID(),
+                            team.getId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, java.time.Duration.ofDays(7L), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "withdrawal-restart-citizenship-" + UUID.randomUUID(),
+                            playerId,
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                            .grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "withdrawal-restart-authority-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    playerId,
+                                    playerId,
+                                    NationFiscalPermission.MANAGE_WITHDRAWAL,
+                                    "Matched Treasury Withdrawal process restart"));
+                    return nation.nationId();
+                })
+                .whenComplete((nationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                fundTreasury(
+                                        helper,
+                                        nationId,
+                                        "Treasury Withdrawal restart drill Treasury",
+                                        500L);
+                                TreasuryWithdrawalProcessRestartDrill.expect(
+                                        requestId, playerId);
+                                setupReady.set(true);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            assertNoAsyncFailure(
+                    helper, asyncFailure, "Treasury Withdrawal restart preparation");
+            helper.assertTrue(
+                    setupReady.get(),
+                    "Treasury Withdrawal restart preparation ready");
+            if (withdrawalStarted.compareAndSet(false, true)) {
+                runtime.withdrawNationalTreasury(
+                                player,
+                                requestId,
+                                100L,
+                                "Matched Treasury Withdrawal process restart")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                asyncFailure.set(new AssertionError(
+                                        "Treasury Withdrawal restart preparation completed without halt"));
+                            }
+                        });
+            }
+            helper.assertTrue(
+                    false,
+                    "Treasury Withdrawal restart preparation expected controlled process halt");
+        });
+    }
+
+    static void verifyTreasuryWithdrawalProcessRestart(
+            GameTestHelper helper) {
+        TreasuryWithdrawalProcessRestartDrill.Marker marker =
+                TreasuryWithdrawalProcessRestartDrill.readMarker(
+                        helper.getLevel().getServer());
+        ServerPlayer player = connectMockServerPlayer(
+                helper, marker.playerId(), "civic-wd-restart");
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+
+        TreasuryWithdrawalRow prepared =
+                treasuryWithdrawalByRequest(databaseFile, marker.requestId());
+        helper.assertTrue(prepared != null, "restarted Treasury Withdrawal row exists");
+        helper.assertValueEqual(
+                marker.withdrawalId(),
+                prepared.withdrawalId(),
+                "restarted Treasury Withdrawal identity");
+        helper.assertValueEqual("PREPARED", prepared.state(), "restart-window operation state");
+        helper.assertValueEqual(
+                400L,
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                        .balance(new AccountId(marker.treasuryAccount()))
+                        .minorUnits(),
+                "restart-window Treasury debit persisted once");
+        helper.assertValueEqual(
+                marker.haltedAfterDelivery() ? 100L : 0L,
+                playerInventoryMoney(player),
+                "restart-window player inventory state");
+
+        helper.succeedWhen(() -> {
+            runtime.recoverTreasuryWithdrawalsNowForGameTest();
+            TreasuryWithdrawalRow recovered =
+                    treasuryWithdrawalByRequest(databaseFile, marker.requestId());
+            if (!"COMMITTED".equals(recovered.state())) {
+                helper.assertTrue(false, "waiting for Treasury Withdrawal restart recovery");
+            }
+            helper.assertValueEqual(
+                    marker.withdrawalId(),
+                    recovered.withdrawalId(),
+                    "recovered Treasury Withdrawal identity");
+            helper.assertValueEqual(
+                    marker.playerId().toString(),
+                    recovered.actorPlayerId(),
+                    "recovered Treasury Withdrawal player");
+            helper.assertValueEqual(
+                    marker.amountMinorUnits(),
+                    recovered.amountMinorUnits(),
+                    "recovered Treasury Withdrawal amount");
+            helper.assertValueEqual(
+                    400L,
+                    LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                            .balance(new AccountId(marker.treasuryAccount()))
+                            .minorUnits(),
+                    "recovered Treasury is not debited twice");
+            helper.assertValueEqual(
+                    100L,
+                    playerInventoryMoney(player),
+                    "recovered cash is delivered exactly once");
+            helper.assertValueEqual(
+                    1,
+                    treasuryWithdrawalDeliveryCount(player, marker.withdrawalId()),
+                    "one durable Treasury Withdrawal delivery marker");
+            TreasuryWithdrawalApprovalRow approval =
+                    treasuryWithdrawalApprovalByRequest(databaseFile, marker.requestId());
+            helper.assertTrue(approval != null, "restarted Withdrawal approval exists");
+            helper.assertValueEqual(
+                    "EXECUTED", approval.state(), "restarted Withdrawal approval state");
+            helper.assertValueEqual(
+                    0L,
+                    cumulativeNetIssuance(databaseFile),
+                    "Treasury Withdrawal restart preserves Monetary Supply");
         });
     }
 
@@ -5323,12 +5505,56 @@ public final class CivicServerRuntimeGameTests {
                 .getCoreValue();
     }
 
+    private static ServerPlayer connectMockServerPlayer(
+            GameTestHelper helper, UUID playerId, String playerName) {
+        var server = helper.getLevel().getServer();
+        GameProfile profile = new GameProfile(playerId, playerName);
+        CommonListenerCookie cookie = CommonListenerCookie.createInitial(profile, false);
+        ServerPlayer player = new ServerPlayer(
+                server,
+                helper.getLevel(),
+                profile,
+                cookie.clientInformation()) {
+            @Override
+            public boolean isSpectator() {
+                return false;
+            }
+
+            @Override
+            public boolean isCreative() {
+                return true;
+            }
+        };
+        Connection connection = new Connection(PacketFlow.SERVERBOUND);
+        new EmbeddedChannel(new ChannelHandler[] {connection});
+        net.neoforged.neoforge.network.registration.NetworkRegistry
+                .configureMockConnection(connection);
+        server.getPlayerList().placeNewPlayer(connection, player, cookie);
+        return player;
+    }
+
+    private static int treasuryWithdrawalDeliveryCount(
+            ServerPlayer player, UUID withdrawalId) {
+        var civic = player.getPersistentData().getCompound("civiceconomy");
+        var deliveries = civic.getList(
+                "TreasuryWithdrawalCashDeliveries",
+                net.minecraft.nbt.Tag.TAG_STRING);
+        int count = 0;
+        for (int index = 0; index < deliveries.size(); index++) {
+            if (withdrawalId.toString().equals(deliveries.getString(index))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private static TreasuryWithdrawalRow treasuryWithdrawalByRequest(
             Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var query = connection.prepareStatement("""
-                        SELECT nation_id,
+                        SELECT withdrawal_id,
+                               nation_id,
                                source_account,
                                actor_player_id,
                                amount_minor_units,
@@ -5347,13 +5573,14 @@ public final class CivicServerRuntimeGameTests {
             try (var result = query.executeQuery()) {
                 return result.next()
                         ? new TreasuryWithdrawalRow(
-                                result.getString(1),
+                                UUID.fromString(result.getString(1)),
                                 result.getString(2),
                                 result.getString(3),
-                                result.getLong(4),
-                                result.getString(5),
+                                result.getString(4),
+                                result.getLong(5),
                                 result.getString(6),
-                                result.getString(7))
+                                result.getString(7),
+                                result.getString(8))
                         : null;
             }
         } catch (SQLException failure) {
@@ -6832,15 +7059,23 @@ public final class CivicServerRuntimeGameTests {
 
     private static Team createHeadOwnedFtbTeamFixture(ServerPlayer player) {
         try {
+            TeamManagerImpl manager = (TeamManagerImpl) FTBTeamsAPI.api().getManager();
             var method = TeamManagerImpl.class.getDeclaredMethod(
                     "createPartyTeamInternal", UUID.class, ServerPlayer.class, String.class);
             method.setAccessible(true);
             Team team = (Team) method.invoke(
-                    FTBTeamsAPI.api().getManager(),
+                    manager,
                     player.getUUID(),
                     null,
                     "Civic Founding " + UUID.randomUUID());
             ((AbstractTeamBase) team).addMember(player.getUUID(), TeamRank.OWNER);
+            manager.getPlayerTeamForPlayerID(player.getUUID())
+                    .filter(PlayerTeam.class::isInstance)
+                    .map(PlayerTeam.class::cast)
+                    .ifPresent(personalTeam -> {
+                        personalTeam.setEffectiveTeam((AbstractTeam) team);
+                        personalTeam.markDirty();
+                    });
             team.markDirty();
             return team;
         } catch (ReflectiveOperationException failure) {
@@ -6894,6 +7129,7 @@ public final class CivicServerRuntimeGameTests {
             String state) {}
 
     private record TreasuryWithdrawalRow(
+            UUID withdrawalId,
             String nationId,
             String sourceAccount,
             String actorPlayerId,

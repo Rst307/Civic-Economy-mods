@@ -16,6 +16,7 @@ import org.civiceconomy.gametest.LightmansCurrencyPlayerPaymentsGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAccounts;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMonetaryGuard;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
+import org.civiceconomy.platform.neoforge.CivicCommandArgumentTypes;
 import org.civiceconomy.platform.neoforge.CivicServerRuntime;
 import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
 import org.civiceconomy.platform.neoforge.MintMaterialCustodyGameTests;
@@ -31,6 +32,7 @@ public final class CivicEconomy {
     private final CivicServerRuntime serverRuntime;
 
     public CivicEconomy(IEventBus modEventBus) {
+        CivicCommandArgumentTypes.register(modEventBus);
         CivicServerRuntime runtime = new CivicServerRuntime();
         serverRuntime = runtime;
         modEventBus.addListener(RegisterGameTestsEvent.class, CivicEconomy::registerGameTests);
