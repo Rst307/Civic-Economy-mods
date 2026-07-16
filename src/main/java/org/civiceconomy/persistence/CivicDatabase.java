@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 56;
+    private static final int SCHEMA_VERSION = 57;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -7283,7 +7283,8 @@ public final class CivicDatabase implements AutoCloseable {
             UUID initialVoteId,
             UUID initialApproverPlayerId,
             String initialApprovalReason,
-            long initiatedAtEpochMillis) {
+            long initiatedAtEpochMillis,
+            long expiresAtEpochMillis) {
         try {
             connection.setAutoCommit(false);
             String state = requiredApprovals == 1 ? "APPROVED" : "PENDING";
@@ -7300,6 +7301,12 @@ public final class CivicDatabase implements AutoCloseable {
                         vote_id, approval_request_id, service_identity, request_id,
                         approver_player_id, reason, approved_at_epoch_millis
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """);
+                    PreparedStatement insertExpiry = connection.prepareStatement("""
+                    INSERT INTO treasury_withdrawal_approval_expiry (
+                        approval_request_id, expires_at_epoch_millis,
+                        expired_at_epoch_millis
+                    ) VALUES (?, ?, NULL)
                     """)) {
                 insertRequest.setString(1, approvalRequestId.toString());
                 insertRequest.setString(2, serviceIdentity);
@@ -7328,6 +7335,10 @@ public final class CivicDatabase implements AutoCloseable {
                 insertVote.setString(6, initialApprovalReason);
                 insertVote.setLong(7, initiatedAtEpochMillis);
                 insertVote.executeUpdate();
+
+                insertExpiry.setString(1, approvalRequestId.toString());
+                insertExpiry.setLong(2, expiresAtEpochMillis);
+                insertExpiry.executeUpdate();
             }
             connection.commit();
             return treasuryWithdrawalApproval(approvalRequestId);
@@ -7395,6 +7406,78 @@ public final class CivicDatabase implements AutoCloseable {
                     "Unable to approve Treasury Withdrawal", failure);
         } finally {
             restoreAutoCommit("Treasury Withdrawal approval vote");
+        }
+    }
+
+    public synchronized List<StoredTreasuryWithdrawalApproval>
+            expirePendingTreasuryWithdrawalApprovals(
+                    String serviceIdentity,
+                    long asOfEpochMillis,
+                    long expiredAtEpochMillis) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()
+                || asOfEpochMillis < 0L || expiredAtEpochMillis < 0L) {
+            throw new IllegalArgumentException(
+                    "Treasury Withdrawal approval expiry values are invalid");
+        }
+        List<UUID> approvalIds = new ArrayList<>();
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement query = connection.prepareStatement("""
+                    SELECT approval.approval_request_id
+                    FROM treasury_withdrawal_approval_request approval
+                    JOIN treasury_withdrawal_approval_expiry expiry
+                      ON expiry.approval_request_id = approval.approval_request_id
+                    LEFT JOIN treasury_withdrawal_operation operation
+                      ON operation.approval_request_id = approval.approval_request_id
+                    WHERE approval.service_identity = ?
+                      AND approval.state = 'PENDING'
+                      AND expiry.expired_at_epoch_millis IS NULL
+                      AND expiry.expires_at_epoch_millis <= ?
+                      AND operation.withdrawal_id IS NULL
+                    ORDER BY expiry.expires_at_epoch_millis,
+                             approval.approval_request_id
+                    """)) {
+                query.setString(1, serviceIdentity);
+                query.setLong(2, asOfEpochMillis);
+                try (ResultSet result = query.executeQuery()) {
+                    while (result.next()) {
+                        approvalIds.add(UUID.fromString(
+                                result.getString("approval_request_id")));
+                    }
+                }
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE treasury_withdrawal_approval_expiry
+                    SET expired_at_epoch_millis = ?
+                    WHERE approval_request_id = ?
+                      AND expired_at_epoch_millis IS NULL
+                    """)) {
+                for (UUID approvalId : approvalIds) {
+                    update.setLong(1, expiredAtEpochMillis);
+                    update.setString(2, approvalId.toString());
+                    update.addBatch();
+                }
+                update.executeBatch();
+            }
+            connection.commit();
+            return approvalIds.stream()
+                    .map(this::treasuryWithdrawalApproval)
+                    .toList();
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException(
+                            "Unable to expire Treasury Withdrawal approvals", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Treasury Withdrawal approval expiry", primaryFailure);
         }
     }
 
@@ -11432,6 +11515,39 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 56");
             }
+            if (version < 57) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS treasury_withdrawal_approval_expiry (
+                            approval_request_id TEXT PRIMARY KEY
+                                REFERENCES treasury_withdrawal_approval_request(
+                                    approval_request_id
+                                ),
+                            expires_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expires_at_epoch_millis >= 0),
+                            expired_at_epoch_millis INTEGER
+                                CHECK (expired_at_epoch_millis IS NULL
+                                    OR expired_at_epoch_millis >= expires_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT OR IGNORE INTO treasury_withdrawal_approval_expiry (
+                            approval_request_id, expires_at_epoch_millis,
+                            expired_at_epoch_millis
+                        )
+                        SELECT approval_request_id,
+                               initiated_at_epoch_millis
+                                   + 604800000,
+                               NULL
+                        FROM treasury_withdrawal_approval_request
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS treasury_withdrawal_approval_expiry_due
+                        ON treasury_withdrawal_approval_expiry (
+                            expired_at_epoch_millis, expires_at_epoch_millis
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 57");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11772,6 +11888,25 @@ public final class CivicDatabase implements AutoCloseable {
         Long approvedAt = result.wasNull() ? null : approvedAtValue;
         long executedAtValue = result.getLong("executed_at_epoch_millis");
         Long executedAt = result.wasNull() ? null : executedAtValue;
+        long expiresAt;
+        Long expiredAt;
+        try (PreparedStatement expiryQuery = connection.prepareStatement("""
+                SELECT expires_at_epoch_millis, expired_at_epoch_millis
+                FROM treasury_withdrawal_approval_expiry
+                WHERE approval_request_id = ?
+                """)) {
+            expiryQuery.setString(1, approvalRequestId.toString());
+            try (ResultSet expiryResult = expiryQuery.executeQuery()) {
+                if (!expiryResult.next()) {
+                    throw new IllegalStateException(
+                            "Treasury Withdrawal approval expiry is missing "
+                                    + approvalRequestId);
+                }
+                expiresAt = expiryResult.getLong("expires_at_epoch_millis");
+                long expiredAtValue = expiryResult.getLong("expired_at_epoch_millis");
+                expiredAt = expiryResult.wasNull() ? null : expiredAtValue;
+            }
+        }
         return new StoredTreasuryWithdrawalApproval(
                 approvalRequestId,
                 result.getString("service_identity"),
@@ -11784,10 +11919,12 @@ public final class CivicDatabase implements AutoCloseable {
                 UUID.fromString(result.getString("policy_id")),
                 result.getInt("required_approvals"),
                 votes,
-                result.getString("state"),
+                expiredAt == null ? result.getString("state") : "EXPIRED",
                 result.getLong("initiated_at_epoch_millis"),
                 approvedAt,
-                executedAt);
+                executedAt,
+                expiresAt,
+                expiredAt);
     }
 
     private StoredTerritoryMaintenancePolicy readTerritoryMaintenancePolicy(

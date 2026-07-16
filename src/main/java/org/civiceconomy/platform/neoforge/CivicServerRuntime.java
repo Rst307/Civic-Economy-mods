@@ -1926,6 +1926,8 @@ public final class CivicServerRuntime {
         }
         Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         current.writer.submitDatabase(database -> {
+                    new TreasuryWithdrawalApprovalRegistry(database, recoveryClock)
+                            .expirePending();
                     List<org.civiceconomy.persistence.StoredTreasuryWithdrawalOperation>
                             pending = database.pendingTreasuryWithdrawalOperations(
                                     TreasuryWithdrawalFiscalServiceProvisioner

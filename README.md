@@ -145,6 +145,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `withdraw policy status` 只从真实玩家当前有效 Citizenship 推导 Nation，任何正式 Citizen 都可查看本国当前生效策略，不能提交 Nation 或账户作用域。`withdraw approval list|status` 进一步要求同一 Nation 的精确 `MANAGE_WITHDRAWAL`，只返回本国审批，并显示发起人、金额、策略、所需人数、每名审批人及其理由/时间、`PENDING`/`APPROVED`/`EXECUTED` 状态和当前玩家是否仍可审批；外部 Nation 的真实 approval UUID 也会失败关闭。OP/控制台的 `admin withdrawal recovery status` 只读取已批准但尚未创建 Operation 的决定及仍为 `PREPARED` 的 Operation，不会触发、准备或提交提现，自动恢复仍是唯一执行路径。
 
+每个新 Withdrawal Approval 固定一个当前为 7 天的到期时间。只有一直未达到人数的 `PENDING` 决定会由现有异步 Withdrawal recovery 扫描转为 `EXPIRED`；`APPROVED`、已有 Operation 或 `EXECUTED` 决定不会被到期器改写。该时长目前是实现常量，后续需进入服务器政策配置。
+
 FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenship；后续 Team 新成员不会自动入籍。正式 Citizen 离开绑定 Team 后立即停止 Provider 权限和 Effective Citizen 人口贡献，进入当前固定两天的 Citizenship Correction Grace；宽限内回归恢复同一 Citizenship，截止仍未回归才结束 Citizenship 并开始转籍冷却。协调扫描只在服务器线程读取 FTB 快照，所有持久化工作均在 SQLite 线程执行。
 
 受信任 OP/控制台服务管理入口位于：

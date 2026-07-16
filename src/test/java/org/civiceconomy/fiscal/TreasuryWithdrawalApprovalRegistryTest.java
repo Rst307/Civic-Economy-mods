@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -173,6 +174,51 @@ class TreasuryWithdrawalApprovalRegistryTest {
             assertEquals(SECOND_APPROVER, inspected.votes().get(1).approverPlayerId());
             assertEquals("Verified payroll evidence", inspected.votes().get(1).reason());
             assertEquals(secondVoteAt, inspected.votes().get(1).approvedAt());
+        }
+    }
+
+    @Test
+    void pendingApprovalExpiresDurablyWithoutBecomingExecutable() {
+        Duration lifetime = Duration.ofDays(7);
+        Instant expiresAt = EFFECTIVE_AT.plus(lifetime);
+        TreasuryWithdrawalApproval pending;
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            schedulePolicy(database, 2, EFFECTIVE_AT);
+            TreasuryWithdrawalApprovalRegistry approvals =
+                    new TreasuryWithdrawalApprovalRegistry(
+                            database,
+                            Clock.fixed(EFFECTIVE_AT, ZoneOffset.UTC),
+                            lifetime);
+
+            pending = approvals.initiate(request("withdraw-expiring", 700L));
+
+            assertEquals(expiresAt, pending.expiresAt());
+            assertEquals(List.of(), approvals.expirePending());
+        }
+
+        Instant expiredAt = expiresAt.plusMillis(1L);
+        try (CivicDatabase reopened = database()) {
+            TreasuryWithdrawalApprovalRegistry approvals =
+                    new TreasuryWithdrawalApprovalRegistry(
+                            reopened,
+                            Clock.fixed(expiredAt, ZoneOffset.UTC),
+                            lifetime);
+
+            TreasuryWithdrawalApproval expired = approvals.expirePending().getFirst();
+
+            assertEquals(pending.approvalRequestId(), expired.approvalRequestId());
+            assertEquals("EXPIRED", expired.state());
+            assertEquals(expiresAt, expired.expiresAt());
+            assertEquals(expiredAt, expired.expiredAt());
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> approvals.approve(new ApproveTreasuryWithdrawal(
+                            SERVICE,
+                            "approve-expired-withdrawal",
+                            pending.approvalRequestId(),
+                            SECOND_APPROVER,
+                            "Expired approval cannot be revived")));
         }
     }
 

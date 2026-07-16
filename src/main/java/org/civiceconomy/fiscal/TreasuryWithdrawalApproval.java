@@ -20,7 +20,9 @@ public record TreasuryWithdrawalApproval(
         String state,
         Instant initiatedAt,
         Instant approvedAt,
-        Instant executedAt) {
+        Instant executedAt,
+        Instant expiresAt,
+        Instant expiredAt) {
     public TreasuryWithdrawalApproval {
         if (approvalRequestId == null
                 || serviceIdentity == null
@@ -29,7 +31,8 @@ public record TreasuryWithdrawalApproval(
                 || actorPlayerId == null
                 || amount == null
                 || policyId == null
-                || initiatedAt == null) {
+                || initiatedAt == null
+                || expiresAt == null) {
             throw new IllegalArgumentException(
                     "Treasury Withdrawal approval cannot contain null values");
         }

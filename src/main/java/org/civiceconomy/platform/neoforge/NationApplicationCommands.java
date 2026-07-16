@@ -287,8 +287,10 @@ final class NationApplicationCommands {
                 + " approvals=" + approval.approverPlayerIds().size()
                 + "/" + approval.requiredApprovals()
                 + " initiatedAt=" + approval.initiatedAt()
+                + " expiresAt=" + approval.expiresAt()
                 + " approvedAt=" + approval.approvedAt()
                 + " executedAt=" + approval.executedAt()
+                + " expiredAt=" + approval.expiredAt()
                 + " votes=[" + votes + "]";
     }
 

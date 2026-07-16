@@ -18,7 +18,9 @@ public record StoredTreasuryWithdrawalApproval(
         String state,
         long initiatedAtEpochMillis,
         Long approvedAtEpochMillis,
-        Long executedAtEpochMillis) {
+        Long executedAtEpochMillis,
+        long expiresAtEpochMillis,
+        Long expiredAtEpochMillis) {
     public StoredTreasuryWithdrawalApproval {
         votes = List.copyOf(votes);
     }
