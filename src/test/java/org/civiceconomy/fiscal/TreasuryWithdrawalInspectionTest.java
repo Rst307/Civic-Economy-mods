@@ -125,6 +125,19 @@ class TreasuryWithdrawalInspectionTest {
             assertThrows(
                     SecurityException.class,
                     () -> inspection.approvalStatuses(CITIZEN_ONE));
+            TreasuryWithdrawalApproval cancelled = inspection.cancel(
+                    APPROVER_ONE,
+                    own.approvalRequestId(),
+                    "cancel-own-withdrawal",
+                    "Treasury officer cancelled stale request");
+            assertEquals("CANCELLED", cancelled.state());
+            assertThrows(
+                    SecurityException.class,
+                    () -> inspection.cancel(
+                            APPROVER_ONE,
+                            foreign.approvalRequestId(),
+                            "cancel-foreign-withdrawal",
+                            "Cannot cancel another Nation's request"));
         }
     }
 

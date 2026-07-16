@@ -74,6 +74,10 @@ _Avoid_: 全服强制双签、即时生效配置、事后改变审批人数
 具有 `MANAGE_WITHDRAWAL` 的正式 Citizen 对一个精确、不可变 Treasury Withdrawal 请求作出的持久化决定；同一 Citizen 对同一请求最多计一次，达到固定人数前不能准备或移动 LC 资金。
 _Avoid_: Service Identity 授权、FTB 等级、重复点击计数、口头批准
 
+**Withdrawal Approval Cancellation（提现审批取消）**:
+在任何 Withdrawal Operation 出现前，由当前获授权 Citizen 终止一个 `PENDING` 或 `APPROVED` Withdrawal Approval 的不可变决定；它不移动 LC、不退款、不释放资金，也不补偿已有财政效果。
+_Avoid_: Treasury Withdrawal cancellation、refund、Reservation release、Operation compensation
+
 **首都（Capital）**:
 国家唯一的领土连续性与财政治理锚点；只有 Nation Activation 才能建立首个首都。
 _Avoid_: 出生点、任意已占领区块、FTB 团队基地

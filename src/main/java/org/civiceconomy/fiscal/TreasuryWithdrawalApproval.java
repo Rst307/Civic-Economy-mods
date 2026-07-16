@@ -22,7 +22,10 @@ public record TreasuryWithdrawalApproval(
         Instant approvedAt,
         Instant executedAt,
         Instant expiresAt,
-        Instant expiredAt) {
+        Instant expiredAt,
+        UUID cancelledByPlayerId,
+        String cancellationReason,
+        Instant cancelledAt) {
     public TreasuryWithdrawalApproval {
         if (approvalRequestId == null
                 || serviceIdentity == null

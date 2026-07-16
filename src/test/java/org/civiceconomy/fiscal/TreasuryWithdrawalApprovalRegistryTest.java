@@ -222,6 +222,81 @@ class TreasuryWithdrawalApprovalRegistryTest {
         }
     }
 
+    @Test
+    void pendingApprovalCanBeCancelledIdempotentlyWithImmutableAudit() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            schedulePolicy(database, 2, EFFECTIVE_AT);
+            TreasuryWithdrawalApprovalRegistry approvals = approvals(database, EFFECTIVE_AT);
+            TreasuryWithdrawalApproval pending = approvals.initiate(
+                    request("withdraw-cancelled", 700L));
+            CancelTreasuryWithdrawalApproval cancellation =
+                    new CancelTreasuryWithdrawalApproval(
+                            SERVICE,
+                            "cancel-withdrawal",
+                            pending.approvalRequestId(),
+                            INITIATOR,
+                            "Payroll cash request withdrawn by treasury office");
+
+            TreasuryWithdrawalApproval cancelled = approvals.cancel(cancellation);
+
+            assertEquals(cancelled, approvals.cancel(cancellation));
+            assertEquals("CANCELLED", cancelled.state());
+            assertEquals(INITIATOR, cancelled.cancelledByPlayerId());
+            assertEquals(
+                    "Payroll cash request withdrawn by treasury office",
+                    cancelled.cancellationReason());
+            assertEquals(EFFECTIVE_AT, cancelled.cancelledAt());
+            assertThrows(
+                    IdempotencyConflictException.class,
+                    () -> approvals.cancel(new CancelTreasuryWithdrawalApproval(
+                            SERVICE,
+                            "cancel-withdrawal",
+                            pending.approvalRequestId(),
+                            INITIATOR,
+                            "Changed cancellation reason")));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> approvals.approve(new ApproveTreasuryWithdrawal(
+                            SERVICE,
+                            "approve-cancelled-withdrawal",
+                            pending.approvalRequestId(),
+                            SECOND_APPROVER,
+                            "Cancelled approval cannot be revived")));
+        }
+    }
+
+    @Test
+    void approvalWithPreparedOperationCannotBeCancelled() {
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            TreasuryWithdrawalApprovalRegistry approvals = approvals(database, EFFECTIVE_AT);
+            TreasuryWithdrawalApproval approved = approvals.initiate(
+                    request("withdraw-prepared-before-cancel", 700L));
+            database.prepareTreasuryWithdrawal(
+                    UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+                    SERVICE.value(),
+                    approved.requestId(),
+                    approved.approvalRequestId(),
+                    NATION_ID.value(),
+                    TREASURY.value(),
+                    INITIATOR,
+                    approved.amount().minorUnits(),
+                    approved.reason(),
+                    EFFECTIVE_AT.toEpochMilli());
+
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> approvals.cancel(new CancelTreasuryWithdrawalApproval(
+                            SERVICE,
+                            "cancel-prepared-withdrawal",
+                            approved.approvalRequestId(),
+                            INITIATOR,
+                            "Cannot cancel after Operation preparation")));
+            assertEquals("APPROVED", approvals.find(approved.approvalRequestId()).state());
+        }
+    }
+
     private void schedulePolicy(CivicDatabase database, int required, Instant effectiveAt) {
         new WithdrawalApprovalPolicyRegistry(
                         database, Clock.fixed(SCHEDULED_AT, ZoneOffset.UTC))

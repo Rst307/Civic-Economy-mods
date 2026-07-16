@@ -165,7 +165,25 @@ final class NationApplicationCommands {
                                 .executes(context -> treasuryWithdrawalApprovalStatus(
                                         context.getSource(),
                                         UuidArgument.getUuid(
-                                                context, "approvalRequestId")))));
+                                                context, "approvalRequestId")))))
+                .then(Commands.literal("cancel")
+                        .then(Commands.argument("approvalRequestId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        cancelTreasuryWithdrawalApproval(
+                                                                context.getSource(),
+                                                                UuidArgument.getUuid(
+                                                                        context,
+                                                                        "approvalRequestId"),
+                                                                StringArgumentType.getString(
+                                                                        context,
+                                                                        "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context,
+                                                                        "reason")))))));
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> withdrawPolicyCommand() {
@@ -258,6 +276,32 @@ final class NationApplicationCommands {
         return Command.SINGLE_SUCCESS;
     }
 
+    private static int cancelTreasuryWithdrawalApproval(
+            CommandSourceStack source,
+            UUID approvalRequestId,
+            String requestId,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .cancelWithdrawalApproval(player, approvalRequestId, requestId, reason)
+                .whenComplete((approval, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Treasury Withdrawal approval cancellation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Cancelled Treasury Withdrawal approval "
+                                                + approval.approvalRequestId()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal(
+                        "Treasury Withdrawal approval cancellation queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
     static String formatWithdrawalPolicy(WithdrawalApprovalPolicyVersion policy) {
         return "Withdrawal Approval Policy " + policy.policyId()
                 + " nation=" + policy.nationId().value()
@@ -291,6 +335,9 @@ final class NationApplicationCommands {
                 + " approvedAt=" + approval.approvedAt()
                 + " executedAt=" + approval.executedAt()
                 + " expiredAt=" + approval.expiredAt()
+                + " cancelledBy=" + approval.cancelledByPlayerId()
+                + " cancellationReason=\"" + approval.cancellationReason() + "\""
+                + " cancelledAt=" + approval.cancelledAt()
                 + " votes=[" + votes + "]";
     }
 

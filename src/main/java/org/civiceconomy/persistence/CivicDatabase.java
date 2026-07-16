@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 57;
+    private static final int SCHEMA_VERSION = 58;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -7250,9 +7250,15 @@ public final class CivicDatabase implements AutoCloseable {
                 FROM treasury_withdrawal_approval_request approval
                 LEFT JOIN treasury_withdrawal_operation operation
                   ON operation.approval_request_id = approval.approval_request_id
+                JOIN treasury_withdrawal_approval_expiry expiry
+                  ON expiry.approval_request_id = approval.approval_request_id
+                LEFT JOIN treasury_withdrawal_approval_cancellation cancellation
+                  ON cancellation.approval_request_id = approval.approval_request_id
                 WHERE approval.service_identity = ?
                   AND approval.state = 'APPROVED'
                   AND operation.withdrawal_id IS NULL
+                  AND expiry.expired_at_epoch_millis IS NULL
+                  AND cancellation.cancellation_id IS NULL
                 ORDER BY approval.approved_at_epoch_millis,
                          approval.approval_request_id
                 """)) {
@@ -7478,6 +7484,98 @@ public final class CivicDatabase implements AutoCloseable {
             throw propagated;
         } finally {
             restoreAutoCommit("Treasury Withdrawal approval expiry", primaryFailure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval
+            treasuryWithdrawalApprovalCancellation(
+                    String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval_request_id
+                FROM treasury_withdrawal_approval_cancellation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next()
+                        ? treasuryWithdrawalApproval(UUID.fromString(
+                                result.getString("approval_request_id")))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Treasury Withdrawal approval cancellation", failure);
+        }
+    }
+
+    public synchronized StoredTreasuryWithdrawalApproval
+            cancelTreasuryWithdrawalApproval(
+                    UUID cancellationId,
+                    UUID approvalRequestId,
+                    String serviceIdentity,
+                    String requestId,
+                    UUID actorPlayerId,
+                    String reason,
+                    long cancelledAtEpochMillis) {
+        RuntimeException primaryFailure = null;
+        try {
+            connection.setAutoCommit(false);
+            StoredTreasuryWithdrawalApproval approval =
+                    treasuryWithdrawalApproval(approvalRequestId);
+            if (approval == null) {
+                throw new IllegalArgumentException(
+                        "Unknown Treasury Withdrawal approval " + approvalRequestId);
+            }
+            if (!approval.state().equals("PENDING")
+                    && !approval.state().equals("APPROVED")) {
+                throw new IllegalStateException(
+                        "Treasury Withdrawal approval is " + approval.state());
+            }
+            try (PreparedStatement operation = connection.prepareStatement("""
+                    SELECT 1 FROM treasury_withdrawal_operation
+                    WHERE approval_request_id = ? LIMIT 1
+                    """)) {
+                operation.setString(1, approvalRequestId.toString());
+                try (ResultSet result = operation.executeQuery()) {
+                    if (result.next()) {
+                        throw new IllegalStateException(
+                                "Treasury Withdrawal approval already has an Operation");
+                    }
+                }
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO treasury_withdrawal_approval_cancellation (
+                        cancellation_id, approval_request_id,
+                        service_identity, request_id, actor_player_id,
+                        reason, cancelled_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, cancellationId.toString());
+                insert.setString(2, approvalRequestId.toString());
+                insert.setString(3, serviceIdentity);
+                insert.setString(4, requestId);
+                insert.setString(5, actorPlayerId.toString());
+                insert.setString(6, reason);
+                insert.setLong(7, cancelledAtEpochMillis);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return treasuryWithdrawalApproval(approvalRequestId);
+        } catch (RuntimeException | SQLException failure) {
+            RuntimeException propagated = failure instanceof RuntimeException runtimeFailure
+                    ? runtimeFailure
+                    : new IllegalStateException(
+                            "Unable to cancel Treasury Withdrawal approval", failure);
+            primaryFailure = propagated;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                propagated.addSuppressed(rollbackFailure);
+            }
+            throw propagated;
+        } finally {
+            restoreAutoCommit("Treasury Withdrawal approval cancellation", primaryFailure);
         }
     }
 
@@ -11548,6 +11646,25 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 57");
             }
+            if (version < 58) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS treasury_withdrawal_approval_cancellation (
+                            cancellation_id TEXT PRIMARY KEY,
+                            approval_request_id TEXT NOT NULL UNIQUE
+                                REFERENCES treasury_withdrawal_approval_request(
+                                    approval_request_id
+                                ),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            cancelled_at_epoch_millis INTEGER NOT NULL
+                                CHECK (cancelled_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 58");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -11907,6 +12024,25 @@ public final class CivicDatabase implements AutoCloseable {
                 expiredAt = expiryResult.wasNull() ? null : expiredAtValue;
             }
         }
+        UUID cancelledByPlayerId = null;
+        String cancellationReason = null;
+        Long cancelledAt = null;
+        try (PreparedStatement cancellationQuery = connection.prepareStatement("""
+                SELECT actor_player_id, reason, cancelled_at_epoch_millis
+                FROM treasury_withdrawal_approval_cancellation
+                WHERE approval_request_id = ?
+                """)) {
+            cancellationQuery.setString(1, approvalRequestId.toString());
+            try (ResultSet cancellationResult = cancellationQuery.executeQuery()) {
+                if (cancellationResult.next()) {
+                    cancelledByPlayerId = UUID.fromString(
+                            cancellationResult.getString("actor_player_id"));
+                    cancellationReason = cancellationResult.getString("reason");
+                    cancelledAt = cancellationResult.getLong(
+                            "cancelled_at_epoch_millis");
+                }
+            }
+        }
         return new StoredTreasuryWithdrawalApproval(
                 approvalRequestId,
                 result.getString("service_identity"),
@@ -11919,12 +12055,17 @@ public final class CivicDatabase implements AutoCloseable {
                 UUID.fromString(result.getString("policy_id")),
                 result.getInt("required_approvals"),
                 votes,
-                expiredAt == null ? result.getString("state") : "EXPIRED",
+                cancelledAt != null
+                        ? "CANCELLED"
+                        : expiredAt == null ? result.getString("state") : "EXPIRED",
                 result.getLong("initiated_at_epoch_millis"),
                 approvedAt,
                 executedAt,
                 expiresAt,
-                expiredAt);
+                expiredAt,
+                cancelledByPlayerId,
+                cancellationReason,
+                cancelledAt);
     }
 
     private StoredTerritoryMaintenancePolicy readTerritoryMaintenancePolicy(

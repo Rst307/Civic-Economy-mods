@@ -62,6 +62,21 @@ public final class TreasuryWithdrawalInspection {
                 approvals.findForNation(approvalRequestId, nationId), actorPlayerId);
     }
 
+    public TreasuryWithdrawalApproval cancel(
+            UUID actorPlayerId,
+            UUID approvalRequestId,
+            String requestId,
+            String reason) {
+        NationId nationId = authorizedApprovalNation(actorPlayerId);
+        approvals.findForNation(approvalRequestId, nationId);
+        return approvals.cancel(new CancelTreasuryWithdrawalApproval(
+                TreasuryWithdrawalFiscalServiceProvisioner.SERVICE_IDENTITY,
+                requestId,
+                approvalRequestId,
+                actorPlayerId,
+                reason));
+    }
+
     private NationId authorizedApprovalNation(UUID actorPlayerId) {
         NationId nationId = nationForCitizen(actorPlayerId);
         authorities.require(

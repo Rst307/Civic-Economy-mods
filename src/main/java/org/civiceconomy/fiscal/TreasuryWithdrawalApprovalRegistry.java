@@ -159,6 +159,45 @@ public final class TreasuryWithdrawalApprovalRegistry {
                 .toList();
     }
 
+    public TreasuryWithdrawalApproval cancel(
+            CancelTreasuryWithdrawalApproval request) {
+        StoredTreasuryWithdrawalApproval replay =
+                database.treasuryWithdrawalApprovalCancellation(
+                        request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.approvalRequestId().equals(request.approvalRequestId())
+                    || !replay.cancelledByPlayerId().equals(request.actorPlayerId())
+                    || !replay.cancellationReason().equals(request.reason())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toApproval(replay);
+        }
+        StoredTreasuryWithdrawalApproval existing =
+                database.treasuryWithdrawalApproval(request.approvalRequestId());
+        if (existing == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Treasury Withdrawal approval " + request.approvalRequestId());
+        }
+        if (!existing.serviceIdentity().equals(request.serviceIdentity().value())) {
+            throw new SecurityException(
+                    "Treasury Withdrawal approval belongs to another Service Identity");
+        }
+        if (!existing.state().equals("PENDING")
+                && !existing.state().equals("APPROVED")) {
+            throw new IllegalStateException(
+                    "Treasury Withdrawal approval is already " + existing.state());
+        }
+        return toApproval(database.cancelTreasuryWithdrawalApproval(
+                UUID.randomUUID(),
+                request.approvalRequestId(),
+                request.serviceIdentity().value(),
+                request.requestId(),
+                request.actorPlayerId(),
+                request.reason(),
+                clock.millis()));
+    }
+
     private static void requirePayload(
             StoredTreasuryWithdrawalApproval stored,
             ConfirmTreasuryWithdrawal request) {
@@ -222,6 +261,11 @@ public final class TreasuryWithdrawalApprovalRegistry {
                 Instant.ofEpochMilli(stored.expiresAtEpochMillis()),
                 stored.expiredAtEpochMillis() == null
                         ? null
-                        : Instant.ofEpochMilli(stored.expiredAtEpochMillis()));
+                        : Instant.ofEpochMilli(stored.expiredAtEpochMillis()),
+                stored.cancelledByPlayerId(),
+                stored.cancellationReason(),
+                stored.cancelledAtEpochMillis() == null
+                        ? null
+                        : Instant.ofEpochMilli(stored.cancelledAtEpochMillis()));
     }
 }

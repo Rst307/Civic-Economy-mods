@@ -760,6 +760,24 @@ public final class CivicServerRuntime {
                                 .approvalStatus(actorPlayerId, approvalRequestId)));
     }
 
+    CompletableFuture<TreasuryWithdrawalApproval> cancelWithdrawalApproval(
+            ServerPlayer actor,
+            UUID approvalRequestId,
+            String requestId,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        withdrawalInspection(database, team, commandClock)
+                                .cancel(
+                                        actorPlayerId,
+                                        approvalRequestId,
+                                        requestId,
+                                        reason)));
+    }
+
     CompletableFuture<TreasuryWithdrawalRecoveryStatus> withdrawalRecoveryStatus() {
         RuntimeState current = requireState();
         Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
