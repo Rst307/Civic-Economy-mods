@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 58;
+    private static final int SCHEMA_VERSION = 59;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -8104,6 +8104,108 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredBudget> dueDraftBudgets(long nowEpochMillis) {
+        List<StoredBudget> budgets = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, 0 AS settled_minor_units
+                FROM fiscal_budget b
+                WHERE b.state = 'DRAFT'
+                  AND b.escrow_id IS NULL
+                  AND b.expires_at_epoch_millis <= ?
+                ORDER BY b.expires_at_epoch_millis, b.budget_id
+                """)) {
+            query.setLong(1, nowEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    budgets.add(storedBudget(result));
+                }
+            }
+            return List.copyOf(budgets);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list due Budget drafts", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDraftExpiry budgetDraftExpiry(UUID budgetId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_draft_expiry WHERE budget_id = ?
+                """)) {
+            query.setString(1, budgetId.toString());
+            return readBudgetDraftExpiry(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget draft expiry", failure);
+        }
+    }
+
+    public synchronized StoredBudget expireBudgetDraft(
+            UUID expiryId,
+            UUID budgetId,
+            String serviceIdentity,
+            String requestId,
+            long expiredAtEpochMillis) {
+        try (PreparedStatement replayQuery = connection.prepareStatement("""
+                SELECT * FROM budget_draft_expiry
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            replayQuery.setString(1, serviceIdentity);
+            replayQuery.setString(2, requestId);
+            StoredBudgetDraftExpiry replay = readBudgetDraftExpiry(replayQuery);
+            if (replay != null) {
+                if (!replay.budgetId().equals(budgetId)) {
+                    throw new IllegalArgumentException(
+                            "Budget draft expiry replay changed its Budget");
+                }
+                return budget(budgetId);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget draft expiry replay", failure);
+        }
+        StoredBudget budget = budget(budgetId);
+        if (budget == null) {
+            throw new IllegalArgumentException("Unknown Budget " + budgetId);
+        }
+        if (!"DRAFT".equals(budget.state()) || budget.escrowId() != null) {
+            throw new IllegalStateException("Budget is not an unapproved draft: " + budget.state());
+        }
+        if (expiredAtEpochMillis < budget.expiresAtEpochMillis()) {
+            throw new IllegalStateException("Budget draft has not reached its expiry " + budgetId);
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO budget_draft_expiry (
+                            expiry_id, budget_id, service_identity, request_id,
+                            expired_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement expire = connection.prepareStatement("""
+                        UPDATE fiscal_budget SET state = 'EXPIRED'
+                        WHERE budget_id = ? AND state = 'DRAFT' AND escrow_id IS NULL
+                        """)) {
+                audit.setString(1, expiryId.toString());
+                audit.setString(2, budgetId.toString());
+                audit.setString(3, serviceIdentity);
+                audit.setString(4, requestId);
+                audit.setLong(5, expiredAtEpochMillis);
+                audit.executeUpdate();
+                expire.setString(1, budgetId.toString());
+                if (expire.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Budget draft state changed during expiry " + budgetId);
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return budget(budgetId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to expire Budget draft " + budgetId, failure);
+        }
+    }
+
     public synchronized StoredBudget budgetApproval(String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
@@ -11687,6 +11789,21 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 58");
             }
+            if (version < 59) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_draft_expiry (
+                            expiry_id TEXT PRIMARY KEY,
+                            budget_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_budget(budget_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            expired_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expired_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 59");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -13073,19 +13190,38 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            String escrowId = result.getString("escrow_id");
-            return new StoredBudget(
+            return storedBudget(result);
+        }
+    }
+
+    private static StoredBudget storedBudget(ResultSet result) throws SQLException {
+        String escrowId = result.getString("escrow_id");
+        return new StoredBudget(
+                UUID.fromString(result.getString("budget_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                result.getString("source_account"),
+                result.getLong("amount_minor_units"),
+                result.getString("budget_code"),
+                result.getString("purpose"),
+                result.getLong("expires_at_epoch_millis"),
+                escrowId == null ? null : UUID.fromString(escrowId),
+                result.getLong("settled_minor_units"),
+                result.getString("state"));
+    }
+
+    private static StoredBudgetDraftExpiry readBudgetDraftExpiry(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredBudgetDraftExpiry(
+                    UUID.fromString(result.getString("expiry_id")),
                     UUID.fromString(result.getString("budget_id")),
                     result.getString("service_identity"),
                     result.getString("request_id"),
-                    result.getString("source_account"),
-                    result.getLong("amount_minor_units"),
-                    result.getString("budget_code"),
-                    result.getString("purpose"),
-                    result.getLong("expires_at_epoch_millis"),
-                    escrowId == null ? null : UUID.fromString(escrowId),
-                    result.getLong("settled_minor_units"),
-                    result.getString("state"));
+                    result.getLong("expired_at_epoch_millis"));
         }
     }
 

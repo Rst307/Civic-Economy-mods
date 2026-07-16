@@ -885,7 +885,7 @@ public final class CivicServerRuntimeGameTests {
     }
 
     @GameTest(template = "empty", timeoutTicks = 300)
-    public static void runtimeExpiresDueEscrowOffThread(GameTestHelper helper) {
+    public static void runtimeExpiresDueFiscalObjectsOffThread(GameTestHelper helper) {
         CivicServerRuntime runtime = CivicServerRuntime.current();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -894,22 +894,34 @@ public final class CivicServerRuntimeGameTests {
                 .resolve("civic.sqlite3");
         UUID escrowId = UUID.randomUUID();
         UUID reservationId = UUID.randomUUID();
+        UUID budgetId = UUID.randomUUID();
         long expiresAt = System.currentTimeMillis() + 250L;
         AtomicBoolean prepared = new AtomicBoolean();
         AtomicBoolean expiryTriggered = new AtomicBoolean();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
 
-        runtime.submitDatabase(database -> database.openEscrow(
-                        escrowId,
-                        reservationId,
-                        "civiceconomy-gametest",
-                        "runtime-escrow-expiry-" + escrowId,
-                        "nation:runtime-escrow-expiry:treasury",
-                        300L,
-                        "contract:runtime-expiry",
-                        "Runtime automatic Escrow expiry",
-                        expiresAt))
-                .whenComplete((escrow, failure) -> {
+        runtime.submitDatabase(database -> {
+                    database.openEscrow(
+                            escrowId,
+                            reservationId,
+                            "civiceconomy-gametest",
+                            "runtime-escrow-expiry-" + escrowId,
+                            "nation:runtime-escrow-expiry:treasury",
+                            300L,
+                            "contract:runtime-expiry",
+                            "Runtime automatic Escrow expiry",
+                            expiresAt);
+                    return database.createBudget(
+                            budgetId,
+                            "civiceconomy-gametest",
+                            "runtime-budget-expiry-" + budgetId,
+                            "nation:runtime-budget-expiry:treasury",
+                            200L,
+                            "PUBLIC_WORKS:RUNTIME_EXPIRY",
+                            "Runtime automatic Budget draft expiry",
+                            expiresAt);
+                })
+                .whenComplete((budget, failure) -> {
                     if (failure == null) {
                         prepared.set(true);
                     } else {
@@ -922,10 +934,11 @@ public final class CivicServerRuntimeGameTests {
             helper.assertTrue(prepared.get(), "due Escrow persisted on SQLite writer");
             if (System.currentTimeMillis() >= expiresAt
                     && expiryTriggered.compareAndSet(false, true)) {
-                runtime.expireEscrowsNowForGameTest();
+                runtime.expireFiscalObjectsNowForGameTest();
             }
-            helper.assertTrue(expiryTriggered.get(), "automatic Escrow expiry triggered");
+            helper.assertTrue(expiryTriggered.get(), "automatic fiscal expiry triggered");
             assertEscrowAutomaticallyExpired(helper, databaseFile, escrowId);
+            assertBudgetDraftAutomaticallyExpired(helper, databaseFile, budgetId);
         });
     }
 
@@ -3900,7 +3913,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(58, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(59, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -4277,6 +4290,35 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect automatic Escrow expiry", failure);
+        }
+    }
+
+    private static void assertBudgetDraftAutomaticallyExpired(
+            GameTestHelper helper, Path databaseFile, UUID budgetId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT budget.state, budget.escrow_id,
+                               expiry.service_identity, expiry.request_id
+                        FROM fiscal_budget budget
+                        JOIN budget_draft_expiry expiry
+                          ON expiry.budget_id = budget.budget_id
+                        WHERE budget.budget_id = ?
+                        """)) {
+            query.setString(1, budgetId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "automatic Budget draft expiry audit");
+                helper.assertValueEqual("EXPIRED", result.getString(1), "Budget state");
+                helper.assertTrue(result.getString(2) == null, "expired draft has no Escrow");
+                helper.assertValueEqual(
+                        "civiceconomy-server", result.getString(3), "expiry service identity");
+                helper.assertValueEqual(
+                        "automatic-expiry:" + budgetId,
+                        result.getString(4),
+                        "expiry request identity");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect automatic Budget draft expiry", failure);
         }
     }
 

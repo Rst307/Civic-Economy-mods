@@ -438,7 +438,7 @@ public final class FiscalLedger {
                 EscrowState.valueOf(stored.state()));
     }
 
-    private static Budget toBudget(StoredBudget stored) {
+    static Budget toBudget(StoredBudget stored) {
         return new Budget(
                 stored.budgetId(),
                 new ServiceIdentity(stored.serviceIdentity()),
