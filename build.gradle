@@ -47,9 +47,17 @@ neoForge {
 
         gameTestServer {
             type = 'gameTestServer'
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            def budgetDisbursementRestartDrill =
+                    providers.gradleProperty('budgetDisbursementRestartDrill').orNull
+            systemProperty 'neoforge.enabledGameTestNamespaces',
+                    budgetDisbursementRestartDrill == null
+                            ? project.mod_id
+                            : "${project.mod_id}_budget_disbursement_restart"
             providers.gradleProperty('mintRestartDrill').orNull?.with { mode ->
                 systemProperty 'civiceconomy.mintRestartDrill', mode
+            }
+            budgetDisbursementRestartDrill?.with { mode ->
+                systemProperty 'civiceconomy.budgetDisbursementRestartDrill', mode
             }
         }
 
@@ -137,11 +145,17 @@ var generateModMetadata = tasks.register('generateModMetadata', ProcessResources
 
 var generateGameTestStructures = tasks.register('generateGameTestStructures') {
     inputs.file layout.projectDirectory.file('src/main/gametest/empty.nbt.b64')
-    outputs.file layout.buildDirectory.file('generated/gametestResources/data/civiceconomy/structure/empty.nbt')
+    def standardEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy/structure/empty.nbt')
+    def budgetRestartEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_budget_disbursement_restart/structure/empty.nbt')
+    outputs.files standardEmpty, budgetRestartEmpty
     doLast {
-        def outputFile = outputs.files.singleFile
-        outputFile.parentFile.mkdirs()
-        outputFile.bytes = Base64.decoder.decode(inputs.files.singleFile.text.trim())
+        def decoded = Base64.decoder.decode(inputs.files.singleFile.text.trim())
+        [standardEmpty.get().asFile, budgetRestartEmpty.get().asFile].each { outputFile ->
+            outputFile.parentFile.mkdirs()
+            outputFile.bytes = decoded
+        }
     }
 }
 

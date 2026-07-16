@@ -2551,10 +2551,17 @@ public final class CivicServerRuntime {
                 })
                 .thenCompose(prepared -> onServer(current, () -> {
                     prepared.coordinator().applyExternal(prepared.payment());
+                    BudgetDisbursementProcessRestartDrill.crashAfterExternalApplied(
+                            current.server, prepared.payment());
                     return prepared;
                 }))
-                .thenCompose(prepared -> current.writer.submitDatabase(database ->
-                        prepared.coordinator().commitRecovery(prepared.payment())))
+                .thenCompose(prepared -> current.writer.submitDatabase(database -> {
+                    prepared.coordinator()
+                            .recordExternalAppliedRecovery(prepared.payment());
+                    BudgetDisbursementProcessRestartDrill.crashAfterExternalRecorded(
+                            current.server, prepared.payment());
+                    return prepared.coordinator().commitRecovery(prepared.payment());
+                }))
                 .whenComplete((transaction, failure) -> {
                     if (failure != null) {
                         LOGGER.warn(

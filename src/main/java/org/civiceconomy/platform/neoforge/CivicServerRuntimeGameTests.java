@@ -393,6 +393,160 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    static void prepareBudgetDisbursementProcessRestart(
+            GameTestHelper helper) {
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock =
+                java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+        org.civiceconomy.nation.NationId nationId =
+                new org.civiceconomy.nation.NationId(UUID.randomUUID());
+        UUID actorPlayerId = UUID.randomUUID();
+        UUID recipientPlayerId = UUID.randomUUID();
+        String requestId = BudgetDisbursementProcessRestartDrill.REQUEST_PREFIX
+                + UUID.randomUUID();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<BudgetDisbursementRestartPreparation> preparation =
+                new AtomicReference<>();
+
+        runtime.submitDatabase(database -> {
+                    database.registerNation(
+                            nationId.value(),
+                            "civiceconomy-budget-disbursement-restart-drill",
+                            "register-" + requestId,
+                            UUID.randomUUID(),
+                            now.minusSeconds(60L).toEpochMilli());
+                    UUID budgetId = UUID.randomUUID();
+                    database.createBudget(
+                            budgetId,
+                            BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                            "budget-" + requestId,
+                            "nation:" + nationId.value() + ":treasury",
+                            100L,
+                            "PUBLIC_WORKS",
+                            "Matched process restart Budget",
+                            now.plus(java.time.Duration.ofDays(1L)).toEpochMilli());
+                    database.approveBudget(
+                            UUID.randomUUID(),
+                            UUID.randomUUID(),
+                            UUID.randomUUID(),
+                            BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                            "approve-budget-" + requestId,
+                            budgetId,
+                            actorPlayerId,
+                            "Approve matched process restart Budget",
+                            now.minusSeconds(30L).toEpochMilli());
+                    var approval = new BudgetDisbursementApprovalRegistry(
+                                    database, setupClock)
+                            .initiate(new InitiateBudgetDisbursementApproval(
+                                    NationBudgetDisbursementApprovalCoordinator
+                                            .SERVICE_IDENTITY,
+                                    requestId,
+                                    nationId,
+                                    budgetId,
+                                    new AccountId("player:" + recipientPlayerId),
+                                    MoneyAmount.ofMinorUnits(100L),
+                                    actorPlayerId,
+                                    "Matched process restart Disbursement"));
+                    var prepared = new BudgetDisbursementPaymentCoordinator(
+                                    database, ignored -> {})
+                            .prepare(approval.approvalRequestId());
+                    return new BudgetDisbursementRestartPreparation(
+                            nationId,
+                            recipientPlayerId);
+                })
+                .whenComplete((prepared, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                clearPlayerBank(prepared.recipientPlayerId());
+                                fundTreasury(
+                                        helper,
+                                        prepared.nationId(),
+                                        "Budget restart drill Treasury",
+                                        500L);
+                                preparation.set(prepared);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            Throwable failure = asyncFailure.get();
+            helper.assertTrue(
+                    failure == null,
+                    failure == null
+                            ? "Budget Disbursement restart preparation state"
+                            : "Budget Disbursement restart preparation failed: "
+                                    + failure.getMessage());
+            helper.assertTrue(
+                    preparation.get() != null,
+                    "Budget Disbursement restart preparation ready");
+            runtime.triggerBudgetDisbursementRecovery();
+            helper.assertTrue(
+                    false,
+                    "Budget Disbursement restart preparation expected controlled process halt");
+        });
+    }
+
+    static void verifyBudgetDisbursementProcessRestart(
+            GameTestHelper helper) {
+        BudgetDisbursementProcessRestartDrill.Marker marker =
+                BudgetDisbursementProcessRestartDrill.readMarker(
+                        helper.getLevel().getServer());
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+
+        helper.succeedWhen(() -> {
+            BudgetDisbursementRow recovered = budgetDisbursementByRequest(
+                    databaseFile, marker.requestId());
+            helper.assertTrue(
+                    recovered != null,
+                    "restarted Budget Disbursement row exists");
+            if (!"CIVIC_COMMITTED".equals(recovered.paymentState())) {
+                runtime.triggerBudgetDisbursementRecovery();
+                helper.assertTrue(
+                        false,
+                        "waiting for matched Budget Disbursement restart recovery");
+            }
+            helper.assertValueEqual(
+                    "EXECUTED",
+                    recovered.approvalState(),
+                    "restarted Budget Disbursement approval state");
+            helper.assertValueEqual(
+                    marker.approvalRequestId(),
+                    recovered.approvalRequestId(),
+                    "restarted Budget Disbursement approval identity");
+            helper.assertValueEqual(
+                    marker.transactionId(),
+                    recovered.transactionId(),
+                    "restarted Budget Disbursement transaction identity");
+            helper.assertValueEqual(
+                    1,
+                    recovered.paymentCount(),
+                    "restarted Budget Disbursement has one Payment");
+            helper.assertValueEqual(
+                    400L,
+                    LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                            .balance(new AccountId(marker.treasuryAccount()))
+                            .minorUnits(),
+                    "restarted Budget Disbursement debits Treasury once");
+            helper.assertValueEqual(
+                    100L,
+                    playerBankBalance(marker.recipientPlayerId()),
+                    "restarted Budget Disbursement credits recipient once");
+            assertRestartedBudgetDisbursementAccounting(
+                    helper, databaseFile, marker);
+        });
+    }
+
     private static void awaitMintCommit(
             GameTestHelper helper,
             CivicServerRuntime runtime,
@@ -6421,13 +6575,13 @@ public final class CivicServerRuntimeGameTests {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
                 var query = connection.prepareStatement("""
                         SELECT approval.approval_request_id, approval.budget_id,
-                               approval.recipient_account, approval.amount_minor_units,
-                               CASE WHEN cancellation.approval_request_id IS NULL
-                                    THEN approval.state ELSE 'CANCELLED' END,
-                               payment.state,
-                               (SELECT COUNT(*) FROM payment_transaction counted
-                                WHERE counted.service_identity = approval.service_identity
-                                  AND counted.request_id = approval.request_id)
+                                approval.recipient_account, approval.amount_minor_units,
+                                CASE WHEN cancellation.approval_request_id IS NULL
+                                     THEN approval.state ELSE 'CANCELLED' END,
+                                payment.transaction_id, payment.state,
+                                (SELECT COUNT(*) FROM payment_transaction counted
+                                 WHERE counted.service_identity = approval.service_identity
+                                   AND counted.request_id = approval.request_id)
                         FROM budget_disbursement_approval_request approval
                         LEFT JOIN payment_transaction payment
                           ON payment.service_identity = approval.service_identity
@@ -6447,12 +6601,85 @@ public final class CivicServerRuntimeGameTests {
                                 result.getString(3),
                                 result.getLong(4),
                                 result.getString(5),
-                                result.getString(6),
-                                result.getInt(7))
+                                result.getString(6) == null
+                                        ? null
+                                        : UUID.fromString(result.getString(6)),
+                                result.getString(7),
+                                result.getInt(8))
                         : null;
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect Budget Disbursement", failure);
+        }
+    }
+
+    private static void assertRestartedBudgetDisbursementAccounting(
+            GameTestHelper helper,
+            Path databaseFile,
+            BudgetDisbursementProcessRestartDrill.Marker marker) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT budget.state, escrow.state, reservation.state,
+                               reservation.settled_minor_units,
+                               payment.state, payment.transaction_id,
+                               (SELECT COUNT(*) FROM fiscal_ledger_entry ledger
+                                WHERE ledger.transaction_id = payment.transaction_id),
+                               (SELECT COUNT(*) FROM payment_recovery_audit audit
+                                WHERE audit.transaction_id = payment.transaction_id
+                                  AND audit.action = 'RECOVERY_EXTERNAL_APPLIED'),
+                               (SELECT COUNT(*) FROM payment_recovery_audit audit
+                                WHERE audit.transaction_id = payment.transaction_id
+                                  AND audit.action = 'RECOVERY_CIVIC_COMMITTED')
+                        FROM budget_disbursement_approval_request approval
+                        JOIN fiscal_budget budget ON budget.budget_id = approval.budget_id
+                        JOIN fiscal_escrow escrow ON escrow.escrow_id = budget.escrow_id
+                        JOIN fiscal_reservation reservation
+                          ON reservation.reservation_id = escrow.reservation_id
+                        JOIN payment_transaction payment
+                          ON payment.service_identity = approval.service_identity
+                         AND payment.request_id = approval.request_id
+                        WHERE approval.service_identity = ? AND approval.request_id = ?
+                        """)) {
+            query.setString(1, "civiceconomy-budget-disbursement");
+            query.setString(2, marker.requestId());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(
+                        result.next(),
+                        "restarted Budget Disbursement accounting row");
+                helper.assertValueEqual(
+                        "SPENT", result.getString(1), "restarted Budget state");
+                helper.assertValueEqual(
+                        "SETTLED", result.getString(2), "restarted Escrow state");
+                helper.assertValueEqual(
+                        "SETTLED", result.getString(3), "restarted Reservation state");
+                helper.assertValueEqual(
+                        marker.amountMinorUnits(),
+                        result.getLong(4),
+                        "restarted settled Reservation amount");
+                helper.assertValueEqual(
+                        "CIVIC_COMMITTED",
+                        result.getString(5),
+                        "restarted Payment state");
+                helper.assertValueEqual(
+                        marker.transactionId().toString(),
+                        result.getString(6),
+                        "restarted persisted transaction UUID");
+                helper.assertValueEqual(
+                        2, result.getInt(7), "restarted paired ledger entries");
+                helper.assertValueEqual(
+                        1,
+                        result.getInt(8),
+                        "one recovered-external audit entry");
+                helper.assertValueEqual(
+                        1,
+                        result.getInt(9),
+                        "one recovered-Civic-commit audit entry");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect restarted Budget Disbursement accounting",
+                    failure);
         }
     }
 
@@ -6701,8 +6928,13 @@ public final class CivicServerRuntimeGameTests {
             String recipientAccount,
             long amountMinorUnits,
             String approvalState,
+            UUID transactionId,
             String paymentState,
             int paymentCount) {}
+
+    private record BudgetDisbursementRestartPreparation(
+            org.civiceconomy.nation.NationId nationId,
+            UUID recipientPlayerId) {}
 
     private record BudgetCancellationRow(
             UUID actorPlayerId,

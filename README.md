@@ -86,7 +86,18 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 .\gradlew.bat runGameTestServer -PmintRestartDrill=verify --no-daemon --console=plain
 ```
 
-该故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。
+Budget Disbursement 匹配世界进程重启演练为每个崩溃窗口分别使用一个干净的 `run/world`。第一组在真实 LC 已生效并刷盘、SQLite 仍为 `PREPARED` 时以退出码 `88` 终止；第二组在 SQLite 已持久化 `EXTERNAL_APPLIED` 后以退出码 `89` 终止。每组的 `verify` 都必须紧接着复用同一个世界：
+
+```powershell
+.\gradlew.bat runGameTestServer -PbudgetDisbursementRestartDrill=prepare-external --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PbudgetDisbursementRestartDrill=verify --no-daemon --console=plain
+
+# 删除任务自有的 run/world，开始第二个独立窗口
+.\gradlew.bat runGameTestServer -PbudgetDisbursementRestartDrill=prepare-external-applied --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PbudgetDisbursementRestartDrill=verify --no-daemon --console=plain
+```
+
+这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。Budget Disbursement 演练使用独立 GameTest namespace，因此 matched-world `verify` 只重跑该恢复测试，不会让其他测试用旧世界数据重新初始化。
 
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
 

@@ -134,6 +134,22 @@ public final class PaymentCoordinator {
     }
 
     PaymentTransaction confirmRecovery(PaymentTransaction prepared) {
+        PaymentTransaction transaction = recordRecoveryExternalApplied(prepared);
+        if (transaction.state() == TransactionState.EXTERNAL_APPLIED) {
+            commit(transaction, true);
+            transaction = toTransaction(
+                    database.paymentTransaction(transaction.transactionId()));
+        }
+        if (transaction.state() != TransactionState.CIVIC_COMMITTED) {
+            throw new IllegalStateException(
+                    "Payment transaction has inconsistent recovery state "
+                            + transaction.transactionId());
+        }
+        return transaction;
+    }
+
+    PaymentTransaction recordRecoveryExternalApplied(
+            PaymentTransaction prepared) {
         java.util.Objects.requireNonNull(prepared, "Payment transaction cannot be null");
         requireSessionIdentity(prepared.serviceIdentity());
         PaymentTransaction transaction = toTransaction(
@@ -155,14 +171,10 @@ public final class PaymentCoordinator {
             transaction = toTransaction(
                     database.paymentTransaction(transaction.transactionId()));
         }
-        if (transaction.state() == TransactionState.EXTERNAL_APPLIED) {
-            commit(transaction, true);
-            transaction = toTransaction(
-                    database.paymentTransaction(transaction.transactionId()));
-        }
-        if (transaction.state() != TransactionState.CIVIC_COMMITTED) {
+        if (transaction.state() != TransactionState.EXTERNAL_APPLIED
+                && transaction.state() != TransactionState.CIVIC_COMMITTED) {
             throw new IllegalStateException(
-                    "Payment transaction has inconsistent recovery state "
+                    "Payment transaction has inconsistent recovered external state "
                             + transaction.transactionId());
         }
         return transaction;

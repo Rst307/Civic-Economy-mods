@@ -132,6 +132,13 @@ public final class BudgetDisbursementPaymentCoordinator {
                 .confirmRecovery(prepared.transaction());
     }
 
+    public PaymentTransaction recordExternalAppliedRecovery(
+            PreparedBudgetDisbursementPayment prepared) {
+        requirePrepared(prepared);
+        return PaymentCoordinator.authorized(database, externalPayments, prepared.session())
+                .recordRecoveryExternalApplied(prepared.transaction());
+    }
+
     private static void requirePrepared(PreparedBudgetDisbursementPayment prepared) {
         if (prepared == null) {
             throw new IllegalArgumentException(
