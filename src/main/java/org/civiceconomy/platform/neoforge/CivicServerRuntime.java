@@ -41,10 +41,12 @@ import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
 import org.civiceconomy.fiscal.FiscalBillFundingCoordinator;
 import org.civiceconomy.fiscal.FiscalBillInspection;
 import org.civiceconomy.fiscal.FiscalBillKind;
+import org.civiceconomy.fiscal.FiscalBillPaymentCoordinator;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.IssueFiscalBill;
 import org.civiceconomy.fiscal.NationFiscalBillInspection;
 import org.civiceconomy.fiscal.PaymentCoordinator;
+import org.civiceconomy.fiscal.PreparedFiscalBillPayment;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMintIssuances;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyAccountBalances;
@@ -627,6 +629,30 @@ public final class CivicServerRuntime {
                                         ignored -> balance,
                                         commandClock)
                                 .fund(actorPlayerId, billId, requestId)));
+    }
+
+    CompletableFuture<FiscalBill> payPlayerFiscalBill(
+            ServerPlayer actor, UUID billId, String requestId) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        return onServer(current, () ->
+                        LightmansCurrencyPayments.live(current.server.overworld()))
+                .thenCompose(payments -> current.writer.submitDatabase(database -> {
+                    FiscalBillPaymentCoordinator coordinator =
+                            new FiscalBillPaymentCoordinator(database, payments);
+                    return new PreparedPlayerFiscalBillPayment(
+                            coordinator,
+                            coordinator.prepare(actorPlayerId, billId, requestId));
+                }))
+                .thenCompose(prepared -> onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.payment());
+                    return prepared;
+                }))
+                .thenCompose(prepared -> current.writer.submitDatabase(database -> {
+                    prepared.coordinator().commit(prepared.payment());
+                    return new FiscalBillInspection(database)
+                            .statusForPayer(actorPlayerId, billId);
+                }));
     }
 
     CompletableFuture<List<FiscalBill>> nationFiscalBills(ServerPlayer actor) {
@@ -2868,6 +2894,10 @@ public final class CivicServerRuntime {
     private record PreparedTreasuryWithdrawal(
             TreasuryWithdrawalCoordinator coordinator,
             TreasuryWithdrawal withdrawal) {}
+
+    private record PreparedPlayerFiscalBillPayment(
+            FiscalBillPaymentCoordinator coordinator,
+            PreparedFiscalBillPayment payment) {}
 
     private record PreparedApprovedTreasuryWithdrawal(
             TreasuryWithdrawalCoordinator coordinator,

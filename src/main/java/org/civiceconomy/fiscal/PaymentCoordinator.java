@@ -47,6 +47,11 @@ public final class PaymentCoordinator {
     }
 
     public PaymentTransaction settle(SettleReservation request, FailurePoint failurePoint) {
+        PaymentTransaction transaction = prepare(request);
+        return applyAndCommit(transaction, failurePoint);
+    }
+
+    public PaymentTransaction prepare(SettleReservation request) {
         requireSessionIdentity(request.serviceIdentity());
         if (authorization != null) {
             var reservation = database.reservationRecord(request.reservationId());
@@ -86,7 +91,46 @@ public final class PaymentCoordinator {
                 || !transaction.amount().equals(request.amount())) {
             throw new IdempotencyConflictException(request.serviceIdentity(), request.requestId());
         }
-        return applyAndCommit(transaction, failurePoint);
+        return transaction;
+    }
+
+    public void applyExternal(PaymentTransaction transaction) {
+        java.util.Objects.requireNonNull(transaction, "Payment transaction cannot be null");
+        requireSessionIdentity(transaction.serviceIdentity());
+        if (transaction.state() == TransactionState.PREPARED) {
+            externalPayments.apply(externalPayment(transaction));
+        }
+    }
+
+    public PaymentTransaction confirmExternalApplied(PaymentTransaction prepared) {
+        java.util.Objects.requireNonNull(prepared, "Payment transaction cannot be null");
+        requireSessionIdentity(prepared.serviceIdentity());
+        PaymentTransaction transaction = toTransaction(
+                database.paymentTransaction(prepared.transactionId()));
+        if (!transaction.serviceIdentity().equals(prepared.serviceIdentity())
+                || !transaction.requestId().equals(prepared.requestId())
+                || !transaction.reservationId().equals(prepared.reservationId())
+                || !transaction.sourceAccount().equals(prepared.sourceAccount())
+                || !transaction.recipientAccount().equals(prepared.recipientAccount())
+                || !transaction.amount().equals(prepared.amount())
+                || transaction.kind() != PaymentKind.PAYMENT) {
+            throw new IdempotencyConflictException(
+                    prepared.serviceIdentity(), prepared.requestId());
+        }
+        if (transaction.state() == TransactionState.PREPARED) {
+            database.markExternalApplied(transaction.transactionId());
+            transaction = transaction(transaction.requestId());
+        }
+        if (transaction.state() == TransactionState.EXTERNAL_APPLIED) {
+            commit(transaction, false);
+            transaction = transaction(transaction.requestId());
+        }
+        if (transaction.state() != TransactionState.CIVIC_COMMITTED) {
+            throw new IllegalStateException(
+                    "Payment transaction has inconsistent commit state "
+                            + transaction.transactionId());
+        }
+        return transaction;
     }
 
     public PaymentTransaction refund(RefundPayment request, FailurePoint failurePoint) {
@@ -202,7 +246,7 @@ public final class PaymentCoordinator {
 
     private PaymentTransaction applyAndCommit(PaymentTransaction transaction, FailurePoint failurePoint) {
         if (transaction.state() == TransactionState.PREPARED) {
-            externalPayments.apply(externalPayment(transaction));
+            applyExternal(transaction);
             if (failurePoint == FailurePoint.AFTER_EXTERNAL_BEFORE_RECORD) {
                 throw new SimulatedCrash(failurePoint);
             }

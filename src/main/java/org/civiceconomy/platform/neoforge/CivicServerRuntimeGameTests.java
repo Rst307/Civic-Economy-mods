@@ -532,7 +532,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Fiscal Bill command actions");
         helper.assertValueEqual(
-                Set.of("list", "status", "fund"),
+                Set.of("list", "status", "fund", "pay"),
                 economy.getChild("bill").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -1145,6 +1145,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean inspectionReady = new AtomicBoolean();
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean fundingCommandsStarted = new AtomicBoolean();
+        AtomicBoolean paymentCommandsStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1402,7 +1403,15 @@ public final class CivicServerRuntimeGameTests {
                             payerId,
                             dueAt);
                 })
-                .thenExecute(() -> seedPlayerBank(payerId, 1_000L))
+                .thenExecute(() -> {
+                    LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                            .create(
+                                    new AccountId(
+                                            "nation:" + nationId.get().value() + ":treasury"),
+                                    FiscalAccountKind.NATIONAL_TREASURY,
+                                    "Fiscal Bill GameTest Treasury");
+                    seedPlayerBank(payerId, 1_000L);
+                })
                 .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
                     try {
                         String command = "civic economy bill fund " + billId.get()
@@ -1435,6 +1444,46 @@ public final class CivicServerRuntimeGameTests {
                             1_000L,
                             playerBankBalance(payerId),
                             "Fiscal Bill funding does not move LC");
+                })
+                .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
+                    try {
+                        String command = "civic economy bill pay " + billId.get()
+                                + " pay-player-bill-" + billId.get();
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        int first = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        int replay = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        helper.assertValueEqual(1, first, "Fiscal Bill payment command result");
+                        helper.assertValueEqual(1, replay, "Fiscal Bill payment replay result");
+                        paymentCommandsStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill payment command");
+                    helper.assertTrue(
+                            paymentCommandsStarted.get(),
+                            "Fiscal Bill payment commands started");
+                    String beneficiary = "nation:" + nationId.get().value() + ":treasury";
+                    assertPaidFiscalBill(
+                            helper,
+                            databaseFile,
+                            billId.get(),
+                            payerId,
+                            "pay-player-bill-" + billId.get(),
+                            beneficiary);
+                    helper.assertValueEqual(
+                            700L,
+                            playerBankBalance(payerId),
+                            "Fiscal Bill payment debits real LC payer once");
+                    helper.assertValueEqual(
+                            300L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(beneficiary))
+                                    .minorUnits(),
+                            "Fiscal Bill payment credits persisted beneficiary once");
                 })
                 .thenSucceed();
     }
@@ -4776,6 +4825,57 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect funded Fiscal Bill", failure);
+        }
+    }
+
+    private static void assertPaidFiscalBill(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID billId,
+            UUID payerId,
+            String paymentRequestId,
+            String beneficiaryAccount) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT b.state, e.state, r.state, r.settled_minor_units,
+                               p.state, p.source_account, p.recipient_account,
+                               p.amount_minor_units,
+                               (SELECT COUNT(*) FROM payment_transaction
+                                WHERE service_identity = ? AND request_id = ?),
+                               (SELECT COUNT(*) FROM fiscal_ledger_entry
+                                WHERE transaction_id = p.transaction_id)
+                        FROM fiscal_bill b
+                        JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                        JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                        JOIN payment_transaction p ON p.reservation_id = r.reservation_id
+                        WHERE b.bill_id = ?
+                          AND p.service_identity = ?
+                          AND p.request_id = ?
+                        """)) {
+            String serviceIdentity = "civiceconomy-fiscal-bill-payment";
+            query.setString(1, serviceIdentity);
+            query.setString(2, paymentRequestId);
+            query.setString(3, billId.toString());
+            query.setString(4, serviceIdentity);
+            query.setString(5, paymentRequestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "paid Fiscal Bill row");
+                helper.assertValueEqual("PAID", result.getString(1), "paid Bill state");
+                helper.assertValueEqual("SETTLED", result.getString(2), "paid Escrow state");
+                helper.assertValueEqual("SETTLED", result.getString(3), "paid Reservation state");
+                helper.assertValueEqual(300L, result.getLong(4), "settled Reservation amount");
+                helper.assertValueEqual(
+                        "CIVIC_COMMITTED", result.getString(5), "payment transaction state");
+                helper.assertValueEqual(
+                        "player:" + payerId, result.getString(6), "payment payer account");
+                helper.assertValueEqual(
+                        beneficiaryAccount, result.getString(7), "payment beneficiary account");
+                helper.assertValueEqual(300L, result.getLong(8), "payment amount");
+                helper.assertValueEqual(1, result.getInt(9), "one payment transaction");
+                helper.assertValueEqual(2, result.getInt(10), "paired payment ledger entries");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect paid Fiscal Bill", failure);
         }
     }
 

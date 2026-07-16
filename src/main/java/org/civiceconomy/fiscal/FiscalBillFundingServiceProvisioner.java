@@ -35,7 +35,7 @@ public final class FiscalBillFundingServiceProvisioner {
                 "Exact player account scope for Fiscal Bill funding"));
     }
 
-    private static void requirePlayerAccount(AccountId accountId) {
+    static void requirePlayerAccount(AccountId accountId) {
         if (accountId == null) {
             throw new IllegalArgumentException("Fiscal Bill payer account cannot be null");
         }

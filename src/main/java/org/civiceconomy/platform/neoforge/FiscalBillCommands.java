@@ -36,6 +36,14 @@ final class FiscalBillCommands {
                                                 context.getSource(),
                                                 UuidArgument.getUuid(context, "billId"),
                                                 StringArgumentType.getString(
+                                                        context, "requestId"))))))
+                .then(Commands.literal("pay")
+                        .then(Commands.argument("billId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .executes(context -> pay(
+                                                context.getSource(),
+                                                UuidArgument.getUuid(context, "billId"),
+                                                StringArgumentType.getString(
                                                         context, "requestId"))))));
     }
 
@@ -94,6 +102,24 @@ final class FiscalBillCommands {
                     }
                 }));
         source.sendSuccess(() -> Component.literal("Fiscal Bill funding queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int pay(CommandSourceStack source, UUID billId, String requestId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .payPlayerFiscalBill(player, billId, requestId)
+                .whenComplete((bill, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Fiscal Bill payment", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal("Paid " + formatFiscalBill(bill)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Fiscal Bill payment queued"), false);
         return Command.SINGLE_SUCCESS;
     }
 
