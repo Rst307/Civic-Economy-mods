@@ -8281,6 +8281,28 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredEscrow> dueActiveEscrows(long nowEpochMillis) {
+        List<StoredEscrow> escrows = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT e.*, r.source_account, r.amount_minor_units, r.settled_minor_units
+                FROM fiscal_escrow e
+                JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE e.state IN ('RESERVED', 'PARTIALLY_SETTLED')
+                  AND e.expires_at_epoch_millis <= ?
+                ORDER BY e.expires_at_epoch_millis, e.escrow_id
+                """)) {
+            query.setLong(1, nowEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    escrows.add(storedEscrow(result));
+                }
+            }
+            return List.copyOf(escrows);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list due active Escrows", failure);
+        }
+    }
+
     public synchronized StoredEscrowExpiry escrowExpiry(String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM escrow_expiry
@@ -13026,20 +13048,24 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            return new StoredEscrow(
-                    UUID.fromString(result.getString("escrow_id")),
-                    result.getString("service_identity"),
-                    result.getString("request_id"),
-                    UUID.fromString(result.getString("reservation_id")),
-                    result.getString("source_account"),
-                    result.getLong("amount_minor_units"),
-                    result.getLong("settled_minor_units"),
-                    result.getString("external_object_id"),
-                    result.getString("purpose"),
-                    result.getLong("expires_at_epoch_millis"),
-                    result.getString("required_recipient_account"),
-                    result.getString("state"));
+            return storedEscrow(result);
         }
+    }
+
+    private static StoredEscrow storedEscrow(ResultSet result) throws SQLException {
+        return new StoredEscrow(
+                UUID.fromString(result.getString("escrow_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("reservation_id")),
+                result.getString("source_account"),
+                result.getLong("amount_minor_units"),
+                result.getLong("settled_minor_units"),
+                result.getString("external_object_id"),
+                result.getString("purpose"),
+                result.getLong("expires_at_epoch_millis"),
+                result.getString("required_recipient_account"),
+                result.getString("state"));
     }
 
     private static StoredBudget readBudget(PreparedStatement query) throws SQLException {

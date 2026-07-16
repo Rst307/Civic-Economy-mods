@@ -32,6 +32,7 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.EscrowExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
@@ -145,6 +146,7 @@ import org.slf4j.Logger;
 public final class CivicServerRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int CHECKPOINT_INTERVAL_TICKS = 20 * 60;
+    private static final int ESCROW_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
@@ -258,6 +260,7 @@ public final class CivicServerRuntime {
                 new ServerPlayerMintMaterialCustody(server),
                 now);
         scheduleDatabaseBackupRecovery(state);
+        scheduleEscrowExpiry(state);
         scheduleTerritoryPermitMirrorRefresh(state);
         scheduleTerritoryForceLoadRestrictionRefresh(state);
         scheduleNationApplicationExpiry(state);
@@ -312,6 +315,11 @@ public final class CivicServerRuntime {
         if (current.ticksSinceCheckpoint >= CHECKPOINT_INTERVAL_TICKS) {
             current.ticksSinceCheckpoint = 0;
             current.writer.submit(current.sessions.checkpoint(clock.millis()));
+        }
+        current.ticksSinceEscrowExpiry++;
+        if (current.ticksSinceEscrowExpiry >= ESCROW_EXPIRY_INTERVAL_TICKS) {
+            current.ticksSinceEscrowExpiry = 0;
+            scheduleEscrowExpiry(current);
         }
         current.ticksSinceNationApplicationExpiry++;
         if (current.ticksSinceNationApplicationExpiry
@@ -960,6 +968,13 @@ public final class CivicServerRuntime {
         RuntimeState current = state;
         if (current != null) {
             scheduleMintBatchRecovery(current);
+        }
+    }
+
+    void expireEscrowsNowForGameTest() {
+        RuntimeState current = state;
+        if (current != null) {
+            scheduleEscrowExpiry(current);
         }
     }
 
@@ -1728,6 +1743,23 @@ public final class CivicServerRuntime {
                         LOGGER.error("Automatic Nation Application expiry failed closed", failure);
                     } else if (!expired.isEmpty()) {
                         LOGGER.info("Automatically expired {} Nation Application(s)", expired.size());
+                    }
+                });
+    }
+
+    private void scheduleEscrowExpiry(RuntimeState current) {
+        if (state != current || !current.escrowExpiryQueued.compareAndSet(false, true)) {
+            return;
+        }
+        Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        current.writer.submitDatabase(database ->
+                        new EscrowExpiryProcessor(database, scanClock).expireDue())
+                .whenComplete((expired, failure) -> {
+                    current.escrowExpiryQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error("Automatic Escrow expiry failed closed", failure);
+                    } else if (!expired.isEmpty()) {
+                        LOGGER.info("Automatically expired {} Escrow(s)", expired.size());
                     }
                 });
     }
@@ -2627,6 +2659,7 @@ public final class CivicServerRuntime {
         private final OnlineDatabaseRestoreManager restores;
         private final ServerPlayerMintMaterialCustody mintCustody;
         private final long startedAtEpochMillis;
+        private final AtomicBoolean escrowExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
@@ -2640,6 +2673,7 @@ public final class CivicServerRuntime {
                 new AtomicBoolean();
         private final AtomicBoolean databaseBackupQueued = new AtomicBoolean();
         private int ticksSinceCheckpoint;
+        private int ticksSinceEscrowExpiry;
         private int ticksSinceNationApplicationExpiry;
         private int ticksSinceCitizenshipReconciliation;
         private int ticksSinceTerritoryPermitCompensation;

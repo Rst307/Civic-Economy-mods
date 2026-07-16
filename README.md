@@ -148,6 +148,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 每个新 Withdrawal Approval 固定一个当前为 7 天的到期时间。只有一直未达到人数的 `PENDING` 决定会由现有异步 Withdrawal recovery 扫描转为 `EXPIRED`；`APPROVED`、已有 Operation 或 `EXECUTED` 决定不会被到期器改写。该时长目前是实现常量，后续需进入服务器政策配置。
 
+所有活动 Escrow 由服务端在启动时和每分钟扫描到期时间。SQLite 查询和释放都只在 `Civic-Economy-SQLite` 单写线程执行；到期会原子记录审计、释放未支付 Reservation 余量，并同步推进关联 Budget 或 Fiscal Bill。存在 `PREPARED`、`EXTERNAL_APPLIED` 或补偿中付款的 Escrow 会保守跳过并留给恢复流程，且不会阻断同一扫描中的其他安全到期对象。该流程不移动 LC，也不会重复释放同一 hold。
+
 FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenship；后续 Team 新成员不会自动入籍。正式 Citizen 离开绑定 Team 后立即停止 Provider 权限和 Effective Citizen 人口贡献，进入当前固定两天的 Citizenship Correction Grace；宽限内回归恢复同一 Citizenship，截止仍未回归才结束 Citizenship 并开始转籍冷却。协调扫描只在服务器线程读取 FTB 快照，所有持久化工作均在 SQLite 线程执行。
 
 受信任 OP/控制台服务管理入口位于：

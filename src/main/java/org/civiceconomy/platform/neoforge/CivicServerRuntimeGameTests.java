@@ -884,6 +884,51 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    @GameTest(template = "empty", timeoutTicks = 300)
+    public static void runtimeExpiresDueEscrowOffThread(GameTestHelper helper) {
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        UUID escrowId = UUID.randomUUID();
+        UUID reservationId = UUID.randomUUID();
+        long expiresAt = System.currentTimeMillis() + 250L;
+        AtomicBoolean prepared = new AtomicBoolean();
+        AtomicBoolean expiryTriggered = new AtomicBoolean();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+
+        runtime.submitDatabase(database -> database.openEscrow(
+                        escrowId,
+                        reservationId,
+                        "civiceconomy-gametest",
+                        "runtime-escrow-expiry-" + escrowId,
+                        "nation:runtime-escrow-expiry:treasury",
+                        300L,
+                        "contract:runtime-expiry",
+                        "Runtime automatic Escrow expiry",
+                        expiresAt))
+                .whenComplete((escrow, failure) -> {
+                    if (failure == null) {
+                        prepared.set(true);
+                    } else {
+                        asyncFailure.set(failure);
+                    }
+                });
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(asyncFailure.get() == null, "automatic Escrow expiry setup");
+            helper.assertTrue(prepared.get(), "due Escrow persisted on SQLite writer");
+            if (System.currentTimeMillis() >= expiresAt
+                    && expiryTriggered.compareAndSet(false, true)) {
+                runtime.expireEscrowsNowForGameTest();
+            }
+            helper.assertTrue(expiryTriggered.get(), "automatic Escrow expiry triggered");
+            assertEscrowAutomaticallyExpired(helper, databaseFile, escrowId);
+        });
+    }
+
     @GameTest(template = "empty", timeoutTicks = 1800)
     public static void runtimeStartsCorrectionGraceForRealFtbDepartureOffThread(
             GameTestHelper helper) {
@@ -4200,6 +4245,38 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect automatic Nation Application expiry", failure);
+        }
+    }
+
+    private static void assertEscrowAutomaticallyExpired(
+            GameTestHelper helper, Path databaseFile, UUID escrowId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT escrow.state, reservation.state,
+                               expiry.service_identity, expiry.request_id,
+                               COUNT(*) OVER ()
+                        FROM fiscal_escrow escrow
+                        JOIN fiscal_reservation reservation
+                          ON reservation.reservation_id = escrow.reservation_id
+                        JOIN escrow_expiry expiry
+                          ON expiry.escrow_id = escrow.escrow_id
+                        WHERE escrow.escrow_id = ?
+                        """)) {
+            query.setString(1, escrowId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "automatic Escrow expiry audit");
+                helper.assertValueEqual("EXPIRED", result.getString(1), "Escrow state");
+                helper.assertValueEqual("RELEASED", result.getString(2), "Reservation state");
+                helper.assertValueEqual(
+                        "civiceconomy-server", result.getString(3), "expiry service identity");
+                helper.assertValueEqual(
+                        "automatic-expiry:" + escrowId,
+                        result.getString(4),
+                        "expiry request identity");
+                helper.assertValueEqual(1, result.getInt(5), "single expiry audit");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect automatic Escrow expiry", failure);
         }
     }
 

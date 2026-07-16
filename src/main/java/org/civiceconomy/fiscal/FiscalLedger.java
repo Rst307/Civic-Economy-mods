@@ -422,7 +422,7 @@ public final class FiscalLedger {
                 stored.releasedAtEpochMillis());
     }
 
-    private static Escrow toEscrow(StoredEscrow stored) {
+    static Escrow toEscrow(StoredEscrow stored) {
         return new Escrow(
                 stored.escrowId(),
                 new ServiceIdentity(stored.serviceIdentity()),
