@@ -17,6 +17,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import org.civiceconomy.fiscal.AccountId;
+import org.civiceconomy.fiscal.InsufficientAvailableBalanceException;
 import org.civiceconomy.fiscal.MoneyAmount;
 import org.civiceconomy.territory.TerritoryMaintenanceCandidate;
 import org.civiceconomy.territory.TerritoryMaintenancePriority;
@@ -25,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 63;
+    private static final int SCHEMA_VERSION = 64;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -7197,6 +7199,347 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredBudgetDisbursementApprovalPolicy
+            budgetDisbursementApprovalPolicy(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_disbursement_approval_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudgetDisbursementApprovalPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Budget Disbursement Approval Policy", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApprovalPolicy
+            currentBudgetDisbursementApprovalPolicy(UUID nationId, long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_disbursement_approval_policy
+                WHERE nation_id = ? AND effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setLong(2, asOfEpochMillis);
+            return readBudgetDisbursementApprovalPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Budget Disbursement Approval Policy", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApprovalPolicy
+            scheduleBudgetDisbursementApprovalPolicy(
+                    UUID policyId,
+                    String serviceIdentity,
+                    String requestId,
+                    UUID nationId,
+                    UUID actorPlayerId,
+                    List<StoredBudgetDisbursementApprovalTier> tiers,
+                    long approvalLifetimeMillis,
+                    long effectiveAtEpochMillis,
+                    String reason,
+                    long recordedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement policy = connection.prepareStatement("""
+                        INSERT INTO budget_disbursement_approval_policy (
+                            policy_id, service_identity, request_id, nation_id,
+                            actor_player_id, approval_lifetime_millis,
+                            effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement tier = connection.prepareStatement("""
+                        INSERT INTO budget_disbursement_approval_policy_tier (
+                            policy_id, minimum_amount_minor_units, required_approvals
+                        ) VALUES (?, ?, ?)
+                        """)) {
+                policy.setString(1, policyId.toString());
+                policy.setString(2, serviceIdentity);
+                policy.setString(3, requestId);
+                policy.setString(4, nationId.toString());
+                policy.setString(5, actorPlayerId.toString());
+                policy.setLong(6, approvalLifetimeMillis);
+                policy.setLong(7, effectiveAtEpochMillis);
+                policy.setString(8, reason);
+                policy.setLong(9, recordedAtEpochMillis);
+                policy.executeUpdate();
+                for (StoredBudgetDisbursementApprovalTier storedTier : tiers) {
+                    tier.setString(1, policyId.toString());
+                    tier.setLong(2, storedTier.minimumAmountMinorUnits());
+                    tier.setInt(3, storedTier.requiredApprovals());
+                    tier.addBatch();
+                }
+                tier.executeBatch();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return budgetDisbursementApprovalPolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to schedule Budget Disbursement Approval Policy", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApproval budgetDisbursementApproval(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_disbursement_approval_request
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudgetDisbursementApproval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Budget Disbursement approval request", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApproval budgetDisbursementApproval(
+            UUID approvalRequestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_disbursement_approval_request
+                WHERE approval_request_id = ?
+                """)) {
+            query.setString(1, approvalRequestId.toString());
+            return readBudgetDisbursementApproval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Budget Disbursement approval", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApproval budgetDisbursementApprovalVote(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval.*
+                FROM budget_disbursement_approval_vote vote
+                JOIN budget_disbursement_approval_request approval
+                  ON approval.approval_request_id = vote.approval_request_id
+                WHERE vote.service_identity = ? AND vote.request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudgetDisbursementApproval(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Budget Disbursement approval vote", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApproval createBudgetDisbursementApproval(
+            UUID approvalRequestId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID budgetId,
+            String recipientAccount,
+            long amountMinorUnits,
+            UUID actorPlayerId,
+            String reason,
+            UUID policyId,
+            int requiredApprovals,
+            UUID initialVoteId,
+            UUID initialApproverPlayerId,
+            String initialApprovalReason,
+            long initiatedAtEpochMillis,
+            long expiresAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            String state = requiredApprovals == 1 ? "APPROVED" : "PENDING";
+            try (PreparedStatement active = connection.prepareStatement("""
+                        SELECT COALESCE(SUM(amount_minor_units), 0)
+                        FROM budget_disbursement_approval_request
+                        WHERE budget_id = ? AND state IN ('PENDING', 'APPROVED')
+                        """);
+                    PreparedStatement request = connection.prepareStatement("""
+                        INSERT INTO budget_disbursement_approval_request (
+                            approval_request_id, service_identity, request_id, nation_id,
+                            budget_id, recipient_account, amount_minor_units,
+                            actor_player_id, reason, policy_id, required_approvals,
+                            state, initiated_at_epoch_millis, approved_at_epoch_millis,
+                            expires_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement vote = connection.prepareStatement("""
+                        INSERT INTO budget_disbursement_approval_vote (
+                            vote_id, approval_request_id, service_identity, request_id,
+                            approver_player_id, reason, approved_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """)) {
+                StoredBudget budget = budget(budgetId);
+                if (budget == null) {
+                    throw new IllegalArgumentException("Unknown Budget " + budgetId);
+                }
+                active.setString(1, budgetId.toString());
+                long alreadyAuthorized;
+                try (ResultSet result = active.executeQuery()) {
+                    alreadyAuthorized = result.next() ? result.getLong(1) : 0L;
+                }
+                long available = Math.subtractExact(
+                        Math.subtractExact(
+                                budget.amountMinorUnits(), budget.settledMinorUnits()),
+                        alreadyAuthorized);
+                if (amountMinorUnits > available) {
+                    throw new InsufficientAvailableBalanceException(
+                            new AccountId(budget.sourceAccount()),
+                            MoneyAmount.ofMinorUnits(amountMinorUnits),
+                            MoneyAmount.ofMinorUnits(available));
+                }
+                request.setString(1, approvalRequestId.toString());
+                request.setString(2, serviceIdentity);
+                request.setString(3, requestId);
+                request.setString(4, nationId.toString());
+                request.setString(5, budgetId.toString());
+                request.setString(6, recipientAccount);
+                request.setLong(7, amountMinorUnits);
+                request.setString(8, actorPlayerId.toString());
+                request.setString(9, reason);
+                request.setString(10, policyId.toString());
+                request.setInt(11, requiredApprovals);
+                request.setString(12, state);
+                request.setLong(13, initiatedAtEpochMillis);
+                if (requiredApprovals == 1) {
+                    request.setLong(14, initiatedAtEpochMillis);
+                } else {
+                    request.setNull(14, java.sql.Types.BIGINT);
+                }
+                request.setLong(15, expiresAtEpochMillis);
+                request.executeUpdate();
+                vote.setString(1, initialVoteId.toString());
+                vote.setString(2, approvalRequestId.toString());
+                vote.setString(3, serviceIdentity);
+                vote.setString(4, requestId);
+                vote.setString(5, initialApproverPlayerId.toString());
+                vote.setString(6, initialApprovalReason);
+                vote.setLong(7, initiatedAtEpochMillis);
+                vote.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return budgetDisbursementApproval(approvalRequestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to create Budget Disbursement approval", failure);
+        }
+    }
+
+    public synchronized StoredBudgetDisbursementApproval approveBudgetDisbursement(
+            UUID approvalRequestId,
+            UUID voteId,
+            String serviceIdentity,
+            String requestId,
+            UUID approverPlayerId,
+            String reason,
+            long approvedAtEpochMillis) {
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement vote = connection.prepareStatement("""
+                        INSERT INTO budget_disbursement_approval_vote (
+                            vote_id, approval_request_id, service_identity, request_id,
+                            approver_player_id, reason, approved_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement approve = connection.prepareStatement("""
+                        UPDATE budget_disbursement_approval_request
+                        SET state = 'APPROVED', approved_at_epoch_millis = ?
+                        WHERE approval_request_id = ? AND state = 'PENDING'
+                          AND required_approvals <= (
+                              SELECT COUNT(*)
+                              FROM budget_disbursement_approval_vote
+                              WHERE approval_request_id = ?
+                          )
+                        """)) {
+                vote.setString(1, voteId.toString());
+                vote.setString(2, approvalRequestId.toString());
+                vote.setString(3, serviceIdentity);
+                vote.setString(4, requestId);
+                vote.setString(5, approverPlayerId.toString());
+                vote.setString(6, reason);
+                vote.setLong(7, approvedAtEpochMillis);
+                vote.executeUpdate();
+                approve.setLong(1, approvedAtEpochMillis);
+                approve.setString(2, approvalRequestId.toString());
+                approve.setString(3, approvalRequestId.toString());
+                approve.executeUpdate();
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return budgetDisbursementApproval(approvalRequestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to approve Budget Disbursement", failure);
+        }
+    }
+
+    public synchronized List<StoredBudgetDisbursementApproval>
+            expirePendingBudgetDisbursementApprovals(
+                    long asOfEpochMillis, long expiredAtEpochMillis) {
+        if (asOfEpochMillis < 0L || expiredAtEpochMillis < 0L) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement approval expiry time is invalid");
+        }
+        List<UUID> due = new ArrayList<>();
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement query = connection.prepareStatement("""
+                        SELECT approval_request_id
+                        FROM budget_disbursement_approval_request
+                        WHERE state = 'PENDING' AND expires_at_epoch_millis <= ?
+                        ORDER BY expires_at_epoch_millis, approval_request_id
+                        """);
+                    PreparedStatement expire = connection.prepareStatement("""
+                        UPDATE budget_disbursement_approval_request
+                        SET state = 'EXPIRED', expired_at_epoch_millis = ?
+                        WHERE approval_request_id = ? AND state = 'PENDING'
+                        """)) {
+                query.setLong(1, asOfEpochMillis);
+                try (ResultSet result = query.executeQuery()) {
+                    while (result.next()) {
+                        due.add(UUID.fromString(result.getString(1)));
+                    }
+                }
+                for (UUID approvalRequestId : due) {
+                    expire.setLong(1, expiredAtEpochMillis);
+                    expire.setString(2, approvalRequestId.toString());
+                    if (expire.executeUpdate() != 1) {
+                        throw new IllegalStateException(
+                                "Budget Disbursement approval changed before expiry "
+                                        + approvalRequestId);
+                    }
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to expire Budget Disbursement approvals", failure);
+        }
+        return due.stream().map(this::budgetDisbursementApproval).toList();
+    }
+
     public synchronized StoredTreasuryWithdrawalApproval treasuryWithdrawalApproval(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -9349,6 +9692,12 @@ public final class CivicDatabase implements AutoCloseable {
                             SELECT escrow_id FROM fiscal_escrow WHERE reservation_id = ?
                         )
                           AND state IN ('RESERVED', 'PARTIALLY_PAID')
+                        """);
+                    PreparedStatement executeDisbursement = connection.prepareStatement("""
+                        UPDATE budget_disbursement_approval_request
+                        SET state = 'EXECUTED', executed_at_epoch_millis = ?
+                        WHERE service_identity = ? AND request_id = ?
+                          AND state = 'APPROVED'
                         """)) {
                 settle.setLong(1, transaction.amountMinorUnits());
                 settle.setLong(2, transaction.amountMinorUnits());
@@ -9369,6 +9718,18 @@ public final class CivicDatabase implements AutoCloseable {
                 updateBudget.executeUpdate();
                 updateBill.setString(1, reservationId.toString());
                 updateBill.executeUpdate();
+                executeDisbursement.setLong(
+                        1, recovery ? recordedAtEpochMillis : System.currentTimeMillis());
+                executeDisbursement.setString(2, transaction.serviceIdentity());
+                executeDisbursement.setString(3, transaction.requestId());
+                int executedDisbursements = executeDisbursement.executeUpdate();
+                if ("civiceconomy-budget-disbursement"
+                                .equals(transaction.serviceIdentity())
+                        && executedDisbursements != 1) {
+                    throw new IllegalStateException(
+                            "Budget Disbursement approval changed before payment commit "
+                                    + transaction.requestId());
+                }
                 insertLedgerEntries(transaction, System.currentTimeMillis());
                 if (recovery) {
                     insertRecoveryAudit(
@@ -12103,7 +12464,7 @@ public final class CivicDatabase implements AutoCloseable {
                             required_approvals INTEGER NOT NULL
                                 CHECK (required_approvals BETWEEN 1 AND 16),
                             state TEXT NOT NULL CHECK (state IN (
-                                'PENDING', 'APPROVED', 'EXECUTED'
+                                'PENDING', 'APPROVED', 'EXECUTED', 'EXPIRED'
                             )),
                             initiated_at_epoch_millis INTEGER NOT NULL
                                 CHECK (initiated_at_epoch_millis >= 0),
@@ -12309,6 +12670,105 @@ public final class CivicDatabase implements AutoCloseable {
                         WHERE b.state = 'RELEASED'
                         """);
                 statement.execute("PRAGMA user_version = 63");
+            }
+            if (version < 64) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_disbursement_approval_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            approval_lifetime_millis INTEGER NOT NULL
+                                CHECK (approval_lifetime_millis > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (nation_id, effective_at_epoch_millis)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS budget_disbursement_approval_policy_current
+                        ON budget_disbursement_approval_policy (
+                            nation_id, effective_at_epoch_millis
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_disbursement_approval_policy_tier (
+                            policy_id TEXT NOT NULL
+                                REFERENCES budget_disbursement_approval_policy(policy_id),
+                            minimum_amount_minor_units INTEGER NOT NULL
+                                CHECK (minimum_amount_minor_units >= 0),
+                            required_approvals INTEGER NOT NULL
+                                CHECK (required_approvals BETWEEN 1 AND 16),
+                            PRIMARY KEY (policy_id, minimum_amount_minor_units)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_disbursement_approval_request (
+                            approval_request_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            budget_id TEXT NOT NULL REFERENCES fiscal_budget(budget_id),
+                            recipient_account TEXT NOT NULL,
+                            amount_minor_units INTEGER NOT NULL
+                                CHECK (amount_minor_units > 0),
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            policy_id TEXT NOT NULL,
+                            required_approvals INTEGER NOT NULL
+                                CHECK (required_approvals BETWEEN 1 AND 16),
+                            state TEXT NOT NULL CHECK (state IN (
+                                'PENDING', 'APPROVED', 'EXECUTED', 'EXPIRED'
+                            )),
+                            initiated_at_epoch_millis INTEGER NOT NULL
+                                CHECK (initiated_at_epoch_millis >= 0),
+                            approved_at_epoch_millis INTEGER,
+                            executed_at_epoch_millis INTEGER,
+                            expires_at_epoch_millis INTEGER NOT NULL
+                                CHECK (expires_at_epoch_millis >= initiated_at_epoch_millis),
+                            expired_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((state = 'PENDING'
+                                    AND approved_at_epoch_millis IS NULL
+                                    AND executed_at_epoch_millis IS NULL
+                                    AND expired_at_epoch_millis IS NULL)
+                                OR (state = 'APPROVED'
+                                    AND approved_at_epoch_millis IS NOT NULL
+                                    AND executed_at_epoch_millis IS NULL
+                                    AND expired_at_epoch_millis IS NULL)
+                                OR (state = 'EXECUTED'
+                                    AND approved_at_epoch_millis IS NOT NULL
+                                    AND executed_at_epoch_millis IS NOT NULL
+                                    AND expired_at_epoch_millis IS NULL)
+                                OR (state = 'EXPIRED'
+                                    AND approved_at_epoch_millis IS NULL
+                                    AND executed_at_epoch_millis IS NULL
+                                    AND expired_at_epoch_millis IS NOT NULL))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_disbursement_approval_vote (
+                            vote_id TEXT PRIMARY KEY,
+                            approval_request_id TEXT NOT NULL
+                                REFERENCES budget_disbursement_approval_request(
+                                    approval_request_id
+                                ),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            approver_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            approved_at_epoch_millis INTEGER NOT NULL
+                                CHECK (approved_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (approval_request_id, approver_player_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 64");
             }
             connection.commit();
         } catch (SQLException failure) {
@@ -12614,6 +13074,100 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredBudgetDisbursementApprovalPolicy
+            readBudgetDisbursementApprovalPolicy(PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            UUID policyId = UUID.fromString(result.getString("policy_id"));
+            List<StoredBudgetDisbursementApprovalTier> tiers = new ArrayList<>();
+            try (PreparedStatement tierQuery = connection.prepareStatement("""
+                    SELECT minimum_amount_minor_units, required_approvals
+                    FROM budget_disbursement_approval_policy_tier
+                    WHERE policy_id = ?
+                    ORDER BY minimum_amount_minor_units
+                    """)) {
+                tierQuery.setString(1, policyId.toString());
+                try (ResultSet tierResult = tierQuery.executeQuery()) {
+                    while (tierResult.next()) {
+                        tiers.add(new StoredBudgetDisbursementApprovalTier(
+                                tierResult.getLong("minimum_amount_minor_units"),
+                                tierResult.getInt("required_approvals")));
+                    }
+                }
+            }
+            return new StoredBudgetDisbursementApprovalPolicy(
+                    policyId,
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    tiers,
+                    result.getLong("approval_lifetime_millis"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredBudgetDisbursementApproval readBudgetDisbursementApproval(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            UUID approvalRequestId =
+                    UUID.fromString(result.getString("approval_request_id"));
+            List<StoredBudgetDisbursementApprovalVote> votes = new ArrayList<>();
+            try (PreparedStatement voteQuery = connection.prepareStatement("""
+                    SELECT vote_id, service_identity, request_id,
+                           approver_player_id, reason, approved_at_epoch_millis
+                    FROM budget_disbursement_approval_vote
+                    WHERE approval_request_id = ?
+                    ORDER BY approved_at_epoch_millis, vote_id
+                    """)) {
+                voteQuery.setString(1, approvalRequestId.toString());
+                try (ResultSet voteResult = voteQuery.executeQuery()) {
+                    while (voteResult.next()) {
+                        votes.add(new StoredBudgetDisbursementApprovalVote(
+                                UUID.fromString(voteResult.getString("vote_id")),
+                                voteResult.getString("service_identity"),
+                                voteResult.getString("request_id"),
+                                UUID.fromString(voteResult.getString("approver_player_id")),
+                                voteResult.getString("reason"),
+                                voteResult.getLong("approved_at_epoch_millis")));
+                    }
+                }
+            }
+            long approvedAtValue = result.getLong("approved_at_epoch_millis");
+            Long approvedAt = result.wasNull() ? null : approvedAtValue;
+            long executedAtValue = result.getLong("executed_at_epoch_millis");
+            Long executedAt = result.wasNull() ? null : executedAtValue;
+            long expiredAtValue = result.getLong("expired_at_epoch_millis");
+            Long expiredAt = result.wasNull() ? null : expiredAtValue;
+            return new StoredBudgetDisbursementApproval(
+                    approvalRequestId,
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("budget_id")),
+                    result.getString("recipient_account"),
+                    result.getLong("amount_minor_units"),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("reason"),
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getInt("required_approvals"),
+                    votes,
+                    result.getString("state"),
+                    result.getLong("initiated_at_epoch_millis"),
+                    approvedAt,
+                    executedAt,
+                    result.getLong("expires_at_epoch_millis"),
+                    expiredAt);
         }
     }
 

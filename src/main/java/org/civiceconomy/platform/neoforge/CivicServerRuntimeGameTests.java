@@ -528,7 +528,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
         helper.assertValueEqual(
-                Set.of("create", "approve", "cancel", "list", "status"),
+                Set.of("create", "approve", "cancel", "disbursement", "list", "status"),
                 economy.getChild("nation")
                         .getChild("budget")
                         .getChildren().stream()
@@ -1128,6 +1128,8 @@ public final class CivicServerRuntimeGameTests {
                 team.getId(), team.getOwner(), team.getMembers());
         String unauthorizedRequestId = "unauthorized-budget-" + UUID.randomUUID();
         String requestId = "player-budget-" + UUID.randomUUID();
+        String disbursementRequestId = "player-budget-disbursement-" + UUID.randomUUID();
+        UUID recipientPlayerId = UUID.randomUUID();
         long expiresAt = java.time.Instant.now()
                 .plus(java.time.Duration.ofDays(1L))
                 .toEpochMilli();
@@ -1147,6 +1149,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean inspectionReady = new AtomicBoolean();
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean approvalCommandStarted = new AtomicBoolean();
+        AtomicBoolean disbursementCommandStarted = new AtomicBoolean();
         AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -1265,6 +1268,14 @@ public final class CivicServerRuntimeGameTests {
                                     actor.getUUID(),
                                     NationFiscalPermission.APPROVE_BUDGET,
                                     "Authorize real player Budget approval"));
+                            authorities.grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "budget-disbursement-authority-" + UUID.randomUUID(),
+                                    nationId.get(),
+                                    actor.getUUID(),
+                                    actor.getUUID(),
+                                    NationFiscalPermission.INITIATE_PAYMENT,
+                                    "Authorize real player Budget Disbursement"));
                             return null;
                         })
                         .whenComplete((ignored, failure) -> {
@@ -1467,6 +1478,76 @@ public final class CivicServerRuntimeGameTests {
                 })
                 .thenExecute(() -> {
                     try {
+                        clearPlayerBank(recipientPlayerId);
+                        BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                        String command = "civic economy nation budget disbursement request "
+                                + budget.budgetId() + " " + disbursementRequestId + " "
+                                + recipientPlayerId
+                                + " 100 Pay GameTest public works supplier";
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement replay command result");
+                        disbursementCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget Disbursement command");
+                    helper.assertTrue(
+                            disbursementCommandStarted.get(),
+                            "Budget Disbursement command started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    helper.assertValueEqual(
+                            "PARTIALLY_SPENT", budget.state(), "partially spent Budget state");
+                    helper.assertValueEqual(
+                            100L, budget.settledMinorUnits(), "Budget settled amount");
+                    helper.assertValueEqual(
+                            200L,
+                            budget.amountMinorUnits() - budget.settledMinorUnits(),
+                            "Budget remaining amount");
+                    BudgetDisbursementRow disbursement = budgetDisbursementByRequest(
+                            databaseFile, disbursementRequestId);
+                    helper.assertTrue(disbursement != null, "durable Budget Disbursement");
+                    helper.assertValueEqual(
+                            budget.budgetId(), disbursement.budgetId(), "Disbursement Budget");
+                    helper.assertValueEqual(
+                            "player:" + recipientPlayerId,
+                            disbursement.recipientAccount(),
+                            "Disbursement recipient");
+                    helper.assertValueEqual(
+                            100L, disbursement.amountMinorUnits(), "Disbursement amount");
+                    helper.assertValueEqual(
+                            "EXECUTED", disbursement.approvalState(), "Disbursement approval state");
+                    helper.assertValueEqual(
+                            "CIVIC_COMMITTED",
+                            disbursement.paymentState(),
+                            "Disbursement Payment state");
+                    helper.assertValueEqual(
+                            1, disbursement.paymentCount(), "one Disbursement Payment");
+                    helper.assertValueEqual(
+                            900L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "Budget Disbursement debits real LC Treasury once");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(recipientPlayerId),
+                            "Budget Disbursement credits real LC recipient once");
+                })
+                .thenExecute(() -> {
+                    try {
                         BudgetRow budget = budgetByRequest(databaseFile, requestId);
                         String cancellationRequestId =
                                 "cancel-player-budget-" + UUID.randomUUID();
@@ -1520,11 +1601,23 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertValueEqual(
                             1, cancellation.releaseCount(), "one Reservation release audit");
                     helper.assertValueEqual(
-                            1_000L,
+                            300L, cancellation.reservationAmount(), "original Reservation amount");
+                    helper.assertValueEqual(
+                            100L, cancellation.settledAmount(), "preserved settled amount");
+                    helper.assertValueEqual(
+                            200L,
+                            cancellation.reservationAmount() - cancellation.settledAmount(),
+                            "only remaining Budget amount released");
+                    helper.assertValueEqual(
+                            900L,
                             LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
                                     .balance(new AccountId(budget.sourceAccount()))
                                     .minorUnits(),
                             "Budget cancellation releases a logical hold without moving LC");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(recipientPlayerId),
+                            "Budget cancellation does not reverse executed Disbursement");
                 })
                 .thenSucceed();
     }
@@ -4981,7 +5074,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(63, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(64, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -5592,6 +5685,13 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static void clearPlayerBank(UUID playerId) {
+        CustomSaveData.getData(BankDataCache.TYPE)
+                .getAccount(playerId)
+                .getMoneyStorage()
+                .clear();
+    }
+
     private static long playerBankBalance(UUID playerId) {
         BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
         var unit = CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1L);
@@ -5651,10 +5751,15 @@ public final class CivicServerRuntimeGameTests {
     private static BudgetRow budgetByRequest(Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
                 var query = connection.prepareStatement("""
-                        SELECT budget_id, source_account, amount_minor_units, budget_code, purpose,
-                               expires_at_epoch_millis, state, escrow_id
-                        FROM fiscal_budget
-                        WHERE service_identity = ? AND request_id = ?
+                        SELECT budget.budget_id, budget.source_account,
+                               budget.amount_minor_units, budget.budget_code, budget.purpose,
+                               budget.expires_at_epoch_millis, budget.state, budget.escrow_id,
+                               COALESCE(reservation.settled_minor_units, 0)
+                        FROM fiscal_budget budget
+                        LEFT JOIN fiscal_escrow escrow ON escrow.escrow_id = budget.escrow_id
+                        LEFT JOIN fiscal_reservation reservation
+                          ON reservation.reservation_id = escrow.reservation_id
+                        WHERE budget.service_identity = ? AND budget.request_id = ?
                         """)) {
             query.setString(1, "civiceconomy-budget");
             query.setString(2, requestId);
@@ -5668,7 +5773,8 @@ public final class CivicServerRuntimeGameTests {
                                 result.getString(5),
                                 result.getLong(6),
                                 result.getString(7),
-                                result.getString(8))
+                                result.getString(8),
+                                result.getLong(9))
                         : null;
             }
         } catch (SQLException failure) {
@@ -5710,6 +5816,40 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static BudgetDisbursementRow budgetDisbursementByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT approval.budget_id, approval.recipient_account,
+                               approval.amount_minor_units, approval.state,
+                               payment.state,
+                               (SELECT COUNT(*) FROM payment_transaction counted
+                                WHERE counted.service_identity = approval.service_identity
+                                  AND counted.request_id = approval.request_id)
+                        FROM budget_disbursement_approval_request approval
+                        LEFT JOIN payment_transaction payment
+                          ON payment.service_identity = approval.service_identity
+                         AND payment.request_id = approval.request_id
+                        WHERE approval.service_identity = ? AND approval.request_id = ?
+                        """)) {
+            query.setString(1, "civiceconomy-budget-disbursement");
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new BudgetDisbursementRow(
+                                UUID.fromString(result.getString(1)),
+                                result.getString(2),
+                                result.getLong(3),
+                                result.getString(4),
+                                result.getString(5),
+                                result.getInt(6))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Budget Disbursement", failure);
+        }
+    }
+
     private static BudgetCancellationRow budgetCancellationByBudget(
             Path databaseFile, UUID budgetId) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
@@ -5719,7 +5859,9 @@ public final class CivicServerRuntimeGameTests {
                                (SELECT COUNT(*) FROM budget_cancellation_audit counted
                                 WHERE counted.budget_id = budget.budget_id),
                                (SELECT COUNT(*) FROM reservation_release release
-                                WHERE release.reservation_id = reservation.reservation_id)
+                                WHERE release.reservation_id = reservation.reservation_id),
+                               reservation.amount_minor_units,
+                               reservation.settled_minor_units
                         FROM fiscal_budget budget
                         JOIN budget_cancellation_audit cancellation
                           ON cancellation.budget_id = budget.budget_id
@@ -5737,7 +5879,9 @@ public final class CivicServerRuntimeGameTests {
                                 result.getString(3),
                                 result.getString(4),
                                 result.getInt(5),
-                                result.getInt(6))
+                                result.getInt(6),
+                                result.getLong(7),
+                                result.getLong(8))
                         : null;
             }
         } catch (SQLException failure) {
@@ -5940,9 +6084,18 @@ public final class CivicServerRuntimeGameTests {
             String purpose,
             long expiresAt,
             String state,
-            String escrowId) {}
+            String escrowId,
+            long settledMinorUnits) {}
 
     private record BudgetApprovalRow(UUID actorPlayerId, String reason) {}
+
+    private record BudgetDisbursementRow(
+            UUID budgetId,
+            String recipientAccount,
+            long amountMinorUnits,
+            String approvalState,
+            String paymentState,
+            int paymentCount) {}
 
     private record BudgetCancellationRow(
             UUID actorPlayerId,
@@ -5950,5 +6103,7 @@ public final class CivicServerRuntimeGameTests {
             String escrowState,
             String reservationState,
             int auditCount,
-            int releaseCount) {}
+            int releaseCount,
+            long reservationAmount,
+            long settledAmount) {}
 }

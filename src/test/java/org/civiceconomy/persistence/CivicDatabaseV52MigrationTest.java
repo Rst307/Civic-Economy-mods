@@ -72,7 +72,7 @@ class CivicDatabaseV52MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(63, migrated.schemaVersion());
+            assertEquals(64, migrated.schemaVersion());
             assertEquals("PREPARED", migrated.mintBatchIssuanceOperation(operationId).state());
             assertEquals("COMMITTING", migrated.mintBatch(batchId).state());
             assertEquals(300L,

@@ -35,6 +35,15 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.Budget;
 import org.civiceconomy.fiscal.BudgetDraftExpiryProcessor;
 import org.civiceconomy.fiscal.BudgetFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.BudgetDisbursementApproval;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalOutcome;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyRegistry;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyVersion;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalRegistry;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalTier;
+import org.civiceconomy.fiscal.BudgetDisbursementPaymentCoordinator;
+import org.civiceconomy.fiscal.PreparedBudgetDisbursementPayment;
+import org.civiceconomy.fiscal.ScheduleBudgetDisbursementApprovalPolicy;
 import org.civiceconomy.fiscal.CreateBudget;
 import org.civiceconomy.fiscal.EscrowExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalBillExpiryProcessor;
@@ -51,6 +60,7 @@ import org.civiceconomy.fiscal.IssueFiscalBill;
 import org.civiceconomy.fiscal.NationBudgetInspection;
 import org.civiceconomy.fiscal.NationBudgetApprovalCoordinator;
 import org.civiceconomy.fiscal.NationBudgetCancellationCoordinator;
+import org.civiceconomy.fiscal.NationBudgetDisbursementApprovalCoordinator;
 import org.civiceconomy.fiscal.NationFiscalBillInspection;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PreparedFiscalBillPayment;
@@ -764,6 +774,168 @@ public final class CivicServerRuntime {
                                             database, provider, commandClock),
                                     commandClock)
                             .cancel(actorPlayerId, budgetId, requestId, reason);
+                }));
+    }
+
+    CompletableFuture<BudgetDisbursementApprovalOutcome> requestNationalBudgetDisbursement(
+            ServerPlayer actor,
+            UUID budgetId,
+            UUID recipientPlayerId,
+            long amountMinorUnits,
+            String requestId,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    var authorities = new NationFiscalAuthorityRegistry(
+                            database, provider, commandClock);
+                    BudgetDisbursementApproval approval =
+                            new NationBudgetDisbursementApprovalCoordinator(
+                                            database, provider, authorities, commandClock)
+                                    .initiate(
+                                            actorPlayerId,
+                                            budgetId,
+                                            new AccountId("player:" + recipientPlayerId),
+                                            MoneyAmount.ofMinorUnits(amountMinorUnits),
+                                            requestId,
+                                            reason);
+                    return prepareBudgetDisbursement(current, database, approval);
+                }))
+                .thenCompose(prepared -> completeBudgetDisbursement(
+                        current, commandClock, prepared));
+    }
+
+    CompletableFuture<BudgetDisbursementApprovalOutcome> approveNationalBudgetDisbursement(
+            ServerPlayer actor,
+            UUID approvalRequestId,
+            String requestId,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    var authorities = new NationFiscalAuthorityRegistry(
+                            database, provider, commandClock);
+                    BudgetDisbursementApproval approval =
+                            new NationBudgetDisbursementApprovalCoordinator(
+                                            database, provider, authorities, commandClock)
+                                    .approve(
+                                            actorPlayerId,
+                                            approvalRequestId,
+                                            requestId,
+                                            reason);
+                    return prepareBudgetDisbursement(current, database, approval);
+                }))
+                .thenCompose(prepared -> completeBudgetDisbursement(
+                        current, commandClock, prepared));
+    }
+
+    CompletableFuture<BudgetDisbursementApprovalPolicyVersion>
+            scheduleBudgetDisbursementApprovalPolicy(
+                    ServerPlayer actor,
+                    String requestId,
+                    long effectiveAtEpochMillis,
+                    long approvalLifetimeMillis,
+                    long thresholdMinorUnits,
+                    int requiredApprovals,
+                    String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        List<BudgetDisbursementApprovalTier> tiers = thresholdMinorUnits == 0L
+                ? List.of(new BudgetDisbursementApprovalTier(
+                        MoneyAmount.ZERO, requiredApprovals))
+                : List.of(
+                        new BudgetDisbursementApprovalTier(MoneyAmount.ZERO, 1),
+                        new BudgetDisbursementApprovalTier(
+                                MoneyAmount.ofMinorUnits(thresholdMinorUnits),
+                                requiredApprovals));
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.MANAGE_APPROVAL_POLICY);
+                    return new BudgetDisbursementApprovalPolicyRegistry(database, commandClock)
+                            .schedule(new ScheduleBudgetDisbursementApprovalPolicy(
+                                    new ServiceIdentity(
+                                            "civiceconomy-budget-disbursement-governance"),
+                                    requestId,
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    tiers,
+                                    Duration.ofMillis(approvalLifetimeMillis),
+                                    Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                    reason));
+                }));
+    }
+
+    private static PreparedNationalBudgetDisbursement prepareBudgetDisbursement(
+            RuntimeState current,
+            CivicDatabase database,
+            BudgetDisbursementApproval approval) {
+        if (!"APPROVED".equals(approval.state())
+                && !"EXECUTED".equals(approval.state())) {
+            return new PreparedNationalBudgetDisbursement(approval, null, null);
+        }
+        BudgetDisbursementPaymentCoordinator payments =
+                new BudgetDisbursementPaymentCoordinator(
+                        database,
+                        LightmansCurrencyPayments.live(current.server.overworld()));
+        return new PreparedNationalBudgetDisbursement(
+                approval, payments, payments.prepare(approval.approvalRequestId()));
+    }
+
+    private static CompletableFuture<BudgetDisbursementApprovalOutcome>
+            completeBudgetDisbursement(
+                    RuntimeState current,
+                    Clock commandClock,
+                    PreparedNationalBudgetDisbursement prepared) {
+        if (prepared.payment() == null) {
+            return CompletableFuture.completedFuture(
+                    new BudgetDisbursementApprovalOutcome(prepared.approval(), null));
+        }
+        return onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.payment());
+                    return prepared;
+                })
+                .thenCompose(applied -> current.writer.submitDatabase(database -> {
+                    var transaction = applied.coordinator().commit(applied.payment());
+                    var approval = new org.civiceconomy.fiscal.BudgetDisbursementApprovalRegistry(
+                                    database, commandClock)
+                            .find(applied.approval().approvalRequestId());
+                    return new BudgetDisbursementApprovalOutcome(approval, transaction);
                 }));
     }
 
@@ -2104,20 +2276,24 @@ public final class CivicServerRuntime {
             return;
         }
         Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
-        current.writer.submitDatabase(database -> new FiscalExpiryResult(
+                current.writer.submitDatabase(database -> new FiscalExpiryResult(
                         new EscrowExpiryProcessor(database, scanClock).expireDue().size(),
                         new BudgetDraftExpiryProcessor(database, scanClock).expireDue().size(),
-                        new FiscalBillExpiryProcessor(database, scanClock).expireDue().size()))
+                        new FiscalBillExpiryProcessor(database, scanClock).expireDue().size(),
+                        new BudgetDisbursementApprovalRegistry(database, scanClock)
+                                .expirePending().size()))
                 .whenComplete((result, failure) -> {
                     current.fiscalExpiryQueued.set(false);
                     if (failure != null) {
                         LOGGER.error("Automatic fiscal expiry failed closed", failure);
                     } else if (result.escrows() > 0
                             || result.budgetDrafts() > 0
-                            || result.fiscalBills() > 0) {
+                            || result.fiscalBills() > 0
+                            || result.budgetDisbursements() > 0) {
                         LOGGER.info(
-                                "Automatically expired {} Escrow(s), {} Budget draft(s), and {} Fiscal Bill(s)",
-                                result.escrows(), result.budgetDrafts(), result.fiscalBills());
+                                "Automatically expired {} Escrow(s), {} Budget draft(s), {} Fiscal Bill(s), and {} Budget Disbursement approval(s)",
+                                result.escrows(), result.budgetDrafts(), result.fiscalBills(),
+                                result.budgetDisbursements());
                     }
                 });
     }
@@ -3130,6 +3306,11 @@ public final class CivicServerRuntime {
     private record PreparedBudgetApproval(
             NationTeam team, AccountId treasury, MoneyAmount balance) {}
 
+    private record PreparedNationalBudgetDisbursement(
+            BudgetDisbursementApproval approval,
+            BudgetDisbursementPaymentCoordinator coordinator,
+            PreparedBudgetDisbursementPayment payment) {}
+
     private record PreparedApprovedTreasuryWithdrawal(
             TreasuryWithdrawalCoordinator coordinator,
             TreasuryWithdrawalApproval approval,
@@ -3139,7 +3320,11 @@ public final class CivicServerRuntime {
             TreasuryWithdrawalCoordinator coordinator,
             List<TreasuryWithdrawal> withdrawals) {}
 
-    private record FiscalExpiryResult(int escrows, int budgetDrafts, int fiscalBills) {}
+    private record FiscalExpiryResult(
+            int escrows,
+            int budgetDrafts,
+            int fiscalBills,
+            int budgetDisbursements) {}
 
     private sealed interface MintCancellationPreparation
             permits MintCancellationReplay, PreparedMintReturn {}

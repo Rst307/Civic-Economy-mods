@@ -35,7 +35,7 @@ public final class BudgetFiscalServiceProvisioner {
                 "Exact National Treasury scope for Budget operations"));
     }
 
-    private static void requireNationalTreasury(AccountId accountId) {
+    static void requireNationalTreasury(AccountId accountId) {
         if (accountId == null) {
             throw new IllegalArgumentException("National Treasury account cannot be null");
         }

@@ -25,6 +25,8 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.Budget;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalOutcome;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyVersion;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
@@ -149,6 +151,7 @@ final class NationApplicationCommands {
                                                                 context, "requestId"),
                                                         StringArgumentType.getString(
                                                                 context, "reason")))))))
+                .then(budgetDisbursementCommand())
                 .then(Commands.literal("list")
                         .executes(context -> listNationBudgets(context.getSource())))
                 .then(Commands.literal("status")
@@ -156,6 +159,94 @@ final class NationApplicationCommands {
                                 .executes(context -> nationBudgetStatus(
                                         context.getSource(),
                                         UuidArgument.getUuid(context, "budgetId")))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> budgetDisbursementCommand() {
+        var request = Commands.literal("request")
+                .then(Commands.argument("budgetId", UuidArgument.uuid())
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument("recipientUuid", UuidArgument.uuid())
+                                        .then(Commands.argument(
+                                                        "amountMinorUnits",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "reason",
+                                                                StringArgumentType.greedyString())
+                                                        .executes(context ->
+                                                                requestBudgetDisbursement(
+                                                                        context.getSource(),
+                                                                        UuidArgument.getUuid(
+                                                                                context,
+                                                                                "budgetId"),
+                                                                        UuidArgument.getUuid(
+                                                                                context,
+                                                                                "recipientUuid"),
+                                                                        LongArgumentType.getLong(
+                                                                                context,
+                                                                                "amountMinorUnits"),
+                                                                        StringArgumentType.getString(
+                                                                                context,
+                                                                                "requestId"),
+                                                                        StringArgumentType.getString(
+                                                                                context,
+                                                                                "reason"))))))));
+        var approve = Commands.literal("approve")
+                .then(Commands.argument("approvalId", UuidArgument.uuid())
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "reason",
+                                                StringArgumentType.greedyString())
+                                        .executes(context -> approveBudgetDisbursement(
+                                                context.getSource(),
+                                                UuidArgument.getUuid(context, "approvalId"),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"),
+                                                StringArgumentType.getString(
+                                                        context, "reason"))))));
+        var policy = Commands.literal("policy")
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "effectiveAtEpochMillis",
+                                                LongArgumentType.longArg(0L))
+                                        .then(Commands.argument(
+                                                        "approvalLifetimeMillis",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "thresholdMinorUnits",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requiredApprovals",
+                                                                        IntegerArgumentType.integer(
+                                                                                1, 16))
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleBudgetDisbursementPolicy(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "requestId"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "effectiveAtEpochMillis"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "approvalLifetimeMillis"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "thresholdMinorUnits"),
+                                                                                        IntegerArgumentType.getInteger(
+                                                                                                context,
+                                                                                                "requiredApprovals"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "reason"))))))))));
+        return Commands.literal("disbursement")
+                .then(request)
+                .then(approve)
+                .then(policy);
     }
 
     private static int createBudgetDraft(
@@ -235,6 +326,119 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Nation Budget cancellation queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int requestBudgetDisbursement(
+            CommandSourceStack source,
+            UUID budgetId,
+            UUID recipientPlayerId,
+            long amountMinorUnits,
+            String requestId,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .requestNationalBudgetDisbursement(
+                        player,
+                        budgetId,
+                        recipientPlayerId,
+                        amountMinorUnits,
+                        requestId,
+                        reason)
+                .whenComplete((outcome, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement request", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatDisbursementOutcome(outcome)),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement request queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int approveBudgetDisbursement(
+            CommandSourceStack source,
+            UUID approvalRequestId,
+            String requestId,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .approveNationalBudgetDisbursement(
+                        player, approvalRequestId, requestId, reason)
+                .whenComplete((outcome, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement approval", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatDisbursementOutcome(outcome)),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement approval queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleBudgetDisbursementPolicy(
+            CommandSourceStack source,
+            String requestId,
+            long effectiveAtEpochMillis,
+            long approvalLifetimeMillis,
+            long thresholdMinorUnits,
+            int requiredApprovals,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .scheduleBudgetDisbursementApprovalPolicy(
+                        player,
+                        requestId,
+                        effectiveAtEpochMillis,
+                        approvalLifetimeMillis,
+                        thresholdMinorUnits,
+                        requiredApprovals,
+                        reason)
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement policy", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatDisbursementPolicy(policy)),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement policy queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatDisbursementOutcome(
+            BudgetDisbursementApprovalOutcome outcome) {
+        var approval = outcome.approval();
+        return "Budget Disbursement " + approval.approvalRequestId()
+                + " state=" + approval.state()
+                + " budget=" + approval.budgetId()
+                + " recipient=" + approval.recipientAccount().value()
+                + " amountMinorUnits=" + approval.amount().minorUnits()
+                + " approvals=" + approval.votes().size()
+                + "/" + approval.requiredApprovals()
+                + " expires=" + approval.expiresAt()
+                + " payment=" + outcome.paymentResult()
+                        .map(payment -> payment.transactionId() + ":" + payment.state())
+                        .orElse("pending");
+    }
+
+    private static String formatDisbursementPolicy(
+            BudgetDisbursementApprovalPolicyVersion policy) {
+        return "Budget Disbursement policy " + policy.policyId()
+                + " nation=" + policy.nationId().value()
+                + " tiers=" + policy.tiers()
+                + " lifetimeMillis=" + policy.approvalLifetime().toMillis()
+                + " effectiveAt=" + policy.effectiveAt();
     }
 
     private static int listNationBudgets(CommandSourceStack source)

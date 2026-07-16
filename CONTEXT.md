@@ -116,6 +116,18 @@ _Avoid_: 提现、发行、独立虚拟余额
 以预留为资金保证、按照外部业务结果执行结算或退款的财政安排。
 _Avoid_: 临时国库、奖励池
 
+**Budget Disbursement Approval Policy（预算拨款审批策略）**:
+一个 Nation 对已批准 Budget 的实际拨款按金额门槛规定所需不同 Citizen 审批人数的未来生效版本；拨款申请发起时命中的版本和人数会被固定。
+_Avoid_: Budget approval、Withdrawal Approval Policy、全服固定双签
+
+**Budget Disbursement Approval（预算拨款审批）**:
+在任何 Payment 出现前，把一个已批准 Budget、精确收款账户、精确金额、发起人、理由和审批门槛固定为不可变财政决定；它本身不移动 LC，也不消耗 Reservation。
+_Avoid_: Payment、Budget approval、Reservation settlement、口头拨款
+
+**Budget Disbursement（预算拨款）**:
+一个已完成 Budget Disbursement Approval 所授权的正式 Payment；它只能向审批固定的收款账户支付审批固定的金额，并消耗该 Budget 的剩余 Reservation。
+_Avoid_: 未审批转账、Treasury Withdrawal、现金赠与、Budget cancellation
+
 **公共维护基金（Public Maintenance Fund）**:
 接收领土维护费非销毁部分、独立于所有国家并仅用于具体公共项目的全服基金。
 _Avoid_: 世界国库、国家救助金
