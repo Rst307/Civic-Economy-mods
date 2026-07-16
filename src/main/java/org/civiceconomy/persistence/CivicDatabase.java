@@ -8316,6 +8316,45 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredBudget> budgetsForSourceAccount(String sourceAccount) {
+        List<StoredBudget> budgets = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_budget b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.source_account = ?
+                ORDER BY b.expires_at_epoch_millis, b.budget_id
+                """)) {
+            query.setString(1, sourceAccount);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    budgets.add(storedBudget(result));
+                }
+            }
+            return List.copyOf(budgets);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list source-account Budgets", failure);
+        }
+    }
+
+    public synchronized StoredBudget budgetForSourceAccount(
+            UUID budgetId, String sourceAccount) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_budget b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.budget_id = ? AND b.source_account = ?
+                """)) {
+            query.setString(1, budgetId.toString());
+            query.setString(2, sourceAccount);
+            return readBudget(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read source-account Budget", failure);
+        }
+    }
+
     public synchronized List<StoredBudget> dueDraftBudgets(long nowEpochMillis) {
         List<StoredBudget> budgets = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""

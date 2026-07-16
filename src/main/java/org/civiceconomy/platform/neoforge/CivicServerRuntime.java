@@ -48,6 +48,7 @@ import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.FiscalBillPaymentCoordinator;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.IssueFiscalBill;
+import org.civiceconomy.fiscal.NationBudgetInspection;
 import org.civiceconomy.fiscal.NationFiscalBillInspection;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PreparedFiscalBillPayment;
@@ -649,6 +650,26 @@ public final class CivicServerRuntime {
                                     purpose,
                                     Instant.ofEpochMilli(expiresAtEpochMillis)));
                 }));
+    }
+
+    CompletableFuture<List<Budget>> nationBudgets(ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        nationBudgetInspection(database, team, commandClock)
+                                .list(actorPlayerId)));
+    }
+
+    CompletableFuture<Budget> nationBudget(ServerPlayer actor, UUID budgetId) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        nationBudgetInspection(database, team, commandClock)
+                                .status(actorPlayerId, budgetId)));
     }
 
     CompletableFuture<List<FiscalBill>> payerFiscalBills(ServerPlayer actor) {
@@ -2899,6 +2920,22 @@ public final class CivicServerRuntime {
                 new CitizenshipCorrectionGraceRegistry(database, commandClock),
                 teams);
         return new NationFiscalBillInspection(
+                database,
+                provider,
+                new NationFiscalAuthorityRegistry(database, provider, commandClock));
+    }
+
+    private static NationBudgetInspection nationBudgetInspection(
+            CivicDatabase database, NationTeam team, Clock commandClock) {
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        NationRegistry nations = new NationRegistry(database, teams);
+        var provider = new FtbTeamsNationProvider(
+                nations,
+                new CitizenshipRegistry(
+                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                teams);
+        return new NationBudgetInspection(
                 database,
                 provider,
                 new NationFiscalAuthorityRegistry(database, provider, commandClock));

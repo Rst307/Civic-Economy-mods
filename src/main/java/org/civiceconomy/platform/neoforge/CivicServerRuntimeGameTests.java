@@ -528,7 +528,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
         helper.assertValueEqual(
-                Set.of("create"),
+                Set.of("create", "list", "status"),
                 economy.getChild("nation")
                         .getChild("budget")
                         .getChildren().stream()
@@ -1135,11 +1135,17 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
         AtomicReference<Throwable> changedReplayFailure = new AtomicReference<>();
+        AtomicReference<java.util.List<org.civiceconomy.fiscal.Budget>> inspectedBudgets =
+                new AtomicReference<>();
+        AtomicReference<org.civiceconomy.fiscal.Budget> inspectedBudget =
+                new AtomicReference<>();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean unauthorizedFinished = new AtomicBoolean();
         AtomicBoolean permissionReady = new AtomicBoolean();
         AtomicBoolean commandStarted = new AtomicBoolean();
         AtomicBoolean changedReplayFinished = new AtomicBoolean();
+        AtomicBoolean inspectionReady = new AtomicBoolean();
+        AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1230,8 +1236,10 @@ public final class CivicServerRuntimeGameTests {
                                             setupClock),
                                     new CitizenshipCorrectionGraceRegistry(database, setupClock),
                                     snapshot(teamSnapshot));
-                            new NationFiscalAuthorityRegistry(database, provider, setupClock)
-                                    .grant(new GrantNationFiscalPermission(
+                            NationFiscalAuthorityRegistry authorities =
+                                    new NationFiscalAuthorityRegistry(
+                                            database, provider, setupClock);
+                            authorities.grant(new GrantNationFiscalPermission(
                                             new ServiceIdentity("civiceconomy-gametest"),
                                             "budget-draft-authority-" + UUID.randomUUID(),
                                             nationId.get(),
@@ -1239,6 +1247,14 @@ public final class CivicServerRuntimeGameTests {
                                             actor.getUUID(),
                                             NationFiscalPermission.DRAFT_BUDGET,
                                             "Authorize real player Budget drafting"));
+                            authorities.grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "budget-view-authority-" + UUID.randomUUID(),
+                                    nationId.get(),
+                                    actor.getUUID(),
+                                    actor.getUUID(),
+                                    NationFiscalPermission.VIEW_ACCOUNT,
+                                    "Authorize real player Budget inspection"));
                             return null;
                         })
                         .whenComplete((ignored, failure) -> {
@@ -1327,6 +1343,68 @@ public final class CivicServerRuntimeGameTests {
                             300L,
                             budgetByRequest(databaseFile, requestId).amountMinorUnits(),
                             "changed replay preserves original Budget");
+                })
+                .thenExecute(() -> {
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    runtime.nationBudgets(actor)
+                            .thenCompose(budgets -> {
+                                inspectedBudgets.set(budgets);
+                                return runtime.nationBudget(actor, budget.budgetId());
+                            })
+                            .whenComplete((status, failure) -> {
+                                if (failure != null) {
+                                    asyncFailure.set(failure);
+                                } else {
+                                    inspectedBudget.set(status);
+                                    inspectionReady.set(true);
+                                }
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget inspection");
+                    helper.assertTrue(inspectionReady.get(), "Budget inspection complete");
+                    helper.assertValueEqual(
+                            1, inspectedBudgets.get().size(), "one own-Nation Budget visible");
+                    helper.assertValueEqual(
+                            inspectedBudgets.get().getFirst(),
+                            inspectedBudget.get(),
+                            "Budget status matches list entry");
+                })
+                .thenExecute(() -> {
+                    try {
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation budget list",
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget list command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation budget status "
+                                                + inspectedBudget.get().budgetId(),
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget status command result");
+                        inspectionCommandsStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget inspection commands");
+                    helper.assertTrue(
+                            inspectionCommandsStarted.get(),
+                            "Budget inspection commands started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    helper.assertValueEqual("DRAFT", budget.state(), "inspection is read-only");
+                    helper.assertTrue(budget.escrowId() == null, "inspection creates no Escrow");
+                    helper.assertValueEqual(
+                            0L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "inspection moves no LC");
                 })
                 .thenSucceed();
     }
@@ -5453,7 +5531,7 @@ public final class CivicServerRuntimeGameTests {
     private static BudgetRow budgetByRequest(Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
                 var query = connection.prepareStatement("""
-                        SELECT source_account, amount_minor_units, budget_code, purpose,
+                        SELECT budget_id, source_account, amount_minor_units, budget_code, purpose,
                                expires_at_epoch_millis, state, escrow_id
                         FROM fiscal_budget
                         WHERE service_identity = ? AND request_id = ?
@@ -5463,13 +5541,14 @@ public final class CivicServerRuntimeGameTests {
             try (var result = query.executeQuery()) {
                 return result.next()
                         ? new BudgetRow(
-                                result.getString(1),
-                                result.getLong(2),
-                                result.getString(3),
+                                UUID.fromString(result.getString(1)),
+                                result.getString(2),
+                                result.getLong(3),
                                 result.getString(4),
-                                result.getLong(5),
-                                result.getString(6),
-                                result.getString(7))
+                                result.getString(5),
+                                result.getLong(6),
+                                result.getString(7),
+                                result.getString(8))
                         : null;
             }
         } catch (SQLException failure) {
@@ -5679,6 +5758,7 @@ public final class CivicServerRuntimeGameTests {
             UUID policyId) {}
 
     private record BudgetRow(
+            UUID budgetId,
             String sourceAccount,
             long amountMinorUnits,
             String budgetCode,

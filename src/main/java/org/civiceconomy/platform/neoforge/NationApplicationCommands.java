@@ -24,6 +24,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.Budget;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
@@ -119,7 +120,14 @@ final class NationApplicationCommands {
         var request = Commands.argument("requestId", StringArgumentType.word())
                 .then(amount);
         return Commands.literal("budget")
-                .then(Commands.literal("create").then(request));
+                .then(Commands.literal("create").then(request))
+                .then(Commands.literal("list")
+                        .executes(context -> listNationBudgets(context.getSource())))
+                .then(Commands.literal("status")
+                        .then(Commands.argument("budgetId", UuidArgument.uuid())
+                                .executes(context -> nationBudgetStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(context, "budgetId")))));
     }
 
     private static int createBudgetDraft(
@@ -155,6 +163,58 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Budget draft creation queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listNationBudgets(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .nationBudgets(player)
+                .whenComplete((budgets, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation Budget list", failure);
+                    } else {
+                        String result = budgets.isEmpty()
+                                ? "No Budgets belong to your current National Treasury"
+                                : budgets.stream()
+                                        .limit(20)
+                                        .map(NationApplicationCommands::formatBudget)
+                                        .collect(Collectors.joining("; "));
+                        source.sendSuccess(() -> Component.literal(result), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation Budget list queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int nationBudgetStatus(CommandSourceStack source, UUID budgetId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .nationBudget(player, budgetId)
+                .whenComplete((budget, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation Budget status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatBudget(budget)), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation Budget status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatBudget(Budget budget) {
+        return "Budget " + budget.budgetId()
+                + " state=" + budget.state()
+                + " source=" + budget.sourceAccount().value()
+                + " amountMinorUnits=" + budget.amount().minorUnits()
+                + " settledMinorUnits=" + budget.settledAmount().minorUnits()
+                + " remainingMinorUnits=" + budget.remainingAmount().minorUnits()
+                + " code=" + budget.budgetCode()
+                + " expires=" + budget.expiresAt()
+                + " escrow=" + budget.escrowId().map(UUID::toString).orElse("none")
+                + " purpose=" + budget.purpose();
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> billCommand() {
