@@ -237,24 +237,28 @@ public final class FiscalLedger {
         }
         AccountId sourceAccount = new AccountId(budget.sourceAccount());
         require(request.serviceIdentity(), FiscalCapability.MANAGE_BUDGET, sourceAccount);
-        StoredBudget replay = database.budgetApproval(
+        var approvalReplay = database.budgetApprovalAudit(
                 request.serviceIdentity().value(), request.requestId());
-        if (replay != null) {
-            if (!replay.budgetId().equals(request.budgetId())) {
+        if (approvalReplay != null) {
+            if (!approvalReplay.budgetId().equals(request.budgetId())
+                    || !approvalReplay.actorPlayerId().equals(request.actorPlayerId())
+                    || !approvalReplay.reason().equals(request.reason())) {
                 throw new IdempotencyConflictException(
                         request.serviceIdentity(), request.requestId());
             }
-            return toBudget(replay);
+            return toBudget(database.budget(approvalReplay.budgetId()));
         }
         synchronized (accountLocks.computeIfAbsent(sourceAccount, ignored -> new Object())) {
-            replay = database.budgetApproval(
+            approvalReplay = database.budgetApprovalAudit(
                     request.serviceIdentity().value(), request.requestId());
-            if (replay != null) {
-                if (!replay.budgetId().equals(request.budgetId())) {
+            if (approvalReplay != null) {
+                if (!approvalReplay.budgetId().equals(request.budgetId())
+                        || !approvalReplay.actorPlayerId().equals(request.actorPlayerId())
+                        || !approvalReplay.reason().equals(request.reason())) {
                     throw new IdempotencyConflictException(
                             request.serviceIdentity(), request.requestId());
                 }
-                return toBudget(replay);
+                return toBudget(database.budget(approvalReplay.budgetId()));
             }
             if (!"DRAFT".equals(budget.state())) {
                 throw new IllegalStateException("Budget is not a draft: " + budget.state());
@@ -270,9 +274,13 @@ public final class FiscalLedger {
             return toBudget(database.approveBudget(
                     UUID.randomUUID(),
                     UUID.randomUUID(),
+                    UUID.randomUUID(),
                     request.serviceIdentity().value(),
                     request.requestId(),
-                    request.budgetId()));
+                    request.budgetId(),
+                    request.actorPlayerId(),
+                    request.reason(),
+                    clock.millis()));
         }
     }
 

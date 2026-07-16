@@ -49,6 +49,7 @@ import org.civiceconomy.fiscal.FiscalBillPaymentCoordinator;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.IssueFiscalBill;
 import org.civiceconomy.fiscal.NationBudgetInspection;
+import org.civiceconomy.fiscal.NationBudgetApprovalCoordinator;
 import org.civiceconomy.fiscal.NationFiscalBillInspection;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PreparedFiscalBillPayment;
@@ -670,6 +671,74 @@ public final class CivicServerRuntime {
                 .thenCompose(team -> current.writer.submitDatabase(database ->
                         nationBudgetInspection(database, team, commandClock)
                                 .status(actorPlayerId, budgetId)));
+    }
+
+    CompletableFuture<Budget> approveNationalBudget(
+            ServerPlayer actor, UUID budgetId, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    var nation = provider.findForCitizen(actorPlayerId)
+                            .orElseThrow(() -> new SecurityException(
+                                    "Budget approval requires effective Citizenship"));
+                    new NationFiscalAuthorityRegistry(database, provider, commandClock)
+                            .require(
+                                    nation.nationId(),
+                                    actorPlayerId,
+                                    NationFiscalPermission.APPROVE_BUDGET);
+                    AccountId treasury = nationalTreasury(nation.nationId());
+                    if (database.budgetForSourceAccount(budgetId, treasury.value()) == null) {
+                        throw new SecurityException("Budget is not approvable by this Nation");
+                    }
+                    return new PendingBudgetApproval(team, treasury);
+                }))
+                .thenCompose(pending -> onServer(current, () ->
+                        new PreparedBudgetApproval(
+                                pending.team(),
+                                pending.treasury(),
+                                LightmansCurrencyAccountBalances.live(
+                                                current.server.overworld())
+                                        .balance(pending.treasury()))))
+                .thenCompose(prepared -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(
+                            Map.of(prepared.team().teamId(), prepared.team()));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    return new NationBudgetApprovalCoordinator(
+                                    database,
+                                    provider,
+                                    new NationFiscalAuthorityRegistry(
+                                            database, provider, commandClock),
+                                    commandClock)
+                            .approve(
+                                    actorPlayerId,
+                                    budgetId,
+                                    requestId,
+                                    reason,
+                                    accountId -> {
+                                        if (!prepared.treasury().equals(accountId)) {
+                                            throw new IllegalArgumentException(
+                                                    "Unexpected Budget balance account "
+                                                            + accountId.value());
+                                        }
+                                        return prepared.balance();
+                                    });
+                }));
     }
 
     CompletableFuture<List<FiscalBill>> payerFiscalBills(ServerPlayer actor) {
@@ -3029,6 +3098,11 @@ public final class CivicServerRuntime {
     private record PreparedPlayerFiscalBillPayment(
             FiscalBillPaymentCoordinator coordinator,
             PreparedFiscalBillPayment payment) {}
+
+    private record PendingBudgetApproval(NationTeam team, AccountId treasury) {}
+
+    private record PreparedBudgetApproval(
+            NationTeam team, AccountId treasury, MoneyAmount balance) {}
 
     private record PreparedApprovedTreasuryWithdrawal(
             TreasuryWithdrawalCoordinator coordinator,

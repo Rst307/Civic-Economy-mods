@@ -72,7 +72,9 @@ class FiscalLedgerBudgetTest {
             approval = new ApproveBudget(
                     new ServiceIdentity("aurora-budget-approver"),
                     "approve-road-budget",
-                    draft.budgetId());
+                    draft.budgetId(),
+                    UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    "Approve road Budget");
 
             approved = ledger.approveBudget(approval);
 
@@ -110,7 +112,9 @@ class FiscalLedgerBudgetTest {
             Budget approved = ledger.approveBudget(new ApproveBudget(
                     new ServiceIdentity("aurora-budget-approver"),
                     "approve-harbor-budget",
-                    draft.budgetId()));
+                    draft.budgetId(),
+                    UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    "Approve harbor Budget"));
             Escrow escrow = ledger.escrow(approved.escrowId().orElseThrow());
             PaymentCoordinator coordinator = new PaymentCoordinator(database, ignored -> {});
 
@@ -162,7 +166,9 @@ class FiscalLedgerBudgetTest {
             Budget approved = ledger.approveBudget(new ApproveBudget(
                     new ServiceIdentity("aurora-budget-approver"),
                     "approve-canal-budget",
-                    draft.budgetId()));
+                    draft.budgetId(),
+                    UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    "Approve canal Budget"));
             Escrow escrow = ledger.escrow(approved.escrowId().orElseThrow());
             new PaymentCoordinator(database, ignored -> {}).settle(
                     new SettleReservation(
@@ -206,7 +212,9 @@ class FiscalLedgerBudgetTest {
             Budget approved = ledger.approveBudget(new ApproveBudget(
                     new ServiceIdentity("aurora-budget-approver"),
                     "approve-library-budget",
-                    draft.budgetId()));
+                    draft.budgetId(),
+                    UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    "Approve library Budget"));
 
             FiscalLedger atDeadline = ledger(database, treasury, deadline);
             atDeadline.expireEscrow(new ExpireEscrow(

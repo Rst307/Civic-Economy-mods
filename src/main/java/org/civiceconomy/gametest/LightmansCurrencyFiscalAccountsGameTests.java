@@ -397,7 +397,9 @@ public final class LightmansCurrencyFiscalAccountsGameTests {
             Budget approved = approvalLedger.approveBudget(new ApproveBudget(
                     approver,
                     "approve-treasury-budget-" + UUID.randomUUID(),
-                    draft.budgetId()));
+                    draft.budgetId(),
+                    UUID.randomUUID(),
+                    "Approve real LC Treasury Budget"));
             Escrow escrow = ledger.escrow(fiscalService, approved.escrowId().orElseThrow());
             String paymentRequestId = "treasury-payment-" + UUID.randomUUID();
             PaymentCoordinator coordinator = PaymentCoordinator.authorized(

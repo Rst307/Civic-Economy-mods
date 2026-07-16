@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 61;
+    private static final int SCHEMA_VERSION = 62;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -8473,15 +8473,44 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredBudgetApprovalAudit budgetApprovalAudit(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_approval_audit
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudgetApprovalAudit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget approval audit", failure);
+        }
+    }
+
+    public synchronized StoredBudgetApprovalAudit budgetApprovalAudit(UUID budgetId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_approval_audit WHERE budget_id = ?
+                """)) {
+            query.setString(1, budgetId.toString());
+            return readBudgetApprovalAudit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget approval audit", failure);
+        }
+    }
+
     public synchronized StoredBudget approveBudget(
+            UUID approvalId,
             UUID escrowId,
             UUID reservationId,
             String serviceIdentity,
             String requestId,
-            UUID budgetId) {
-        StoredBudget replay = budgetApproval(serviceIdentity, requestId);
+            UUID budgetId,
+            UUID actorPlayerId,
+            String reason,
+            long approvedAtEpochMillis) {
+        StoredBudgetApprovalAudit replay = budgetApprovalAudit(serviceIdentity, requestId);
         if (replay != null) {
-            return replay;
+            return budget(replay.budgetId());
         }
         StoredBudget budget = budget(budgetId);
         if (budget == null) {
@@ -8493,7 +8522,13 @@ public final class CivicDatabase implements AutoCloseable {
 
         try {
             connection.setAutoCommit(false);
-            try (PreparedStatement insertReservation = connection.prepareStatement("""
+            try (PreparedStatement insertAudit = connection.prepareStatement("""
+                        INSERT INTO budget_approval_audit (
+                            approval_id, budget_id, service_identity, request_id,
+                            actor_player_id, reason, approved_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement insertReservation = connection.prepareStatement("""
                         INSERT INTO fiscal_reservation (
                             reservation_id, service_identity, request_id, source_account,
                             amount_minor_units, purpose, state
@@ -8511,6 +8546,15 @@ public final class CivicDatabase implements AutoCloseable {
                             approval_request_id = ?, state = 'APPROVED'
                         WHERE budget_id = ? AND state = 'DRAFT' AND escrow_id IS NULL
                         """)) {
+                insertAudit.setString(1, approvalId.toString());
+                insertAudit.setString(2, budgetId.toString());
+                insertAudit.setString(3, serviceIdentity);
+                insertAudit.setString(4, requestId);
+                insertAudit.setString(5, actorPlayerId.toString());
+                insertAudit.setString(6, reason);
+                insertAudit.setLong(7, approvedAtEpochMillis);
+                insertAudit.executeUpdate();
+
                 insertReservation.setString(1, reservationId.toString());
                 insertReservation.setString(2, serviceIdentity);
                 insertReservation.setString(3, requestId);
@@ -12082,6 +12126,36 @@ public final class CivicDatabase implements AutoCloseable {
                 }
                 statement.execute("PRAGMA user_version = 61");
             }
+            if (version < 62) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_approval_audit (
+                            approval_id TEXT PRIMARY KEY,
+                            budget_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_budget(budget_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            approved_at_epoch_millis INTEGER NOT NULL
+                                CHECK (approved_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT OR IGNORE INTO budget_approval_audit (
+                            approval_id, budget_id, service_identity, request_id,
+                            actor_player_id, reason, approved_at_epoch_millis
+                        )
+                        SELECT budget_id, budget_id, approval_service_identity,
+                               approval_request_id,
+                               '00000000-0000-0000-0000-000000000000',
+                               'Legacy Budget approval migrated without player audit', 0
+                        FROM fiscal_budget
+                        WHERE approval_service_identity IS NOT NULL
+                          AND approval_request_id IS NOT NULL
+                        """);
+                statement.execute("PRAGMA user_version = 62");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -13487,6 +13561,23 @@ public final class CivicDatabase implements AutoCloseable {
                 escrowId == null ? null : UUID.fromString(escrowId),
                 result.getLong("settled_minor_units"),
                 result.getString("state"));
+    }
+
+    private static StoredBudgetApprovalAudit readBudgetApprovalAudit(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredBudgetApprovalAudit(
+                    UUID.fromString(result.getString("approval_id")),
+                    UUID.fromString(result.getString("budget_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("reason"),
+                    result.getLong("approved_at_epoch_millis"));
+        }
     }
 
     private static StoredBudgetDraftExpiry readBudgetDraftExpiry(PreparedStatement query)

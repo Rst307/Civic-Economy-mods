@@ -528,7 +528,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
         helper.assertValueEqual(
-                Set.of("create", "list", "status"),
+                Set.of("create", "approve", "list", "status"),
                 economy.getChild("nation")
                         .getChild("budget")
                         .getChildren().stream()
@@ -1146,6 +1146,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean changedReplayFinished = new AtomicBoolean();
         AtomicBoolean inspectionReady = new AtomicBoolean();
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
+        AtomicBoolean approvalCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1255,6 +1256,14 @@ public final class CivicServerRuntimeGameTests {
                                     actor.getUUID(),
                                     NationFiscalPermission.VIEW_ACCOUNT,
                                     "Authorize real player Budget inspection"));
+                            authorities.grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "budget-approve-authority-" + UUID.randomUUID(),
+                                    nationId.get(),
+                                    actor.getUUID(),
+                                    actor.getUUID(),
+                                    NationFiscalPermission.APPROVE_BUDGET,
+                                    "Authorize real player Budget approval"));
                             return null;
                         })
                         .whenComplete((ignored, failure) -> {
@@ -1405,6 +1414,55 @@ public final class CivicServerRuntimeGameTests {
                                     .balance(new AccountId(budget.sourceAccount()))
                                     .minorUnits(),
                             "inspection moves no LC");
+                })
+                .thenExecute(() -> {
+                    try {
+                        fundTreasury(
+                                helper,
+                                nationId.get(),
+                                "Nation " + nationId.get().value() + " National Treasury");
+                        String approvalRequestId = "approve-player-budget-" + UUID.randomUUID();
+                        String command = "civic economy nation budget approve "
+                                + inspectedBudget.get().budgetId() + " "
+                                + approvalRequestId
+                                + " Approve GameTest public works allocation";
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        int result = dispatcher.execute(
+                                command,
+                                actor.createCommandSourceStack().withSuppressedOutput());
+                        helper.assertValueEqual(1, result, "Budget approval command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget approval replay command result");
+                        approvalCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget approval command");
+                    helper.assertTrue(approvalCommandStarted.get(), "Budget approval started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    helper.assertValueEqual("APPROVED", budget.state(), "approved Budget state");
+                    helper.assertTrue(budget.escrowId() != null, "approval creates one Escrow");
+                    BudgetApprovalRow approval =
+                            budgetApprovalByBudget(databaseFile, budget.budgetId());
+                    helper.assertTrue(approval != null, "durable Budget approval audit");
+                    helper.assertValueEqual(
+                            actor.getUUID(), approval.actorPlayerId(), "approval actor audit");
+                    helper.assertValueEqual(
+                            "Approve GameTest public works allocation",
+                            approval.reason(),
+                            "approval reason audit");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "Budget approval reserves without moving LC");
                 })
                 .thenSucceed();
     }
@@ -4861,7 +4919,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(61, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(62, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -5570,6 +5628,26 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static BudgetApprovalRow budgetApprovalByBudget(
+            Path databaseFile, UUID budgetId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT actor_player_id, reason
+                        FROM budget_approval_audit
+                        WHERE budget_id = ?
+                        """)) {
+            query.setString(1, budgetId.toString());
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new BudgetApprovalRow(
+                                UUID.fromString(result.getString(1)), result.getString(2))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Budget approval", failure);
+        }
+    }
+
     private static void assertCitizenshipCorrectionGraceStarted(
             GameTestHelper helper,
             Path databaseFile,
@@ -5766,4 +5844,6 @@ public final class CivicServerRuntimeGameTests {
             long expiresAt,
             String state,
             String escrowId) {}
+
+    private record BudgetApprovalRow(UUID actorPlayerId, String reason) {}
 }

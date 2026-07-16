@@ -59,7 +59,9 @@ class BudgetDraftExpiryProcessorTest {
                     () -> ledger.approveBudget(new ApproveBudget(
                             new ServiceIdentity("budget-approver"),
                             "approve-expired-budget",
-                            due.budgetId())));
+                            due.budgetId(),
+                            UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                            "Expired Budget must not approve")));
             assertEquals(
                     "automatic-expiry:" + due.budgetId(),
                     database.budgetDraftExpiry(due.budgetId()).requestId());

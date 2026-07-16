@@ -121,6 +121,20 @@ final class NationApplicationCommands {
                 .then(amount);
         return Commands.literal("budget")
                 .then(Commands.literal("create").then(request))
+                .then(Commands.literal("approve")
+                        .then(Commands.argument("budgetId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> approveNationBudget(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "budgetId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))))
                 .then(Commands.literal("list")
                         .executes(context -> listNationBudgets(context.getSource())))
                 .then(Commands.literal("status")
@@ -162,6 +176,28 @@ final class NationApplicationCommands {
                     }
                 }));
         source.sendSuccess(() -> Component.literal("Budget draft creation queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int approveNationBudget(
+            CommandSourceStack source, UUID budgetId, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .approveNationalBudget(player, budgetId, requestId, reason)
+                .whenComplete((budget, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation Budget approval", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Approved " + formatBudget(budget)
+                                                + " actor=player:" + player.getUUID()
+                                                + " reason=" + reason),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation Budget approval queued"), false);
         return Command.SINGLE_SUCCESS;
     }
 
