@@ -56,11 +56,19 @@ public final class FiscalLedger {
             CivicDatabase database,
             AccountBalances accountBalances,
             FiscalServiceSession session) {
+        return authorized(database, accountBalances, Clock.systemUTC(), session);
+    }
+
+    public static FiscalLedger authorized(
+            CivicDatabase database,
+            AccountBalances accountBalances,
+            Clock clock,
+            FiscalServiceSession session) {
         java.util.Objects.requireNonNull(session, "Fiscal service session cannot be null");
         return new FiscalLedger(
                 database,
                 accountBalances,
-                Clock.systemUTC(),
+                java.util.Objects.requireNonNull(clock, "Clock cannot be null"),
                 new FiscalAuthorization(database),
                 session);
     }

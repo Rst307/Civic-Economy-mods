@@ -23,6 +23,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import org.civiceconomy.fiscal.ServiceIdentity;
+import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
 import org.civiceconomy.integration.ftb.FtbChunksAdapter;
@@ -87,11 +88,81 @@ final class NationApplicationCommands {
                 .then(Commands.literal("population")
                         .executes(context -> population(context.getSource())))
                 .then(roleCommand())
+                .then(billCommand())
                 .then(mintCommand())
                 .then(territoryCommand())
                 .then(treasuryCommand())
                 .then(Commands.literal("activate")
                         .executes(context -> activate(context.getSource())));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> billCommand() {
+        return Commands.literal("bill")
+                .then(Commands.literal("issue")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument("payerUuid", UuidArgument.uuid())
+                                        .then(Commands.argument(
+                                                        "amountMinorUnits",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "kind",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "dueAtEpochMillis",
+                                                                        LongArgumentType.longArg(0L))
+                                                                .then(Commands.argument(
+                                                                                "purpose",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                issueFiscalBill(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                        UuidArgument.getUuid(context, "payerUuid"),
+                                                                                        LongArgumentType.getLong(context, "amountMinorUnits"),
+                                                                                        StringArgumentType.getString(context, "kind"),
+                                                                                        LongArgumentType.getLong(context, "dueAtEpochMillis"),
+                                                                                        StringArgumentType.getString(context, "purpose"))))))))));
+    }
+
+    private static int issueFiscalBill(
+            CommandSourceStack source,
+            String requestId,
+            UUID payerPlayerId,
+            long amountMinorUnits,
+            String kindName,
+            long dueAtEpochMillis,
+            String purpose)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        FiscalBillKind kind = FiscalBillKind.valueOf(kindName.toUpperCase(Locale.ROOT));
+        CivicServerRuntime.current()
+                .issueNationalFiscalBill(
+                        player,
+                        requestId,
+                        payerPlayerId,
+                        amountMinorUnits,
+                        kind,
+                        dueAtEpochMillis,
+                        purpose)
+                .whenComplete((bill, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Fiscal Bill issuance", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Issued Fiscal Bill " + bill.billId()
+                                                + " payer=" + bill.payerAccount().value()
+                                                + " beneficiary="
+                                                + bill.beneficiaryAccount().value()
+                                                + " amountMinorUnits="
+                                                + bill.amount().minorUnits()
+                                                + " kind=" + bill.kind()
+                                                + " due=" + bill.dueAt()),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Fiscal Bill issuance queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> treasuryCommand() {

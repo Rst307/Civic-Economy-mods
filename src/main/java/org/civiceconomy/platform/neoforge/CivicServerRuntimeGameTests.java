@@ -515,6 +515,7 @@ public final class CivicServerRuntimeGameTests {
                         "activate",
                         "population",
                         "role",
+                        "bill",
                         "mint",
                         "territory",
                         "treasury"),
@@ -522,6 +523,14 @@ public final class CivicServerRuntimeGameTests {
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
+        helper.assertValueEqual(
+                Set.of("issue"),
+                economy.getChild("nation")
+                        .getChild("bill")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Fiscal Bill command actions");
         helper.assertValueEqual(
                 Set.of("allowance", "prepare", "cancel", "restore"),
                 economy.getChild("nation")
@@ -1086,6 +1095,162 @@ public final class CivicServerRuntimeGameTests {
             assertNationFiscalPermissionGranted(
                     helper, databaseFile, team.getId(), head.getUUID());
         });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 500)
+    public static void authorizedNationPlayerIssuesExactFiscalBillOffThread(
+            GameTestHelper helper) {
+        ServerPlayer issuer = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-fiscal-bill-issuer"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(issuer);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        UUID payerId = UUID.randomUUID();
+        String unauthorizedRequestId = "unauthorized-bill-" + UUID.randomUUID();
+        String requestId = "player-bill-" + UUID.randomUUID();
+        long dueAt = java.time.Instant.now().plus(java.time.Duration.ofDays(1L)).toEpochMilli();
+        AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean unauthorizedFinished = new AtomicBoolean();
+        AtomicBoolean permissionReady = new AtomicBoolean();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Clock setupClock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "fiscal-bill-nation-" + UUID.randomUUID(),
+                            teamSnapshot.teamId()));
+                    new CitizenshipRegistry(
+                                    database, java.time.Duration.ofDays(7L), setupClock)
+                            .join(new JoinCitizenship(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "fiscal-bill-citizenship-" + UUID.randomUUID(),
+                                    issuer.getUUID(),
+                                    nation.nationId()));
+                    return nation.nationId();
+                })
+                .whenComplete((registeredNationId, failure) -> {
+                    if (failure != null) {
+                        asyncFailure.set(failure);
+                    } else {
+                        nationId.set(registeredNationId);
+                        setupReady.set(true);
+                    }
+                });
+
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill setup");
+                    helper.assertTrue(setupReady.get(), "Fiscal Bill setup complete");
+                })
+                .thenExecute(() -> runtime.issueNationalFiscalBill(
+                                issuer,
+                                unauthorizedRequestId,
+                                payerId,
+                                300L,
+                                org.civiceconomy.fiscal.FiscalBillKind.FEE,
+                                dueAt,
+                                "Unauthorized GameTest fee")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure == null) {
+                                asyncFailure.set(new AssertionError(
+                                        "Unauthorized Fiscal Bill issuance unexpectedly succeeded"));
+                            } else {
+                                unauthorizedFailure.set(rootCause(failure));
+                            }
+                            unauthorizedFinished.set(true);
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Unauthorized Fiscal Bill");
+                    helper.assertTrue(
+                            unauthorizedFinished.get(),
+                            "unauthorized Fiscal Bill issuance completed");
+                    helper.assertTrue(
+                            unauthorizedFailure.get() instanceof SecurityException,
+                            "unauthorized issuance fails at Nation fiscal permission");
+                    helper.assertTrue(
+                            fiscalBillIdByRequest(databaseFile, unauthorizedRequestId) == null,
+                            "unauthorized issuance creates no Fiscal Bill");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            NationRegistry nations = new NationRegistry(
+                                    database, snapshot(teamSnapshot));
+                            var provider = new FtbTeamsNationProvider(
+                                    nations,
+                                    new CitizenshipRegistry(
+                                            database,
+                                            java.time.Duration.ofDays(7L),
+                                            setupClock),
+                                    new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                                    snapshot(teamSnapshot));
+                            new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                                    .grant(new GrantNationFiscalPermission(
+                                            new ServiceIdentity("civiceconomy-gametest"),
+                                            "fiscal-bill-authority-" + UUID.randomUUID(),
+                                            nationId.get(),
+                                            issuer.getUUID(),
+                                            issuer.getUUID(),
+                                            NationFiscalPermission.INITIATE_PAYMENT,
+                                            "Authorize real player Fiscal Bill issuance"));
+                            return null;
+                        })
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                permissionReady.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill permission");
+                    helper.assertTrue(permissionReady.get(), "Fiscal Bill permission ready");
+                })
+                .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
+                    try {
+                        String command = "civic economy nation bill issue " + requestId
+                                + " " + payerId + " 300 FEE " + dueAt
+                                + " GameTest building permit fee";
+                        int first = helper.getLevel().getServer().getCommands()
+                                .getDispatcher()
+                                .execute(command, issuer.createCommandSourceStack()
+                                        .withSuppressedOutput());
+                        int replay = helper.getLevel().getServer().getCommands()
+                                .getDispatcher()
+                                .execute(command, issuer.createCommandSourceStack()
+                                        .withSuppressedOutput());
+                        helper.assertValueEqual(1, first, "Fiscal Bill issue command result");
+                        helper.assertValueEqual(1, replay, "Fiscal Bill issue replay result");
+                        commandStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill command");
+                    helper.assertTrue(commandStarted.get(), "Fiscal Bill command started");
+                    assertIssuedFiscalBill(
+                            helper,
+                            databaseFile,
+                            requestId,
+                            nationId.get(),
+                            payerId,
+                            dueAt);
+                })
+                .thenSucceed();
     }
 
     @GameTest(
@@ -4360,6 +4525,67 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect automatic Fiscal Bill expiry", failure);
+        }
+    }
+
+    private static String fiscalBillIdByRequest(Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT bill_id FROM fiscal_bill WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next() ? result.getString(1) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Fiscal Bill request", failure);
+        }
+    }
+
+    private static void assertIssuedFiscalBill(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            org.civiceconomy.nation.NationId nationId,
+            UUID payerId,
+            long dueAtEpochMillis) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT service_identity, payer_account, beneficiary_account,
+                               amount_minor_units, kind, purpose, due_at_epoch_millis,
+                               state, escrow_id
+                        FROM fiscal_bill
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "issued Fiscal Bill row");
+                helper.assertValueEqual(
+                        "civiceconomy-fiscal-bill",
+                        result.getString(1),
+                        "internal Fiscal Bill service identity");
+                helper.assertValueEqual(
+                        "player:" + payerId,
+                        result.getString(2),
+                        "payer derived from target player UUID");
+                helper.assertValueEqual(
+                        "nation:" + nationId.value() + ":treasury",
+                        result.getString(3),
+                        "beneficiary derived from issuer Nation");
+                helper.assertValueEqual(300L, result.getLong(4), "Fiscal Bill amount");
+                helper.assertValueEqual("FEE", result.getString(5), "Fiscal Bill kind");
+                helper.assertValueEqual(
+                        "GameTest building permit fee",
+                        result.getString(6),
+                        "Fiscal Bill purpose");
+                helper.assertValueEqual(
+                        dueAtEpochMillis, result.getLong(7), "Fiscal Bill due time");
+                helper.assertValueEqual("ISSUED", result.getString(8), "Fiscal Bill state");
+                helper.assertTrue(result.getString(9) == null, "issued Bill has no Escrow");
+                helper.assertTrue(!result.next(), "request replay creates one Fiscal Bill");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect issued Fiscal Bill", failure);
         }
     }
 
