@@ -524,13 +524,19 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
         helper.assertValueEqual(
-                Set.of("issue"),
+                Set.of("issue", "list", "status"),
                 economy.getChild("nation")
                         .getChild("bill")
                         .getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Fiscal Bill command actions");
+        helper.assertValueEqual(
+                Set.of("list", "status"),
+                economy.getChild("bill").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "payer-scoped Fiscal Bill inspection actions");
         helper.assertValueEqual(
                 Set.of("allowance", "prepare", "cancel", "restore"),
                 economy.getChild("nation")
@@ -1108,17 +1114,36 @@ public final class CivicServerRuntimeGameTests {
         Team team = createHeadOwnedFtbTeamFixture(issuer);
         NationTeam teamSnapshot = new NationTeam(
                 team.getId(), team.getOwner(), team.getMembers());
-        UUID payerId = UUID.randomUUID();
+        ServerPlayer payer = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-fiscal-bill-payer"),
+                ClientInformation.createDefault());
+        UUID payerId = payer.getUUID();
         String unauthorizedRequestId = "unauthorized-bill-" + UUID.randomUUID();
         String requestId = "player-bill-" + UUID.randomUUID();
         long dueAt = java.time.Instant.now().plus(java.time.Duration.ofDays(1L)).toEpochMilli();
         AtomicReference<org.civiceconomy.nation.NationId> nationId = new AtomicReference<>();
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AtomicReference<Throwable> unauthorizedFailure = new AtomicReference<>();
+        AtomicReference<Throwable> nationInspectionFailure = new AtomicReference<>();
+        AtomicReference<java.util.List<org.civiceconomy.fiscal.FiscalBill>> payerBills =
+                new AtomicReference<>();
+        AtomicReference<java.util.List<org.civiceconomy.fiscal.FiscalBill>> nationBills =
+                new AtomicReference<>();
+        AtomicReference<org.civiceconomy.fiscal.FiscalBill> payerBill =
+                new AtomicReference<>();
+        AtomicReference<org.civiceconomy.fiscal.FiscalBill> nationBill =
+                new AtomicReference<>();
+        AtomicReference<UUID> billId = new AtomicReference<>();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean unauthorizedFinished = new AtomicBoolean();
         AtomicBoolean permissionReady = new AtomicBoolean();
         AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicBoolean nationInspectionRejected = new AtomicBoolean();
+        AtomicBoolean viewPermissionReady = new AtomicBoolean();
+        AtomicBoolean inspectionReady = new AtomicBoolean();
+        AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1242,6 +1267,132 @@ public final class CivicServerRuntimeGameTests {
                 .thenWaitUntil(() -> {
                     assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill command");
                     helper.assertTrue(commandStarted.get(), "Fiscal Bill command started");
+                    assertIssuedFiscalBill(
+                            helper,
+                            databaseFile,
+                            requestId,
+                            nationId.get(),
+                            payerId,
+                            dueAt);
+                })
+                .thenExecute(() -> {
+                    String persistedBillId = fiscalBillIdByRequest(databaseFile, requestId);
+                    billId.set(UUID.fromString(persistedBillId));
+                    runtime.nationFiscalBills(issuer)
+                            .whenComplete((ignored, failure) -> {
+                                if (failure == null) {
+                                    asyncFailure.set(new AssertionError(
+                                            "Nation Fiscal Bill inspection without VIEW_ACCOUNT succeeded"));
+                                } else {
+                                    nationInspectionFailure.set(rootCause(failure));
+                                }
+                                nationInspectionRejected.set(true);
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Nation Fiscal Bill inspection denial");
+                    helper.assertTrue(
+                            nationInspectionRejected.get(),
+                            "Nation Fiscal Bill inspection denial completed");
+                    helper.assertTrue(
+                            nationInspectionFailure.get() instanceof SecurityException,
+                            "Nation Fiscal Bill inspection requires VIEW_ACCOUNT");
+                })
+                .thenExecute(() -> runtime.submitDatabase(database -> {
+                            NationRegistry nations = new NationRegistry(
+                                    database, snapshot(teamSnapshot));
+                            var provider = new FtbTeamsNationProvider(
+                                    nations,
+                                    new CitizenshipRegistry(
+                                            database,
+                                            java.time.Duration.ofDays(7L),
+                                            setupClock),
+                                    new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                                    snapshot(teamSnapshot));
+                            new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                                    .grant(new GrantNationFiscalPermission(
+                                            new ServiceIdentity("civiceconomy-gametest"),
+                                            "fiscal-bill-view-authority-" + UUID.randomUUID(),
+                                            nationId.get(),
+                                            issuer.getUUID(),
+                                            issuer.getUUID(),
+                                            NationFiscalPermission.VIEW_ACCOUNT,
+                                            "Authorize National Treasury receivable inspection"));
+                            return null;
+                        })
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                viewPermissionReady.set(true);
+                            }
+                        }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill view permission");
+                    helper.assertTrue(viewPermissionReady.get(), "Fiscal Bill view permission ready");
+                })
+                .thenExecute(() -> {
+                    var payerList = runtime.payerFiscalBills(payer)
+                            .thenAccept(payerBills::set);
+                    var payerStatus = runtime.payerFiscalBill(payer, billId.get())
+                            .thenAccept(payerBill::set);
+                    var nationList = runtime.nationFiscalBills(issuer)
+                            .thenAccept(nationBills::set);
+                    var nationStatus = runtime.nationFiscalBill(issuer, billId.get())
+                            .thenAccept(nationBill::set);
+                    CompletableFuture.allOf(
+                                    payerList, payerStatus, nationList, nationStatus)
+                            .whenComplete((ignored, failure) -> {
+                                if (failure != null) {
+                                    asyncFailure.set(failure);
+                                } else {
+                                    inspectionReady.set(true);
+                                }
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill inspection");
+                    helper.assertTrue(inspectionReady.get(), "Fiscal Bill inspection ready");
+                    helper.assertValueEqual(1, payerBills.get().size(), "payer Bill count");
+                    helper.assertValueEqual(1, nationBills.get().size(), "Nation Bill count");
+                    helper.assertValueEqual(
+                            billId.get(), payerBill.get().billId(), "payer exact Bill status");
+                    helper.assertValueEqual(
+                            billId.get(), nationBill.get().billId(), "Nation exact Bill status");
+                    helper.assertValueEqual(
+                            payerBill.get(), payerBills.get().getFirst(), "payer list exact Bill");
+                    helper.assertValueEqual(
+                            nationBill.get(), nationBills.get().getFirst(), "Nation list exact Bill");
+                })
+                .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
+                    try {
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        int payerList = dispatcher.execute(
+                                "civic economy bill list",
+                                payer.createCommandSourceStack().withSuppressedOutput());
+                        int payerStatus = dispatcher.execute(
+                                "civic economy bill status " + billId.get(),
+                                payer.createCommandSourceStack().withSuppressedOutput());
+                        int nationList = dispatcher.execute(
+                                "civic economy nation bill list",
+                                issuer.createCommandSourceStack().withSuppressedOutput());
+                        int nationStatus = dispatcher.execute(
+                                "civic economy nation bill status " + billId.get(),
+                                issuer.createCommandSourceStack().withSuppressedOutput());
+                        helper.assertValueEqual(1, payerList, "payer Bill list command result");
+                        helper.assertValueEqual(1, payerStatus, "payer Bill status command result");
+                        helper.assertValueEqual(1, nationList, "Nation Bill list command result");
+                        helper.assertValueEqual(1, nationStatus, "Nation Bill status command result");
+                        inspectionCommandsStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill inspection commands");
+                    helper.assertTrue(
+                            inspectionCommandsStarted.get(),
+                            "Fiscal Bill inspection commands started");
                     assertIssuedFiscalBill(
                             helper,
                             databaseFile,

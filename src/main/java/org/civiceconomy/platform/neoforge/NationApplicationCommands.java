@@ -97,31 +97,38 @@ final class NationApplicationCommands {
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> billCommand() {
-        return Commands.literal("bill")
-                .then(Commands.literal("issue")
-                        .then(Commands.argument("requestId", StringArgumentType.word())
-                                .then(Commands.argument("payerUuid", UuidArgument.uuid())
+        var issue = Commands.literal("issue")
+                .then(Commands.argument("requestId", StringArgumentType.word())
+                        .then(Commands.argument("payerUuid", UuidArgument.uuid())
+                                .then(Commands.argument(
+                                                "amountMinorUnits",
+                                                LongArgumentType.longArg(1L))
                                         .then(Commands.argument(
-                                                        "amountMinorUnits",
-                                                        LongArgumentType.longArg(1L))
+                                                        "kind",
+                                                        StringArgumentType.word())
                                                 .then(Commands.argument(
-                                                                "kind",
-                                                                StringArgumentType.word())
+                                                                "dueAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
                                                         .then(Commands.argument(
-                                                                        "dueAtEpochMillis",
-                                                                        LongArgumentType.longArg(0L))
-                                                                .then(Commands.argument(
-                                                                                "purpose",
-                                                                                StringArgumentType.greedyString())
-                                                                        .executes(context ->
-                                                                                issueFiscalBill(
-                                                                                        context.getSource(),
-                                                                                        StringArgumentType.getString(context, "requestId"),
-                                                                                        UuidArgument.getUuid(context, "payerUuid"),
-                                                                                        LongArgumentType.getLong(context, "amountMinorUnits"),
-                                                                                        StringArgumentType.getString(context, "kind"),
-                                                                                        LongArgumentType.getLong(context, "dueAtEpochMillis"),
-                                                                                        StringArgumentType.getString(context, "purpose"))))))))));
+                                                                        "purpose",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context -> issueFiscalBill(
+                                                                        context.getSource(),
+                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                        UuidArgument.getUuid(context, "payerUuid"),
+                                                                        LongArgumentType.getLong(context, "amountMinorUnits"),
+                                                                        StringArgumentType.getString(context, "kind"),
+                                                                        LongArgumentType.getLong(context, "dueAtEpochMillis"),
+                                                                        StringArgumentType.getString(context, "purpose")))))))));
+        return Commands.literal("bill")
+                .then(issue)
+                .then(Commands.literal("list")
+                        .executes(context -> listNationFiscalBills(context.getSource())))
+                .then(Commands.literal("status")
+                        .then(Commands.argument("billId", UuidArgument.uuid())
+                                .executes(context -> nationFiscalBillStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(context, "billId")))));
     }
 
     private static int issueFiscalBill(
@@ -162,6 +169,47 @@ final class NationApplicationCommands {
                     }
                 }));
         source.sendSuccess(() -> Component.literal("Fiscal Bill issuance queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listNationFiscalBills(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .nationFiscalBills(player)
+                .whenComplete((bills, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation Fiscal Bill list", failure);
+                    } else {
+                        String result = bills.isEmpty()
+                                ? "No Fiscal Bills benefit your current National Treasury"
+                                : bills.stream()
+                                        .limit(20)
+                                        .map(FiscalBillCommands::formatFiscalBill)
+                                        .collect(Collectors.joining("; "));
+                        source.sendSuccess(() -> Component.literal(result), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation Fiscal Bill list queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int nationFiscalBillStatus(CommandSourceStack source, UUID billId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .nationFiscalBill(player, billId)
+                .whenComplete((bill, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation Fiscal Bill status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        FiscalBillCommands.formatFiscalBill(bill)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation Fiscal Bill status queued"), false);
         return Command.SINGLE_SUCCESS;
     }
 

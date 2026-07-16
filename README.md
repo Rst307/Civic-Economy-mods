@@ -97,6 +97,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 玩家建国流程由服务端从真实玩家、FTB Team 和当前位置推导身份，不接受调用者提交 Team UUID、所有者或首都坐标：
 
 ```text
+/civic economy bill list
+/civic economy bill status <billId>
 /civic economy nation apply
 /civic economy nation status
 /civic economy nation cancel <reason>
@@ -106,6 +108,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation role grant <playerUuid> <permission> <reason>
 /civic economy nation role revoke <grantUuid> <reason>
 /civic economy nation bill issue <requestId> <payerUuid> <amountMinorUnits> <kind> <dueAtEpochMillis> <purpose>
+/civic economy nation bill list
+/civic economy nation bill status <billId>
 /civic economy nation mint start <requestId> <mintId> <periodId> <amountMinorUnits>
 /civic economy nation mint status [batchId]
 /civic economy nation mint cancel <batchId> <requestId> <reason>
@@ -132,6 +136,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、审批策略、公共政策和恢复管理。
 
 `nation bill issue` 创建一张不移动 LC、也不创建 Reservation 或 Escrow 的手动 Fiscal Bill。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导授权与收款方，要求精确 Nation `INITIATE_PAYMENT`，并把 beneficiary 固定为该 Nation 的 National Treasury。命令只接受 payer 的玩家 UUID，来源账户固定派生为 `player:<UUID>`；调用者不能提交 Nation、Team、来源账户或重定向 beneficiary。同一稳定 `requestId` 重放返回原 Bill，改变 payer、金额、种类、用途或到期时间会失败。
+
+`bill list|status` 只按真实命令玩家派生 `player:<UUID>`，列出或读取明确由该玩家付款的 Bill；foreign 与 unknown Bill UUID 使用同一失败路径。`nation bill list|status` 则从当前有效 Citizenship 推导 Nation，要求精确 `VIEW_ACCOUNT`，并只返回 beneficiary 为本国 National Treasury 的 Bill。两套查询都显示 payer、beneficiary、总额、已结算额、剩余额、种类、状态、到期时间、Escrow 和用途，且不会创建 Reservation/Escrow、移动 LC 或推进 Bill 状态。
 
 `nation mint start` 只接受稳定请求 ID、Registered Mint ID、Issuance Quota Period ID 和面值。服务端从真实玩家、FTB Team、Registered Mint、锁定 Recipe Version、当前 Effective Territory 与玩家库存推导 Nation、位置和材料清单，并要求精确 Nation `MANAGE_ISSUANCE`；重复请求不得改变 Mint、Period、操作者或金额。`cancel` 仅返还该批次真实托管材料并在确认返还后释放额度。处理截止后，服务端先持久化发行 intent，再用同一 operation UUID 向精确 National Treasury 执行真实 LC deposit，幂等确认材料消费，最后在单一 SQLite 事务中将 reserved quota 转为 used、写入唯一 `ISSUANCE` Monetary Supply event 并释放 Registered Mint；启动和每分钟恢复会继续处理所有 pending 窗口。`status` 只读取真实玩家 UUID 所拥有的最新或指定 Batch，显示 Batch/custody/issuance 阶段、处理截止、原始理由、外部 LC/材料审计引用，以及最新 Mint Recovery Incident 的步骤、失败类型、消息、次数、时间和解决证据，不能查看其他玩家的 Batch，也不能将普通 LC 转账当作发行。
 

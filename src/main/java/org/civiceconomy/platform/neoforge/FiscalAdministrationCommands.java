@@ -86,6 +86,7 @@ public final class FiscalAdministrationCommands {
                 .then(territoryPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
+                        .then(FiscalBillCommands.command())
                         .then(NationApplicationCommands.command())
                         .then(admin));
         boolean dedicatedStartupPermit =

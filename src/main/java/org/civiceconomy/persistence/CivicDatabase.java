@@ -7980,6 +7980,85 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredFiscalBill> fiscalBillsForPayer(String payerAccount) {
+        List<StoredFiscalBill> bills = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.payer_account = ?
+                ORDER BY b.due_at_epoch_millis, b.bill_id
+                """)) {
+            query.setString(1, payerAccount);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    bills.add(storedFiscalBill(result));
+                }
+            }
+            return List.copyOf(bills);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list payer Fiscal Bills", failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill fiscalBillForPayer(
+            UUID billId, String payerAccount) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.bill_id = ? AND b.payer_account = ?
+                """)) {
+            query.setString(1, billId.toString());
+            query.setString(2, payerAccount);
+            return readFiscalBill(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read payer Fiscal Bill", failure);
+        }
+    }
+
+    public synchronized List<StoredFiscalBill> fiscalBillsForBeneficiary(
+            String beneficiaryAccount) {
+        List<StoredFiscalBill> bills = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.beneficiary_account = ?
+                ORDER BY b.due_at_epoch_millis, b.bill_id
+                """)) {
+            query.setString(1, beneficiaryAccount);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    bills.add(storedFiscalBill(result));
+                }
+            }
+            return List.copyOf(bills);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list beneficiary Fiscal Bills", failure);
+        }
+    }
+
+    public synchronized StoredFiscalBill fiscalBillForBeneficiary(
+            UUID billId, String beneficiaryAccount) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT b.*, COALESCE(r.settled_minor_units, 0) AS settled_minor_units
+                FROM fiscal_bill b
+                LEFT JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                LEFT JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                WHERE b.bill_id = ? AND b.beneficiary_account = ?
+                """)) {
+            query.setString(1, billId.toString());
+            query.setString(2, beneficiaryAccount);
+            return readFiscalBill(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read beneficiary Fiscal Bill", failure);
+        }
+    }
+
     public synchronized List<StoredFiscalBill> dueUnfundedFiscalBills(long nowEpochMillis) {
         List<StoredFiscalBill> bills = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""

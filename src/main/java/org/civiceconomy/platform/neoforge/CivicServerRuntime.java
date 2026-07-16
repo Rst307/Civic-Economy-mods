@@ -38,9 +38,11 @@ import org.civiceconomy.fiscal.FiscalBillExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.FiscalBill;
 import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.FiscalBillInspection;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.IssueFiscalBill;
+import org.civiceconomy.fiscal.NationFiscalBillInspection;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMintIssuances;
@@ -590,6 +592,40 @@ public final class CivicServerRuntime {
                                     purpose,
                                     Instant.ofEpochMilli(dueAtEpochMillis)));
                 }));
+    }
+
+    CompletableFuture<List<FiscalBill>> payerFiscalBills(ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        return current.writer.submitDatabase(database ->
+                new FiscalBillInspection(database).listForPayer(actorPlayerId));
+    }
+
+    CompletableFuture<FiscalBill> payerFiscalBill(ServerPlayer actor, UUID billId) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        return current.writer.submitDatabase(database ->
+                new FiscalBillInspection(database).statusForPayer(actorPlayerId, billId));
+    }
+
+    CompletableFuture<List<FiscalBill>> nationFiscalBills(ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        nationFiscalBillInspection(database, team, commandClock)
+                                .list(actorPlayerId)));
+    }
+
+    CompletableFuture<FiscalBill> nationFiscalBill(ServerPlayer actor, UUID billId) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        nationFiscalBillInspection(database, team, commandClock)
+                                .status(actorPlayerId, billId)));
     }
 
     CompletableFuture<TreasuryWithdrawal> withdrawNationalTreasury(
@@ -2709,6 +2745,22 @@ public final class CivicServerRuntime {
                 new WithdrawalApprovalPolicyRegistry(database, commandClock),
                 new TreasuryWithdrawalApprovalRegistry(database, commandClock),
                 commandClock);
+    }
+
+    private static NationFiscalBillInspection nationFiscalBillInspection(
+            CivicDatabase database, NationTeam team, Clock commandClock) {
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        NationRegistry nations = new NationRegistry(database, teams);
+        var provider = new FtbTeamsNationProvider(
+                nations,
+                new CitizenshipRegistry(
+                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                teams);
+        return new NationFiscalBillInspection(
+                database,
+                provider,
+                new NationFiscalAuthorityRegistry(database, provider, commandClock));
     }
 
     private static String requireVersion(NeoForgeModCatalog mods, String modId) {
