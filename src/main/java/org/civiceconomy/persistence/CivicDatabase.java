@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 62;
+    private static final int SCHEMA_VERSION = 63;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -8498,6 +8498,130 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredBudgetCancellationAudit budgetCancellationAudit(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_cancellation_audit
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readBudgetCancellationAudit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget cancellation audit", failure);
+        }
+    }
+
+    public synchronized StoredBudgetCancellationAudit budgetCancellationAudit(UUID budgetId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM budget_cancellation_audit WHERE budget_id = ?
+                """)) {
+            query.setString(1, budgetId.toString());
+            return readBudgetCancellationAudit(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Budget cancellation audit", failure);
+        }
+    }
+
+    public synchronized StoredBudget cancelBudget(
+            UUID cancellationId,
+            UUID releaseId,
+            String serviceIdentity,
+            String requestId,
+            UUID budgetId,
+            UUID actorPlayerId,
+            String reason,
+            long cancelledAtEpochMillis) {
+        StoredBudgetCancellationAudit replay =
+                budgetCancellationAudit(serviceIdentity, requestId);
+        if (replay != null) {
+            return budget(replay.budgetId());
+        }
+        StoredBudget budget = budget(budgetId);
+        if (budget == null) {
+            throw new IllegalArgumentException("Unknown Budget " + budgetId);
+        }
+        if (!("APPROVED".equals(budget.state())
+                || "PARTIALLY_SPENT".equals(budget.state()))
+                || budget.escrowId() == null) {
+            throw new IllegalStateException("Budget is not cancellable: " + budget.state());
+        }
+        StoredEscrow escrow = escrow(budget.escrowId());
+        UUID reservationId = escrow.reservationId();
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement audit = connection.prepareStatement("""
+                        INSERT INTO budget_cancellation_audit (
+                            cancellation_id, budget_id, service_identity, request_id,
+                            actor_player_id, reason, cancelled_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement releaseAudit = connection.prepareStatement("""
+                        INSERT INTO reservation_release (
+                            release_id, service_identity, request_id, reservation_id,
+                            reason, released_at_epoch_millis
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """);
+                    PreparedStatement releaseReservation = connection.prepareStatement("""
+                        UPDATE fiscal_reservation SET state = 'RELEASED'
+                        WHERE reservation_id = ? AND state = 'ACTIVE'
+                        """);
+                    PreparedStatement releaseEscrow = connection.prepareStatement("""
+                        UPDATE fiscal_escrow SET state = 'RELEASED'
+                        WHERE escrow_id = ? AND state IN ('RESERVED', 'PARTIALLY_SETTLED')
+                        """);
+                    PreparedStatement cancel = connection.prepareStatement("""
+                        UPDATE fiscal_budget SET state = 'RELEASED'
+                        WHERE budget_id = ? AND state IN ('APPROVED', 'PARTIALLY_SPENT')
+                        """)) {
+                String state = reservationState(reservationId);
+                if (!"ACTIVE".equals(state)) {
+                    throw new InactiveReservationException(
+                            reservationId, state == null ? "UNKNOWN" : state);
+                }
+                if (hasIncompletePayment(reservationId)) {
+                    throw new PendingReservationPaymentException(reservationId);
+                }
+                audit.setString(1, cancellationId.toString());
+                audit.setString(2, budgetId.toString());
+                audit.setString(3, serviceIdentity);
+                audit.setString(4, requestId);
+                audit.setString(5, actorPlayerId.toString());
+                audit.setString(6, reason);
+                audit.setLong(7, cancelledAtEpochMillis);
+                audit.executeUpdate();
+                releaseAudit.setString(1, releaseId.toString());
+                releaseAudit.setString(2, serviceIdentity);
+                releaseAudit.setString(3, requestId);
+                releaseAudit.setString(4, reservationId.toString());
+                releaseAudit.setString(5, reason);
+                releaseAudit.setLong(6, cancelledAtEpochMillis);
+                releaseAudit.executeUpdate();
+                releaseReservation.setString(1, reservationId.toString());
+                if (releaseReservation.executeUpdate() != 1) {
+                    throw new InactiveReservationException(reservationId, "CHANGED_CONCURRENTLY");
+                }
+                releaseEscrow.setString(1, budget.escrowId().toString());
+                if (releaseEscrow.executeUpdate() != 1) {
+                    throw new IllegalStateException("Budget Escrow changed during cancellation");
+                }
+                cancel.setString(1, budgetId.toString());
+                if (cancel.executeUpdate() != 1) {
+                    throw new IllegalStateException("Budget changed during cancellation");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                connection.rollback();
+                throw failure;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            return budget(budgetId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to cancel Budget " + budgetId, failure);
+        }
+    }
+
     public synchronized StoredBudget approveBudget(
             UUID approvalId,
             UUID escrowId,
@@ -12156,6 +12280,36 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 62");
             }
+            if (version < 63) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS budget_cancellation_audit (
+                            cancellation_id TEXT PRIMARY KEY,
+                            budget_id TEXT NOT NULL UNIQUE REFERENCES fiscal_budget(budget_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            cancelled_at_epoch_millis INTEGER NOT NULL
+                                CHECK (cancelled_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT OR IGNORE INTO budget_cancellation_audit (
+                            cancellation_id, budget_id, service_identity, request_id,
+                            actor_player_id, reason, cancelled_at_epoch_millis
+                        )
+                        SELECT b.budget_id, b.budget_id, rr.service_identity, rr.request_id,
+                               '00000000-0000-0000-0000-000000000000',
+                               'Legacy Budget cancellation migrated without player audit',
+                               rr.released_at_epoch_millis
+                        FROM fiscal_budget b
+                        JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                        JOIN reservation_release rr ON rr.reservation_id = e.reservation_id
+                        WHERE b.state = 'RELEASED'
+                        """);
+                statement.execute("PRAGMA user_version = 63");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -13577,6 +13731,23 @@ public final class CivicDatabase implements AutoCloseable {
                     UUID.fromString(result.getString("actor_player_id")),
                     result.getString("reason"),
                     result.getLong("approved_at_epoch_millis"));
+        }
+    }
+
+    private static StoredBudgetCancellationAudit readBudgetCancellationAudit(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredBudgetCancellationAudit(
+                    UUID.fromString(result.getString("cancellation_id")),
+                    UUID.fromString(result.getString("budget_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("reason"),
+                    result.getLong("cancelled_at_epoch_millis"));
         }
     }
 

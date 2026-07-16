@@ -284,6 +284,40 @@ public final class FiscalLedger {
         }
     }
 
+    public Budget cancelBudget(CancelBudget request) {
+        requireSessionIdentity(request.serviceIdentity());
+        StoredBudget budget = database.budget(request.budgetId());
+        if (budget == null) {
+            throw new IllegalArgumentException("Unknown Budget " + request.budgetId());
+        }
+        AccountId sourceAccount = new AccountId(budget.sourceAccount());
+        require(request.serviceIdentity(), FiscalCapability.MANAGE_BUDGET, sourceAccount);
+        var replay = database.budgetCancellationAudit(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay != null) {
+            if (!replay.budgetId().equals(request.budgetId())
+                    || !replay.actorPlayerId().equals(request.actorPlayerId())
+                    || !replay.reason().equals(request.reason())) {
+                throw new IdempotencyConflictException(
+                        request.serviceIdentity(), request.requestId());
+            }
+            return toBudget(database.budget(replay.budgetId()));
+        }
+        try {
+            return toBudget(database.cancelBudget(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    request.serviceIdentity().value(),
+                    request.requestId(),
+                    request.budgetId(),
+                    request.actorPlayerId(),
+                    request.reason(),
+                    clock.millis()));
+        } catch (PendingReservationPaymentException blocked) {
+            throw new ReservationHasPendingPaymentException(blocked.reservationId());
+        }
+    }
+
     public Escrow openEscrow(OpenEscrow request) {
         require(request.serviceIdentity(), FiscalCapability.MANAGE_ESCROW, request.sourceAccount());
         synchronized (accountLocks.computeIfAbsent(request.sourceAccount(), ignored -> new Object())) {

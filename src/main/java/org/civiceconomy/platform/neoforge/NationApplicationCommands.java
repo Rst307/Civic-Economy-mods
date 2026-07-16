@@ -135,6 +135,20 @@ final class NationApplicationCommands {
                                                                 context, "requestId"),
                                                         StringArgumentType.getString(
                                                                 context, "reason")))))))
+                .then(Commands.literal("cancel")
+                        .then(Commands.argument("budgetId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> cancelNationBudget(
+                                                        context.getSource(),
+                                                        UuidArgument.getUuid(
+                                                                context, "budgetId"),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))))
                 .then(Commands.literal("list")
                         .executes(context -> listNationBudgets(context.getSource())))
                 .then(Commands.literal("status")
@@ -198,6 +212,28 @@ final class NationApplicationCommands {
                     }
                 }));
         source.sendSuccess(() -> Component.literal("Nation Budget approval queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int cancelNationBudget(
+            CommandSourceStack source, UUID budgetId, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .cancelNationalBudget(player, budgetId, requestId, reason)
+                .whenComplete((budget, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Nation Budget cancellation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Cancelled " + formatBudget(budget)
+                                                + " actor=player:" + player.getUUID()
+                                                + " reason=" + reason),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Nation Budget cancellation queued"), false);
         return Command.SINGLE_SUCCESS;
     }
 

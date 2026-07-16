@@ -50,6 +50,7 @@ import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.IssueFiscalBill;
 import org.civiceconomy.fiscal.NationBudgetInspection;
 import org.civiceconomy.fiscal.NationBudgetApprovalCoordinator;
+import org.civiceconomy.fiscal.NationBudgetCancellationCoordinator;
 import org.civiceconomy.fiscal.NationFiscalBillInspection;
 import org.civiceconomy.fiscal.PaymentCoordinator;
 import org.civiceconomy.fiscal.PreparedFiscalBillPayment;
@@ -738,6 +739,31 @@ public final class CivicServerRuntime {
                                         }
                                         return prepared.balance();
                                     });
+                }));
+    }
+
+    CompletableFuture<Budget> cancelNationalBudget(
+            ServerPlayer actor, UUID budgetId, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            new CitizenshipRegistry(
+                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock),
+                            teams);
+                    return new NationBudgetCancellationCoordinator(
+                                    database,
+                                    provider,
+                                    new NationFiscalAuthorityRegistry(
+                                            database, provider, commandClock),
+                                    commandClock)
+                            .cancel(actorPlayerId, budgetId, requestId, reason);
                 }));
     }
 

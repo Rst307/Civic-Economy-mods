@@ -528,7 +528,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Nation Application command actions");
         helper.assertValueEqual(
-                Set.of("create", "approve", "list", "status"),
+                Set.of("create", "approve", "cancel", "list", "status"),
                 economy.getChild("nation")
                         .getChild("budget")
                         .getChildren().stream()
@@ -1147,6 +1147,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean inspectionReady = new AtomicBoolean();
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean approvalCommandStarted = new AtomicBoolean();
+        AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1463,6 +1464,67 @@ public final class CivicServerRuntimeGameTests {
                                     .balance(new AccountId(budget.sourceAccount()))
                                     .minorUnits(),
                             "Budget approval reserves without moving LC");
+                })
+                .thenExecute(() -> {
+                    try {
+                        BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                        String cancellationRequestId =
+                                "cancel-player-budget-" + UUID.randomUUID();
+                        String command = "civic economy nation budget cancel "
+                                + budget.budgetId() + " " + cancellationRequestId
+                                + " Cancel unfinished GameTest public works";
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget cancellation command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget cancellation replay command result");
+                        cancellationCommandStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Budget cancellation command");
+                    helper.assertTrue(
+                            cancellationCommandStarted.get(),
+                            "Budget cancellation started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    helper.assertValueEqual("RELEASED", budget.state(), "cancelled Budget state");
+                    BudgetCancellationRow cancellation =
+                            budgetCancellationByBudget(databaseFile, budget.budgetId());
+                    helper.assertTrue(cancellation != null, "durable Budget cancellation audit");
+                    helper.assertValueEqual(
+                            actor.getUUID(),
+                            cancellation.actorPlayerId(),
+                            "cancellation actor audit");
+                    helper.assertValueEqual(
+                            "Cancel unfinished GameTest public works",
+                            cancellation.reason(),
+                            "cancellation reason audit");
+                    helper.assertValueEqual(
+                            "RELEASED", cancellation.escrowState(), "cancelled Escrow state");
+                    helper.assertValueEqual(
+                            "RELEASED",
+                            cancellation.reservationState(),
+                            "cancelled Reservation state");
+                    helper.assertValueEqual(
+                            1, cancellation.auditCount(), "one Budget cancellation audit");
+                    helper.assertValueEqual(
+                            1, cancellation.releaseCount(), "one Reservation release audit");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "Budget cancellation releases a logical hold without moving LC");
                 })
                 .thenSucceed();
     }
@@ -4919,7 +4981,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(62, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(63, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -5648,6 +5710,41 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static BudgetCancellationRow budgetCancellationByBudget(
+            Path databaseFile, UUID budgetId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT cancellation.actor_player_id, cancellation.reason,
+                               escrow.state, reservation.state,
+                               (SELECT COUNT(*) FROM budget_cancellation_audit counted
+                                WHERE counted.budget_id = budget.budget_id),
+                               (SELECT COUNT(*) FROM reservation_release release
+                                WHERE release.reservation_id = reservation.reservation_id)
+                        FROM fiscal_budget budget
+                        JOIN budget_cancellation_audit cancellation
+                          ON cancellation.budget_id = budget.budget_id
+                        JOIN fiscal_escrow escrow ON escrow.escrow_id = budget.escrow_id
+                        JOIN fiscal_reservation reservation
+                          ON reservation.reservation_id = escrow.reservation_id
+                        WHERE budget.budget_id = ?
+                        """)) {
+            query.setString(1, budgetId.toString());
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new BudgetCancellationRow(
+                                UUID.fromString(result.getString(1)),
+                                result.getString(2),
+                                result.getString(3),
+                                result.getString(4),
+                                result.getInt(5),
+                                result.getInt(6))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Budget cancellation", failure);
+        }
+    }
+
     private static void assertCitizenshipCorrectionGraceStarted(
             GameTestHelper helper,
             Path databaseFile,
@@ -5846,4 +5943,12 @@ public final class CivicServerRuntimeGameTests {
             String escrowId) {}
 
     private record BudgetApprovalRow(UUID actorPlayerId, String reason) {}
+
+    private record BudgetCancellationRow(
+            UUID actorPlayerId,
+            String reason,
+            String escrowState,
+            String reservationState,
+            int auditCount,
+            int releaseCount) {}
 }

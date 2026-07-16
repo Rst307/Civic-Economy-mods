@@ -132,6 +132,227 @@ class NationBudgetApprovalCoordinatorTest {
         }
     }
 
+    @Test
+    void missingApproveBudgetAuthorityFailsBeforeBudgetCancellationProvisioningOrRelease() {
+        try (CivicDatabase database = database()) {
+            Fixtures fixtures = fixtures(database);
+            Budget draft = createBudget(database, fixtures.nationId(), "cancel-without-authority");
+            database.approveBudget(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "prepare-cancellation",
+                    draft.budgetId(),
+                    ACTOR,
+                    "Prepare approved Budget fixture",
+                    NOW.toEpochMilli());
+            NationBudgetCancellationCoordinator coordinator =
+                    new NationBudgetCancellationCoordinator(
+                            database,
+                            fixtures.provider(),
+                            fixtures.authorities(),
+                            CLOCK,
+                            authorization -> authorization.openSession(
+                                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    "civiceconomy"));
+
+            assertThrows(
+                    SecurityException.class,
+                    () -> coordinator.cancel(
+                            ACTOR,
+                            draft.budgetId(),
+                            "cancel-without-authority",
+                            "Cancel unauthorized Budget"));
+
+            assertNull(database.fiscalService(
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value()));
+            assertEquals("APPROVED", database.budget(draft.budgetId()).state());
+            assertNull(database.budgetCancellationAudit(draft.budgetId()));
+        }
+    }
+
+    @Test
+    void foreignTreasuryBudgetFailsBeforeCancellationServiceProvisioningOrRelease() {
+        try (CivicDatabase database = database()) {
+            Fixtures fixtures = fixtures(database);
+            fixtures.authorities().grant(new GrantNationFiscalPermission(
+                    new ServiceIdentity("civiceconomy-governance"),
+                    "grant-foreign-budget-cancellation",
+                    fixtures.nationId(),
+                    ACTOR,
+                    ACTOR,
+                    NationFiscalPermission.APPROVE_BUDGET,
+                    "Budget approver remains exact-Nation scoped"));
+            Budget draft = FiscalLedger.toBudget(database.createBudget(
+                    UUID.randomUUID(),
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "foreign-cancel-budget",
+                    "nation:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:treasury",
+                    300L,
+                    "PUBLIC_WORKS",
+                    "Foreign Treasury Budget",
+                    NOW.plusSeconds(3_600L).toEpochMilli()));
+            database.approveBudget(
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    UUID.randomUUID(),
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "approve-foreign-cancel-budget",
+                    draft.budgetId(),
+                    ACTOR,
+                    "Prepare foreign approved Budget fixture",
+                    NOW.toEpochMilli());
+            NationBudgetCancellationCoordinator coordinator =
+                    new NationBudgetCancellationCoordinator(
+                            database,
+                            fixtures.provider(),
+                            fixtures.authorities(),
+                            CLOCK,
+                            authorization -> authorization.openSession(
+                                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    "civiceconomy"));
+
+            assertThrows(
+                    SecurityException.class,
+                    () -> coordinator.cancel(
+                            ACTOR,
+                            draft.budgetId(),
+                            "cancel-foreign-budget",
+                            "Cannot cancel another Nation's Budget"));
+
+            assertNull(database.fiscalService(
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value()));
+            assertEquals("APPROVED", database.budget(draft.budgetId()).state());
+            assertNull(database.budgetCancellationAudit(draft.budgetId()));
+        }
+    }
+
+    @Test
+    void authorizedCancellationReleasesOnlyTheRemainingHoldAndReplaysExactlyOnce() {
+        try (CivicDatabase database = database()) {
+            Fixtures fixtures = fixtures(database);
+            fixtures.authorities().grant(new GrantNationFiscalPermission(
+                    new ServiceIdentity("civiceconomy-governance"),
+                    "grant-budget-cancellation",
+                    fixtures.nationId(),
+                    ACTOR,
+                    ACTOR,
+                    NationFiscalPermission.APPROVE_BUDGET,
+                    "Budget approver may cancel remaining work"));
+            Budget draft = createBudget(database, fixtures.nationId(), "cancel-partial-budget");
+            Budget approved = coordinator(database, fixtures).approve(
+                    ACTOR,
+                    draft.budgetId(),
+                    "approve-before-cancel",
+                    "Approve work before partial settlement",
+                    ignored -> MoneyAmount.ofMinorUnits(1_000L));
+            var escrow = database.escrow(approved.escrowId().orElseThrow());
+            new PaymentCoordinator(database, ignored -> {}).settle(
+                    new SettleReservation(
+                            BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                            "partial-before-cancel",
+                            escrow.reservationId(),
+                            new AccountId("organization:builder:fiscal"),
+                            MoneyAmount.ofMinorUnits(100L)),
+                    FailurePoint.NONE);
+            NationBudgetCancellationCoordinator cancellation =
+                    new NationBudgetCancellationCoordinator(
+                            database,
+                            fixtures.provider(),
+                            fixtures.authorities(),
+                            CLOCK,
+                            authorization -> authorization.openSession(
+                                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    "civiceconomy"));
+
+            Budget released = cancellation.cancel(
+                    ACTOR,
+                    draft.budgetId(),
+                    "cancel-budget",
+                    "Cancel unfinished public works");
+
+            assertEquals(BudgetState.RELEASED, released.state());
+            assertEquals(MoneyAmount.ofMinorUnits(100L), released.settledAmount());
+            assertEquals(MoneyAmount.ofMinorUnits(200L), released.remainingAmount());
+            assertEquals("RELEASED", database.reservationRecord(escrow.reservationId()).state());
+            assertEquals("RELEASED", database.escrow(escrow.escrowId()).state());
+            var audit = database.budgetCancellationAudit(draft.budgetId());
+            assertEquals(ACTOR, audit.actorPlayerId());
+            assertEquals("Cancel unfinished public works", audit.reason());
+            assertEquals(NOW.toEpochMilli(), audit.cancelledAtEpochMillis());
+            assertEquals(
+                    released,
+                    cancellation.cancel(
+                            ACTOR,
+                            draft.budgetId(),
+                            "cancel-budget",
+                            "Cancel unfinished public works"));
+            assertThrows(
+                    IdempotencyConflictException.class,
+                    () -> cancellation.cancel(
+                            ACTOR,
+                            draft.budgetId(),
+                            "cancel-budget",
+                            "Changed cancellation reason"));
+        }
+    }
+
+    @Test
+    void preparedPaymentBlocksBudgetCancellationWithoutPartialAuditOrRelease() {
+        try (CivicDatabase database = database()) {
+            Fixtures fixtures = fixtures(database);
+            fixtures.authorities().grant(new GrantNationFiscalPermission(
+                    new ServiceIdentity("civiceconomy-governance"),
+                    "grant-blocked-budget-cancellation",
+                    fixtures.nationId(),
+                    ACTOR,
+                    ACTOR,
+                    NationFiscalPermission.APPROVE_BUDGET,
+                    "Budget approver may cancel only safe remaining work"));
+            Budget draft = createBudget(database, fixtures.nationId(), "blocked-cancel-budget");
+            Budget approved = coordinator(database, fixtures).approve(
+                    ACTOR,
+                    draft.budgetId(),
+                    "approve-before-blocked-cancel",
+                    "Approve work before prepared Payment",
+                    ignored -> MoneyAmount.ofMinorUnits(1_000L));
+            Escrow escrow = FiscalLedger.toEscrow(
+                    database.escrow(approved.escrowId().orElseThrow()));
+            new PaymentCoordinator(database, ignored -> {}).prepare(new SettleReservation(
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                    "prepared-before-budget-cancel",
+                    escrow.reservationId(),
+                    new AccountId("organization:builder:fiscal"),
+                    MoneyAmount.ofMinorUnits(100L)));
+            NationBudgetCancellationCoordinator cancellation =
+                    new NationBudgetCancellationCoordinator(
+                            database,
+                            fixtures.provider(),
+                            fixtures.authorities(),
+                            CLOCK,
+                            authorization -> authorization.openSession(
+                                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY,
+                                    "civiceconomy"));
+
+            assertThrows(
+                    ReservationHasPendingPaymentException.class,
+                    () -> cancellation.cancel(
+                            ACTOR,
+                            draft.budgetId(),
+                            "blocked-budget-cancel",
+                            "Payment is already pending"));
+
+            assertNull(database.budgetCancellationAudit(draft.budgetId()));
+            assertNull(database.reservationRelease(
+                    BudgetFiscalServiceProvisioner.SERVICE_IDENTITY.value(),
+                    "blocked-budget-cancel"));
+            assertEquals("APPROVED", database.budget(draft.budgetId()).state());
+            assertEquals("RESERVED", database.escrow(escrow.escrowId()).state());
+            assertEquals("ACTIVE", database.reservationRecord(escrow.reservationId()).state());
+        }
+    }
+
     private static NationBudgetApprovalCoordinator coordinator(
             CivicDatabase database, Fixtures fixtures) {
         return new NationBudgetApprovalCoordinator(

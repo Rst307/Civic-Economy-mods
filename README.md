@@ -112,6 +112,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation role revoke <grantUuid> <reason>
 /civic economy nation budget create <requestId> <amountMinorUnits> <budgetCode> <expiresAtEpochMillis> <purpose>
 /civic economy nation budget approve <budgetId> <requestId> <reason>
+/civic economy nation budget cancel <budgetId> <requestId> <reason>
 /civic economy nation budget list
 /civic economy nation budget status <budgetId>
 /civic economy nation bill issue <requestId> <payerUuid> <amountMinorUnits> <kind> <dueAtEpochMillis> <purpose>
@@ -149,6 +150,8 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation budget list|status` 从真实命令玩家的 effective Citizenship 推导 Nation，要求精确 `VIEW_ACCOUNT`，并只返回 source 为本国 National Treasury 的 Budget。列表按到期时间和 Budget UUID 稳定排序；foreign 与 unknown Budget UUID 使用同一失败路径。输出包含来源、总额、已结算额、剩余额、预算代码、状态、到期时间、Escrow 和用途；读取不会批准 Budget、创建 Reservation/Escrow、移动 LC 或推进状态。
 
 `nation budget approve` 允许具有本国 `APPROVE_BUDGET` 的 effective Citizen 批准本国 National Treasury 的 `DRAFT`。同一 Citizen 可以编制并批准；服务端先校验真实玩家、FTB Team、Citizenship、Nation、权限和 Budget source，再在服务器线程读取真实 LC Treasury 余额，最后于 SQLite 单写线程原子创建唯一 Reservation/Escrow 并推进为 `APPROVED`。批准只预占可用额度，不移动 LC；actor、reason、request 和时间持久化审计，同 request replay 不会创建第二个 hold，改变 Budget、actor 或 reason 会冲突。
+
+`nation budget cancel` 允许具有本国 `APPROVE_BUDGET` 的 effective Citizen 取消本国 National Treasury 中仍为 `APPROVED` 或 `PARTIALLY_SPENT` 的 Budget。服务端从真实玩家、FTB Team、Citizenship 和 Nation 推导精确 Treasury，在注册内部服务前拒绝 foreign Budget；SQLite 在一个事务中记录 actor/reason/time 审计、释放唯一 Reservation 和 Escrow、保留已结算金额并把 Budget 推进为 `RELEASED`。取消只释放未支付逻辑 hold，不移动 LC；存在 `PREPARED`、`EXTERNAL_APPLIED` 或补偿中的 Payment 时失败关闭，同 request replay 不会产生第二次 release。
 
 `nation bill issue` 创建一张不移动 LC、也不创建 Reservation 或 Escrow 的手动 Fiscal Bill。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导授权与收款方，要求精确 Nation `INITIATE_PAYMENT`，并把 beneficiary 固定为该 Nation 的 National Treasury。命令只接受 payer 的玩家 UUID，来源账户固定派生为 `player:<UUID>`；调用者不能提交 Nation、Team、来源账户或重定向 beneficiary。同一稳定 `requestId` 重放返回原 Bill，改变 payer、金额、种类、用途或到期时间会失败。
 
