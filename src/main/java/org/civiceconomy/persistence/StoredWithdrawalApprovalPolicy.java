@@ -10,10 +10,15 @@ public record StoredWithdrawalApprovalPolicy(
         UUID nationId,
         UUID actorPlayerId,
         List<StoredWithdrawalApprovalTier> tiers,
+        long approvalLifetimeMillis,
         long effectiveAtEpochMillis,
         String reason,
         long recordedAtEpochMillis) {
     public StoredWithdrawalApprovalPolicy {
         tiers = List.copyOf(tiers);
+        if (approvalLifetimeMillis <= 0L) {
+            throw new IllegalArgumentException(
+                    "Withdrawal approval lifetime must be positive");
+        }
     }
 }

@@ -149,6 +149,7 @@ class TreasuryWithdrawalInspectionTest {
                 nationId,
                 actor,
                 List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, required)),
+                Duration.ofDays(7L),
                 NOW.minus(Duration.ofDays(1)),
                 "Inspection policy " + required);
     }

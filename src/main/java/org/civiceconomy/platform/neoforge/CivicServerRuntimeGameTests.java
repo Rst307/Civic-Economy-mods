@@ -2227,6 +2227,7 @@ public final class CivicServerRuntimeGameTests {
                                     List.of(new org.civiceconomy.fiscal
                                             .WithdrawalApprovalTier(
                                             MoneyAmount.ZERO, 2)),
+                                    java.time.Duration.ofDays(7L),
                                     now.minus(java.time.Duration.ofDays(1)),
                                     "Require two distinct Citizens"));
                     return nation.nationId();
@@ -2261,7 +2262,7 @@ public final class CivicServerRuntimeGameTests {
                         long effectiveAt = now.plus(java.time.Duration.ofDays(7)).toEpochMilli();
                         String command = "civic economy nation treasury withdraw policy schedule "
                                 + policyRequestId + " " + effectiveAt
-                                + " 500 3 Future governed Withdrawal policy";
+                                + " 259200000 500 3 Future governed Withdrawal policy";
                         helper.assertValueEqual(
                                 1,
                                 helper.getLevel().getServer().getCommands().getDispatcher()
@@ -2278,9 +2279,10 @@ public final class CivicServerRuntimeGameTests {
                 .thenWaitUntil(() -> {
                     assertNoAsyncFailure(helper, asyncFailure, "Withdrawal policy command");
                     helper.assertTrue(policyCommandStarted.get(), "policy command started");
-                    helper.assertTrue(
-                            withdrawalApprovalPolicyExists(databaseFile, policyRequestId),
-                            "future-effective Withdrawal policy persisted");
+                    helper.assertValueEqual(
+                            259_200_000L,
+                            withdrawalApprovalPolicyLifetime(databaseFile, policyRequestId),
+                            "future-effective Withdrawal policy pins three-day lifetime");
                 })
                 .thenExecute(() -> {
                     try {
@@ -4094,18 +4096,22 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
-    private static boolean withdrawalApprovalPolicyExists(
+    private static long withdrawalApprovalPolicyLifetime(
             Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var query = connection.prepareStatement("""
-                        SELECT 1 FROM withdrawal_approval_policy
+                        SELECT approval_lifetime_millis FROM withdrawal_approval_policy
                         WHERE service_identity = ? AND request_id = ?
                         """)) {
             query.setString(1, "civiceconomy-withdrawal-governance");
             query.setString(2, requestId);
             try (var result = query.executeQuery()) {
-                return result.next();
+                if (!result.next()) {
+                    throw new IllegalStateException(
+                            "Unknown Withdrawal Approval Policy request " + requestId);
+                }
+                return result.getLong(1);
             }
         } catch (SQLException failure) {
             throw new IllegalStateException(
@@ -4436,7 +4442,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(60, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(61, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

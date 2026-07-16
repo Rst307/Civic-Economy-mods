@@ -44,6 +44,7 @@ public final class WithdrawalApprovalPolicyRegistry {
                                 tier.minimumAmount().minorUnits(),
                                 tier.requiredApprovals()))
                         .toList(),
+                request.approvalLifetime().toMillis(),
                 request.effectiveAt().toEpochMilli(),
                 request.reason(),
                 clock.millis()));
@@ -71,6 +72,8 @@ public final class WithdrawalApprovalPolicyRegistry {
         if (!stored.nationId().equals(request.nationId().value())
                 || !stored.actorPlayerId().equals(request.actorPlayerId())
                 || !stored.tiers().equals(tiers)
+                || stored.approvalLifetimeMillis()
+                        != request.approvalLifetime().toMillis()
                 || stored.effectiveAtEpochMillis() != request.effectiveAt().toEpochMilli()
                 || !stored.reason().equals(request.reason())) {
             throw new IdempotencyConflictException(
@@ -88,6 +91,7 @@ public final class WithdrawalApprovalPolicyRegistry {
                                 MoneyAmount.ofMinorUnits(tier.minimumAmountMinorUnits()),
                                 tier.requiredApprovals()))
                         .toList(),
+                java.time.Duration.ofMillis(stored.approvalLifetimeMillis()),
                 Instant.ofEpochMilli(stored.effectiveAtEpochMillis()),
                 stored.actorPlayerId(),
                 stored.reason(),

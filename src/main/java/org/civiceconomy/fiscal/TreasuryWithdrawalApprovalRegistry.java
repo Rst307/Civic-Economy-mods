@@ -1,7 +1,6 @@
 package org.civiceconomy.fiscal;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -10,30 +9,17 @@ import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTreasuryWithdrawalApproval;
 
 public final class TreasuryWithdrawalApprovalRegistry {
-    private static final Duration DEFAULT_APPROVAL_LIFETIME = Duration.ofDays(7);
     private final CivicDatabase database;
     private final Clock clock;
-    private final Duration approvalLifetime;
     private final WithdrawalApprovalPolicyRegistry policies;
 
     public TreasuryWithdrawalApprovalRegistry(CivicDatabase database, Clock clock) {
-        this(database, clock, DEFAULT_APPROVAL_LIFETIME);
-    }
-
-    public TreasuryWithdrawalApprovalRegistry(
-            CivicDatabase database, Clock clock, Duration approvalLifetime) {
         if (database == null || clock == null) {
             throw new IllegalArgumentException(
                     "Treasury Withdrawal approval dependencies cannot be null");
         }
         this.database = database;
         this.clock = clock;
-        if (approvalLifetime == null || approvalLifetime.isNegative()
-                || approvalLifetime.isZero()) {
-            throw new IllegalArgumentException(
-                    "Treasury Withdrawal approval lifetime must be positive");
-        }
-        this.approvalLifetime = approvalLifetime;
         this.policies = new WithdrawalApprovalPolicyRegistry(database, clock);
     }
 
@@ -61,7 +47,7 @@ public final class TreasuryWithdrawalApprovalRegistry {
                 request.actorPlayerId(),
                 "Initiated Treasury Withdrawal",
                 clock.millis(),
-                Math.addExact(clock.millis(), approvalLifetime.toMillis())));
+                Math.addExact(clock.millis(), policy.approvalLifetime().toMillis())));
     }
 
     public TreasuryWithdrawalApproval approve(ApproveTreasuryWithdrawal request) {

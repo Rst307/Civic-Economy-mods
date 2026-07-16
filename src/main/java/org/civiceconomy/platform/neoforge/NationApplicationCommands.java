@@ -311,6 +311,7 @@ final class NationApplicationCommands {
                         context.getSource(),
                         StringArgumentType.getString(context, "requestId"),
                         LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                        LongArgumentType.getLong(context, "approvalLifetimeMillis"),
                         LongArgumentType.getLong(context, "thresholdMinorUnits"),
                         IntegerArgumentType.getInteger(context, "requiredApprovals"),
                         StringArgumentType.getString(context, "reason")));
@@ -320,9 +321,12 @@ final class NationApplicationCommands {
         var threshold = Commands.argument(
                         "thresholdMinorUnits", LongArgumentType.longArg(0L))
                 .then(required);
+        var lifetime = Commands.argument(
+                        "approvalLifetimeMillis", LongArgumentType.longArg(1L))
+                .then(threshold);
         var effective = Commands.argument(
                         "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
-                .then(threshold);
+                .then(lifetime);
         var request = Commands.argument("requestId", StringArgumentType.word())
                 .then(effective);
         return Commands.literal("policy")
@@ -422,13 +426,7 @@ final class NationApplicationCommands {
     }
 
     static String formatWithdrawalPolicy(WithdrawalApprovalPolicyVersion policy) {
-        return "Withdrawal Approval Policy " + policy.policyId()
-                + " nation=" + policy.nationId().value()
-                + " effectiveAt=" + policy.effectiveAt()
-                + " actor=" + policy.actorPlayerId()
-                + " reason=\"" + policy.reason() + "\""
-                + " tiers=" + policy.tiers()
-                + (policy.defaultPolicy() ? " [CONSERVATIVE DEFAULT]" : "");
+        return WithdrawalApprovalPolicyFormatter.format(policy);
     }
 
     static String formatWithdrawalApprovalStatus(
@@ -535,6 +533,7 @@ final class NationApplicationCommands {
             CommandSourceStack source,
             String requestId,
             long effectiveAtEpochMillis,
+            long approvalLifetimeMillis,
             long thresholdMinorUnits,
             int requiredApprovals,
             String reason)
@@ -544,6 +543,7 @@ final class NationApplicationCommands {
                 .scheduleWithdrawalApprovalPolicy(
                         player,
                         requestId,
+                        approvalLifetimeMillis,
                         thresholdMinorUnits,
                         requiredApprovals,
                         effectiveAtEpochMillis,
@@ -557,6 +557,8 @@ final class NationApplicationCommands {
                                         "Scheduled Withdrawal Approval Policy "
                                                 + policy.policyId()
                                                 + " effectiveAt=" + policy.effectiveAt()
+                                                + " approvalLifetime="
+                                                + policy.approvalLifetime()
                                                 + " tiers=" + policy.tiers()),
                                 true);
                     }

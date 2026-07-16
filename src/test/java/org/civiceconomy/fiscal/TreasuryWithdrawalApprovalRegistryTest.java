@@ -91,6 +91,31 @@ class TreasuryWithdrawalApprovalRegistryTest {
     }
 
     @Test
+    void requestPinsApprovalLifetimeFromThePolicyActiveAtInitiation() {
+        Instant laterEffectiveAt = EFFECTIVE_AT.plus(Duration.ofDays(1L));
+        try (CivicDatabase database = database()) {
+            registerNation(database);
+            schedulePolicy(database, 2, Duration.ofDays(3L), EFFECTIVE_AT);
+
+            TreasuryWithdrawalApproval first = approvals(database, EFFECTIVE_AT)
+                    .initiate(request("withdraw-three-day-expiry", 700L));
+
+            assertEquals(EFFECTIVE_AT.plus(Duration.ofDays(3L)), first.expiresAt());
+
+            schedulePolicy(database, 2, Duration.ofDays(10L), laterEffectiveAt);
+            TreasuryWithdrawalApproval second = approvals(database, laterEffectiveAt)
+                    .initiate(request("withdraw-ten-day-expiry", 700L));
+
+            assertEquals(
+                    laterEffectiveAt.plus(Duration.ofDays(10L)), second.expiresAt());
+            assertEquals(
+                    EFFECTIVE_AT.plus(Duration.ofDays(3L)),
+                    approvals(database, laterEffectiveAt).find(first.approvalRequestId())
+                            .expiresAt());
+        }
+    }
+
+    @Test
     void initiationReplayCannotChangeBoundWithdrawalPayload() {
         try (CivicDatabase database = database()) {
             registerNation(database);
@@ -186,10 +211,7 @@ class TreasuryWithdrawalApprovalRegistryTest {
             registerNation(database);
             schedulePolicy(database, 2, EFFECTIVE_AT);
             TreasuryWithdrawalApprovalRegistry approvals =
-                    new TreasuryWithdrawalApprovalRegistry(
-                            database,
-                            Clock.fixed(EFFECTIVE_AT, ZoneOffset.UTC),
-                            lifetime);
+                    approvals(database, EFFECTIVE_AT);
 
             pending = approvals.initiate(request("withdraw-expiring", 700L));
 
@@ -199,11 +221,7 @@ class TreasuryWithdrawalApprovalRegistryTest {
 
         Instant expiredAt = expiresAt.plusMillis(1L);
         try (CivicDatabase reopened = database()) {
-            TreasuryWithdrawalApprovalRegistry approvals =
-                    new TreasuryWithdrawalApprovalRegistry(
-                            reopened,
-                            Clock.fixed(expiredAt, ZoneOffset.UTC),
-                            lifetime);
+            TreasuryWithdrawalApprovalRegistry approvals = approvals(reopened, expiredAt);
 
             TreasuryWithdrawalApproval expired = approvals.expirePending().getFirst();
 
@@ -298,14 +316,24 @@ class TreasuryWithdrawalApprovalRegistryTest {
     }
 
     private void schedulePolicy(CivicDatabase database, int required, Instant effectiveAt) {
+        schedulePolicy(database, required, Duration.ofDays(7L), effectiveAt);
+    }
+
+    private void schedulePolicy(
+            CivicDatabase database,
+            int required,
+            Duration approvalLifetime,
+            Instant effectiveAt) {
         new WithdrawalApprovalPolicyRegistry(
                         database, Clock.fixed(SCHEDULED_AT, ZoneOffset.UTC))
                 .schedule(new ScheduleWithdrawalApprovalPolicy(
                         new ServiceIdentity("civiceconomy-withdrawal-governance"),
-                        "policy-" + required,
+                        "policy-" + required + "-" + approvalLifetime.toMillis()
+                                + "-" + effectiveAt.toEpochMilli(),
                         NATION_ID,
                         INITIATOR,
                         List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, required)),
+                        approvalLifetime,
                         effectiveAt,
                         "Withdrawal policy requiring " + required + " approvers"));
     }

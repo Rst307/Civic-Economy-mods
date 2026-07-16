@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashSet;
@@ -332,6 +333,7 @@ class TreasuryWithdrawalCoordinatorTest {
                             NATION,
                             ACTOR,
                             List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 2)),
+                            Duration.ofDays(7L),
                             NOW.minusSeconds(86_400L),
                             "Require two Treasury officers"));
             TreasuryWithdrawalCoordinator coordinator = coordinator(
@@ -391,6 +393,7 @@ class TreasuryWithdrawalCoordinatorTest {
                             NATION,
                             ACTOR,
                             List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 2)),
+                            Duration.ofDays(7L),
                             NOW.minusSeconds(86_400L),
                             "Require two approvers before restart"));
             TreasuryWithdrawalApprovalPendingException pending = assertThrows(

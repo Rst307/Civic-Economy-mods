@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -37,6 +38,7 @@ class WithdrawalApprovalPolicyRegistryTest {
                         new WithdrawalApprovalTier(MoneyAmount.ZERO, 1),
                         new WithdrawalApprovalTier(MoneyAmount.ofMinorUnits(500L), 2),
                         new WithdrawalApprovalTier(MoneyAmount.ofMinorUnits(2_000L), 3)),
+                Duration.ofDays(3L),
                 EFFECTIVE_AT,
                 "Require additional approval for larger cash withdrawals");
 
@@ -63,10 +65,14 @@ class WithdrawalApprovalPolicyRegistryTest {
                     3,
                     policies.current(NATION_ID, EFFECTIVE_AT)
                             .requiredApprovals(MoneyAmount.ofMinorUnits(2_000L)));
+            assertEquals(
+                    Duration.ofDays(3L),
+                    policies.current(NATION_ID, EFFECTIVE_AT).approvalLifetime());
         }
 
         try (CivicDatabase reopened = database()) {
             assertEquals(scheduled, registry(reopened).current(NATION_ID, EFFECTIVE_AT));
+            assertEquals(Duration.ofDays(3L), scheduled.approvalLifetime());
         }
     }
 
@@ -78,6 +84,7 @@ class WithdrawalApprovalPolicyRegistryTest {
                 NATION_ID,
                 ACTOR,
                 List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 2)),
+                Duration.ofDays(7L),
                 EFFECTIVE_AT,
                 "Two approvers");
 
@@ -94,6 +101,18 @@ class WithdrawalApprovalPolicyRegistryTest {
                             request.nationId(),
                             request.actorPlayerId(),
                             List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 3)),
+                            request.approvalLifetime(),
+                            request.effectiveAt(),
+                            request.reason())));
+            assertThrows(
+                    IdempotencyConflictException.class,
+                    () -> policies.schedule(new ScheduleWithdrawalApprovalPolicy(
+                            request.serviceIdentity(),
+                            request.requestId(),
+                            request.nationId(),
+                            request.actorPlayerId(),
+                            request.tiers(),
+                            Duration.ofDays(8L),
                             request.effectiveAt(),
                             request.reason())));
             assertThrows(
@@ -104,8 +123,20 @@ class WithdrawalApprovalPolicyRegistryTest {
                             request.nationId(),
                             request.actorPlayerId(),
                             request.tiers(),
+                            request.approvalLifetime(),
                             NOW,
                             request.reason())));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new ScheduleWithdrawalApprovalPolicy(
+                            request.serviceIdentity(),
+                            "zero-lifetime",
+                            request.nationId(),
+                            request.actorPlayerId(),
+                            request.tiers(),
+                            Duration.ZERO,
+                            request.effectiveAt(),
+                            request.reason()));
         }
     }
 

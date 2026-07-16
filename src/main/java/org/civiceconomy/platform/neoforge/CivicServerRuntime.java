@@ -842,6 +842,7 @@ public final class CivicServerRuntime {
     CompletableFuture<WithdrawalApprovalPolicyVersion> scheduleWithdrawalApprovalPolicy(
             ServerPlayer actor,
             String requestId,
+            long approvalLifetimeMillis,
             long thresholdMinorUnits,
             int requiredApprovals,
             long effectiveAtEpochMillis,
@@ -883,6 +884,7 @@ public final class CivicServerRuntime {
                                     nation.nationId(),
                                     actorPlayerId,
                                     tiers,
+                                    java.time.Duration.ofMillis(approvalLifetimeMillis),
                                     Instant.ofEpochMilli(effectiveAtEpochMillis),
                                     reason));
                 }));

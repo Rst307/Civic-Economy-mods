@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -67,7 +68,7 @@ class CivicDatabaseV56MigrationTest {
         downgradeToV55(databaseFile);
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(60, migrated.schemaVersion());
+            assertEquals(61, migrated.schemaVersion());
             assertNotNull(migrated.nationFiscalPermissionGrant(GRANT_ID));
             assertNotNull(migrated.nationFiscalPermissionRevocation(GRANT_ID));
             migrated.grantNationFiscalPermission(
@@ -91,6 +92,7 @@ class CivicDatabaseV56MigrationTest {
                                     new WithdrawalApprovalTier(MoneyAmount.ZERO, 1),
                                     new WithdrawalApprovalTier(
                                             MoneyAmount.ofMinorUnits(500L), 2)),
+                            Duration.ofDays(7L),
                             NOW.plusSeconds(86_400L),
                             "New v56 Withdrawal Approval Policy"));
             assertEquals(2, policy.requiredApprovals(MoneyAmount.ofMinorUnits(500L)));

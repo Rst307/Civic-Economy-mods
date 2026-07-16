@@ -25,7 +25,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 60;
+    private static final int SCHEMA_VERSION = 61;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -7112,6 +7112,7 @@ public final class CivicDatabase implements AutoCloseable {
             UUID nationId,
             UUID actorPlayerId,
             List<StoredWithdrawalApprovalTier> tiers,
+            long approvalLifetimeMillis,
             long effectiveAtEpochMillis,
             String reason,
             long recordedAtEpochMillis) {
@@ -7120,9 +7121,9 @@ public final class CivicDatabase implements AutoCloseable {
             try (PreparedStatement insertPolicy = connection.prepareStatement("""
                     INSERT INTO withdrawal_approval_policy (
                         policy_id, service_identity, request_id, nation_id,
-                        actor_player_id, effective_at_epoch_millis, reason,
-                        recorded_at_epoch_millis
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        actor_player_id, approval_lifetime_millis,
+                        effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """);
                     PreparedStatement insertTier = connection.prepareStatement("""
                     INSERT INTO withdrawal_approval_policy_tier (
@@ -7134,9 +7135,10 @@ public final class CivicDatabase implements AutoCloseable {
                 insertPolicy.setString(3, requestId);
                 insertPolicy.setString(4, nationId.toString());
                 insertPolicy.setString(5, actorPlayerId.toString());
-                insertPolicy.setLong(6, effectiveAtEpochMillis);
-                insertPolicy.setString(7, reason);
-                insertPolicy.setLong(8, recordedAtEpochMillis);
+                insertPolicy.setLong(6, approvalLifetimeMillis);
+                insertPolicy.setLong(7, effectiveAtEpochMillis);
+                insertPolicy.setString(8, reason);
+                insertPolicy.setLong(9, recordedAtEpochMillis);
                 insertPolicy.executeUpdate();
                 for (StoredWithdrawalApprovalTier tier : tiers) {
                     insertTier.setString(1, policyId.toString());
@@ -12000,6 +12002,18 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 60");
             }
+            if (version < 61) {
+                if (!tableHasColumn(
+                        "withdrawal_approval_policy", "approval_lifetime_millis")) {
+                    statement.execute("""
+                            ALTER TABLE withdrawal_approval_policy
+                            ADD COLUMN approval_lifetime_millis INTEGER NOT NULL
+                                DEFAULT 604800000
+                                CHECK (approval_lifetime_millis > 0)
+                            """);
+                }
+                statement.execute("PRAGMA user_version = 61");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -12300,6 +12314,7 @@ public final class CivicDatabase implements AutoCloseable {
                     UUID.fromString(result.getString("nation_id")),
                     UUID.fromString(result.getString("actor_player_id")),
                     tiers,
+                    result.getLong("approval_lifetime_millis"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));

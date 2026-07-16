@@ -1,5 +1,6 @@
 package org.civiceconomy.fiscal;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -9,6 +10,7 @@ public record WithdrawalApprovalPolicyVersion(
         UUID policyId,
         NationId nationId,
         List<WithdrawalApprovalTier> tiers,
+        Duration approvalLifetime,
         Instant effectiveAt,
         UUID actorPlayerId,
         String reason,
@@ -20,11 +22,16 @@ public record WithdrawalApprovalPolicyVersion(
     public WithdrawalApprovalPolicyVersion {
         if (policyId == null
                 || nationId == null
+                || approvalLifetime == null
                 || effectiveAt == null
                 || actorPlayerId == null
                 || recordedAt == null) {
             throw new IllegalArgumentException(
                     "Withdrawal approval policy cannot contain null values");
+        }
+        if (approvalLifetime.isNegative() || approvalLifetime.isZero()) {
+            throw new IllegalArgumentException(
+                    "Withdrawal approval lifetime must be positive");
         }
         if (reason == null || reason.isBlank()) {
             throw new IllegalArgumentException("Withdrawal approval policy reason cannot be blank");
@@ -51,6 +58,7 @@ public record WithdrawalApprovalPolicyVersion(
                 DEFAULT_POLICY_ID,
                 nationId,
                 List.of(new WithdrawalApprovalTier(MoneyAmount.ZERO, 1)),
+                Duration.ofDays(7L),
                 Instant.EPOCH,
                 DEFAULT_ACTOR_ID,
                 "civiceconomy-default-single-approval",
