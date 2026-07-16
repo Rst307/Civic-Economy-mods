@@ -7233,6 +7233,39 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredBudgetDisbursementApprovalPolicy>
+            budgetDisbursementApprovalPolicies(UUID nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement Approval Policy Nation cannot be null");
+        }
+        List<String[]> requests = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT service_identity, request_id
+                FROM budget_disbursement_approval_policy
+                WHERE nation_id = ?
+                ORDER BY effective_at_epoch_millis,
+                         recorded_at_epoch_millis,
+                         policy_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    requests.add(new String[] {
+                        result.getString("service_identity"),
+                        result.getString("request_id")
+                    });
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Budget Disbursement Approval Policy history", failure);
+        }
+        return requests.stream()
+                .map(request -> budgetDisbursementApprovalPolicy(request[0], request[1]))
+                .toList();
+    }
+
     public synchronized StoredBudgetDisbursementApprovalPolicy
             scheduleBudgetDisbursementApprovalPolicy(
                     UUID policyId,
@@ -7317,6 +7350,35 @@ public final class CivicDatabase implements AutoCloseable {
             throw new IllegalStateException(
                     "Unable to read Budget Disbursement approval", failure);
         }
+    }
+
+    public synchronized List<StoredBudgetDisbursementApproval>
+            budgetDisbursementApprovals(UUID nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement approval Nation cannot be null");
+        }
+        List<UUID> approvalRequestIds = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT approval_request_id
+                FROM budget_disbursement_approval_request
+                WHERE nation_id = ?
+                ORDER BY initiated_at_epoch_millis DESC, approval_request_id DESC
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    approvalRequestIds.add(
+                            UUID.fromString(result.getString("approval_request_id")));
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list Nation Budget Disbursement approvals", failure);
+        }
+        return approvalRequestIds.stream()
+                .map(this::budgetDisbursementApproval)
+                .toList();
     }
 
     public synchronized StoredBudgetDisbursementApproval budgetDisbursementApprovalVote(

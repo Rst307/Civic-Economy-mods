@@ -27,6 +27,7 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.Budget;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalOutcome;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalPolicyVersion;
+import org.civiceconomy.fiscal.BudgetDisbursementApprovalStatus;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
@@ -204,6 +205,12 @@ final class NationApplicationCommands {
                                                 StringArgumentType.getString(
                                                         context, "reason"))))));
         var policy = Commands.literal("policy")
+                .then(Commands.literal("status")
+                        .executes(context -> budgetDisbursementPolicyStatus(
+                                context.getSource())))
+                .then(Commands.literal("history")
+                        .executes(context -> budgetDisbursementPolicyHistory(
+                                context.getSource())))
                 .then(Commands.literal("schedule")
                         .then(Commands.argument("requestId", StringArgumentType.word())
                                 .then(Commands.argument(
@@ -243,9 +250,19 @@ final class NationApplicationCommands {
                                                                                         StringArgumentType.getString(
                                                                                                 context,
                                                                                                 "reason"))))))))));
+        var approval = Commands.literal("approval")
+                .then(Commands.literal("list")
+                        .executes(context -> listBudgetDisbursementApprovals(
+                                context.getSource())))
+                .then(Commands.literal("status")
+                        .then(Commands.argument("approvalId", UuidArgument.uuid())
+                                .executes(context -> budgetDisbursementApprovalStatus(
+                                        context.getSource(),
+                                        UuidArgument.getUuid(context, "approvalId")))));
         return Commands.literal("disbursement")
                 .then(request)
                 .then(approve)
+                .then(approval)
                 .then(policy);
     }
 
@@ -416,6 +433,90 @@ final class NationApplicationCommands {
         return Command.SINGLE_SUCCESS;
     }
 
+    private static int budgetDisbursementPolicyStatus(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .budgetDisbursementApprovalPolicy(player)
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement approval policy status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatDisbursementPolicy(policy)), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement policy status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int budgetDisbursementPolicyHistory(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .budgetDisbursementApprovalPolicyHistory(player)
+                .whenComplete((policies, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement approval policy history", failure);
+                    } else {
+                        String result = policies.isEmpty()
+                                ? "No Budget Disbursement Approval Policy versions exist for your Nation"
+                                : policies.stream()
+                                        .map(NationApplicationCommands::formatDisbursementPolicy)
+                                        .collect(Collectors.joining("; "));
+                        source.sendSuccess(() -> Component.literal(result), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement policy history queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listBudgetDisbursementApprovals(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .budgetDisbursementApprovalStatuses(player)
+                .whenComplete((statuses, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement approval list", failure);
+                    } else {
+                        String result = statuses.isEmpty()
+                                ? "No Budget Disbursement approvals exist for your current Nation"
+                                : statuses.stream()
+                                        .limit(20)
+                                        .map(NationApplicationCommands::formatDisbursementApprovalStatus)
+                                        .collect(Collectors.joining("; "));
+                        source.sendSuccess(() -> Component.literal(result), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement approval list queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int budgetDisbursementApprovalStatus(
+            CommandSourceStack source, UUID approvalRequestId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .budgetDisbursementApprovalStatus(player, approvalRequestId)
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Budget Disbursement approval status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        formatDisbursementApprovalStatus(status)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Budget Disbursement approval status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
     private static String formatDisbursementOutcome(
             BudgetDisbursementApprovalOutcome outcome) {
         var approval = outcome.approval();
@@ -439,6 +540,34 @@ final class NationApplicationCommands {
                 + " tiers=" + policy.tiers()
                 + " lifetimeMillis=" + policy.approvalLifetime().toMillis()
                 + " effectiveAt=" + policy.effectiveAt();
+    }
+
+    static String formatDisbursementApprovalStatus(
+            BudgetDisbursementApprovalStatus status) {
+        var approval = status.approval();
+        String votes = approval.votes().stream()
+                .map(vote -> vote.approverPlayerId()
+                        + "@" + vote.approvedAt()
+                        + " reason=\"" + vote.reason() + "\"")
+                .collect(Collectors.joining(", "));
+        return "Budget Disbursement Approval " + approval.approvalRequestId()
+                + " state=" + approval.state()
+                + " canApprove=" + status.canApprove()
+                + " nation=" + approval.nationId().value()
+                + " budget=" + approval.budgetId()
+                + " recipient=" + approval.recipientAccount().value()
+                + " amount=" + approval.amount().minorUnits()
+                + " initiator=" + approval.actorPlayerId()
+                + " reason=\"" + approval.reason() + "\""
+                + " policy=" + approval.policyId()
+                + " approvals=" + approval.approverPlayerIds().size()
+                + "/" + approval.requiredApprovals()
+                + " initiatedAt=" + approval.initiatedAt()
+                + " expiresAt=" + approval.expiresAt()
+                + " approvedAt=" + approval.approvedAt()
+                + " executedAt=" + approval.executedAt()
+                + " expiredAt=" + approval.expiredAt()
+                + " votes=[" + votes + "]";
     }
 
     private static int listNationBudgets(CommandSourceStack source)

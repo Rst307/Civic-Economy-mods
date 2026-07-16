@@ -114,6 +114,10 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation budget approve <budgetId> <requestId> <reason>
 /civic economy nation budget disbursement request <budgetId> <requestId> <recipientUuid> <amountMinorUnits> <reason>
 /civic economy nation budget disbursement approve <approvalId> <requestId> <reason>
+/civic economy nation budget disbursement approval list
+/civic economy nation budget disbursement approval status <approvalId>
+/civic economy nation budget disbursement policy status
+/civic economy nation budget disbursement policy history
 /civic economy nation budget disbursement policy schedule <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <thresholdMinorUnits> <requiredApprovals> <reason>
 /civic economy nation budget cancel <budgetId> <requestId> <reason>
 /civic economy nation budget list
@@ -157,6 +161,10 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 `nation budget disbursement request` 允许具有本国 `INITIATE_PAYMENT` 的 effective Citizen 从一个本国已批准 Budget 发起精确拨款。服务端从真实玩家、FTB Team、Citizenship/Nation 和持久化 Budget 派生 National Treasury，只接受收款玩家 UUID、正金额、稳定 request ID 和理由；审批对象固定 Budget、收款账户、金额、发起人、政策版本、所需人数和到期时间。多个活动审批不能累计超过 Budget 的未结算 Reservation 余量。发起人自动投第一票；若固定门槛为一人，系统立即进入既有 SQLite `PREPARED` → 服务器线程真实 LC 转账 → SQLite `CIVIC_COMMITTED` 路径，并原子推进 Reservation、Escrow、Budget 与审批 `EXECUTED`。重放与恢复复用同一 Payment UUID，不会再次扣款。
 
 `nation budget disbursement approve` 允许另一名具有同一 Nation `APPROVE_PAYMENT` 的 effective Citizen 为仍为 `PENDING` 的精确审批投票；同一 Citizen 不能重复计票，达到发起时固定的人数后才会创建 Payment。`PENDING` 审批到期时由后台 SQLite 扫描转为 `EXPIRED`，不会创建 Payment 或调用 LC，并释放其占用的 Budget 授权容量。
+
+`nation budget disbursement approval list|status` 从真实命令玩家的 effective Citizenship 派生 Nation，并额外要求该 Nation 的精确 `APPROVE_PAYMENT`。列表只返回本国审批并按发起时间和审批 UUID 倒序稳定排列；foreign 与 unknown 审批 UUID 使用同一失败路径。状态显示固定的 Budget、收款账户、金额、发起人、理由、策略版本、所需人数、逐票操作者/理由/时间、到期与执行证据，以及当前玩家是否仍可投票。读取不会创建 Payment、投票、移动 LC 或推进审批/Budget 状态。
+
+`nation budget disbursement policy status|history` 只要求真实玩家拥有 effective Citizenship，并从服务端派生其 Nation。状态返回查询时刻生效的策略；历史按生效时间、记录时间和策略 UUID 稳定排列，包含当前和未来版本、金额门槛、审批人数、有效期、操作者、理由与时间。读取不会激活未来策略或产生 SQLite 写入。
 
 `nation budget disbursement policy schedule` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`，并只允许未来生效、正数审批有效期和 1–16 名审批人。`thresholdMinorUnits=0` 表示所有拨款使用指定人数；正阈值表示低于阈值保持单人、达到或超过阈值使用指定人数。策略版本、操作者、理由、生效时间和门槛持久化审计；每个新审批只固定创建时生效的版本，后续策略不能改写旧审批。
 

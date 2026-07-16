@@ -536,6 +536,35 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Budget command actions");
         helper.assertValueEqual(
+                Set.of("request", "approve", "approval", "policy"),
+                economy.getChild("nation")
+                        .getChild("budget")
+                        .getChild("disbursement")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Budget Disbursement command actions");
+        helper.assertValueEqual(
+                Set.of("list", "status"),
+                economy.getChild("nation")
+                        .getChild("budget")
+                        .getChild("disbursement")
+                        .getChild("approval")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Budget Disbursement approval inspection actions");
+        helper.assertValueEqual(
+                Set.of("status", "history", "schedule"),
+                economy.getChild("nation")
+                        .getChild("budget")
+                        .getChild("disbursement")
+                        .getChild("policy")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Budget Disbursement policy actions");
+        helper.assertValueEqual(
                 Set.of("issue", "list", "status"),
                 economy.getChild("nation")
                         .getChild("bill")
@@ -1150,6 +1179,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean approvalCommandStarted = new AtomicBoolean();
         AtomicBoolean disbursementCommandStarted = new AtomicBoolean();
+        AtomicBoolean disbursementInspectionCommandsStarted = new AtomicBoolean();
         AtomicBoolean cancellationCommandStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
@@ -1276,6 +1306,14 @@ public final class CivicServerRuntimeGameTests {
                                     actor.getUUID(),
                                     NationFiscalPermission.INITIATE_PAYMENT,
                                     "Authorize real player Budget Disbursement"));
+                            authorities.grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "budget-disbursement-inspection-authority-" + UUID.randomUUID(),
+                                    nationId.get(),
+                                    actor.getUUID(),
+                                    actor.getUUID(),
+                                    NationFiscalPermission.APPROVE_PAYMENT,
+                                    "Authorize Budget Disbursement approval inspection"));
                             return null;
                         })
                         .whenComplete((ignored, failure) -> {
@@ -1545,6 +1583,71 @@ public final class CivicServerRuntimeGameTests {
                             100L,
                             playerBankBalance(recipientPlayerId),
                             "Budget Disbursement credits real LC recipient once");
+                })
+                .thenExecute(() -> {
+                    try {
+                        BudgetDisbursementRow disbursement = budgetDisbursementByRequest(
+                                databaseFile, disbursementRequestId);
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation budget disbursement policy status",
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement policy status command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation budget disbursement policy history",
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement policy history command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation budget disbursement approval list",
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement approval list command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation budget disbursement approval status "
+                                                + disbursement.approvalRequestId(),
+                                        actor.createCommandSourceStack().withSuppressedOutput()),
+                                "Budget Disbursement approval status command result");
+                        disbursementInspectionCommandsStarted.set(true);
+                    } catch (Throwable failure) {
+                        asyncFailure.set(failure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(
+                            helper, asyncFailure, "Budget Disbursement inspection commands");
+                    helper.assertTrue(
+                            disbursementInspectionCommandsStarted.get(),
+                            "Budget Disbursement inspection commands started");
+                    BudgetRow budget = budgetByRequest(databaseFile, requestId);
+                    BudgetDisbursementRow disbursement = budgetDisbursementByRequest(
+                            databaseFile, disbursementRequestId);
+                    helper.assertValueEqual(
+                            "PARTIALLY_SPENT", budget.state(), "inspection preserves Budget state");
+                    helper.assertValueEqual(
+                            100L, budget.settledMinorUnits(), "inspection preserves settled amount");
+                    helper.assertValueEqual(
+                            "EXECUTED",
+                            disbursement.approvalState(),
+                            "inspection preserves approval state");
+                    helper.assertValueEqual(
+                            1, disbursement.paymentCount(), "inspection creates no Payment");
+                    helper.assertValueEqual(
+                            900L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(budget.sourceAccount()))
+                                    .minorUnits(),
+                            "inspection does not move Treasury LC");
+                    helper.assertValueEqual(
+                            100L,
+                            playerBankBalance(recipientPlayerId),
+                            "inspection does not move recipient LC");
                 })
                 .thenExecute(() -> {
                     try {
@@ -5820,8 +5923,9 @@ public final class CivicServerRuntimeGameTests {
             Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
                 var query = connection.prepareStatement("""
-                        SELECT approval.budget_id, approval.recipient_account,
-                               approval.amount_minor_units, approval.state,
+                        SELECT approval.approval_request_id, approval.budget_id,
+                               approval.recipient_account, approval.amount_minor_units,
+                               approval.state,
                                payment.state,
                                (SELECT COUNT(*) FROM payment_transaction counted
                                 WHERE counted.service_identity = approval.service_identity
@@ -5838,11 +5942,12 @@ public final class CivicServerRuntimeGameTests {
                 return result.next()
                         ? new BudgetDisbursementRow(
                                 UUID.fromString(result.getString(1)),
-                                result.getString(2),
-                                result.getLong(3),
-                                result.getString(4),
+                                UUID.fromString(result.getString(2)),
+                                result.getString(3),
+                                result.getLong(4),
                                 result.getString(5),
-                                result.getInt(6))
+                                result.getString(6),
+                                result.getInt(7))
                         : null;
             }
         } catch (SQLException failure) {
@@ -6090,6 +6195,7 @@ public final class CivicServerRuntimeGameTests {
     private record BudgetApprovalRow(UUID actorPlayerId, String reason) {}
 
     private record BudgetDisbursementRow(
+            UUID approvalRequestId,
             UUID budgetId,
             String recipientAccount,
             long amountMinorUnits,

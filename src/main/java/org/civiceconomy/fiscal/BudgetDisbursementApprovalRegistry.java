@@ -79,6 +79,31 @@ public final class BudgetDisbursementApprovalRegistry {
         return toApproval(stored);
     }
 
+    public BudgetDisbursementApproval findForNation(
+            UUID approvalRequestId, NationId nationId) {
+        if (approvalRequestId == null || nationId == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement approval lookup cannot contain null values");
+        }
+        StoredBudgetDisbursementApproval stored =
+                database.budgetDisbursementApproval(approvalRequestId);
+        if (stored == null || !stored.nationId().equals(nationId.value())) {
+            throw new SecurityException(
+                    "Budget Disbursement approval is unavailable for the current Nation");
+        }
+        return toApproval(stored);
+    }
+
+    public java.util.List<BudgetDisbursementApproval> listForNation(NationId nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement approval Nation cannot be null");
+        }
+        return database.budgetDisbursementApprovals(nationId.value()).stream()
+                .map(BudgetDisbursementApprovalRegistry::toApproval)
+                .toList();
+    }
+
     public BudgetDisbursementApproval approve(
             ApproveBudgetDisbursementApproval request) {
         StoredBudgetDisbursementApproval replay =

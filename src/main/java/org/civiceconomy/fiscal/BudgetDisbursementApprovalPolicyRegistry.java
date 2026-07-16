@@ -3,6 +3,7 @@ package org.civiceconomy.fiscal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -60,6 +61,16 @@ public final class BudgetDisbursementApprovalPolicyRegistry {
         return stored == null
                 ? BudgetDisbursementApprovalPolicyVersion.defaultPolicy(nationId)
                 : toPolicy(stored);
+    }
+
+    public List<BudgetDisbursementApprovalPolicyVersion> history(NationId nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Budget Disbursement Approval Policy Nation cannot be null");
+        }
+        return database.budgetDisbursementApprovalPolicies(nationId.value()).stream()
+                .map(BudgetDisbursementApprovalPolicyRegistry::toPolicy)
+                .toList();
     }
 
     private static void requirePayload(
