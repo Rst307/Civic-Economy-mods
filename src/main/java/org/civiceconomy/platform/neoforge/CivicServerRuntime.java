@@ -901,6 +901,17 @@ public final class CivicServerRuntime {
                                 .currentPolicy(actorPlayerId)));
     }
 
+    CompletableFuture<List<WithdrawalApprovalPolicyVersion>> withdrawalApprovalPolicyHistory(
+            ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database ->
+                        withdrawalInspection(database, team, commandClock)
+                                .policyHistory(actorPlayerId)));
+    }
+
     CompletableFuture<List<TreasuryWithdrawalApprovalStatus>>
             withdrawalApprovalStatuses(ServerPlayer actor) {
         RuntimeState current = requireState();

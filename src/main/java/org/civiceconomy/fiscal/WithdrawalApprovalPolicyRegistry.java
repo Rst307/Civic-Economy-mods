@@ -2,6 +2,7 @@ package org.civiceconomy.fiscal;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -60,6 +61,16 @@ public final class WithdrawalApprovalPolicyRegistry {
         return stored == null
                 ? WithdrawalApprovalPolicyVersion.defaultPolicy(nationId)
                 : toPolicy(stored);
+    }
+
+    public List<WithdrawalApprovalPolicyVersion> history(NationId nationId) {
+        if (nationId == null) {
+            throw new IllegalArgumentException(
+                    "Withdrawal approval policy Nation cannot be null");
+        }
+        return database.withdrawalApprovalPolicies(nationId.value()).stream()
+                .map(WithdrawalApprovalPolicyRegistry::toPolicy)
+                .toList();
     }
 
     private static void requirePayload(

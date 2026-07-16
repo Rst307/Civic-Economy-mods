@@ -333,6 +333,9 @@ final class NationApplicationCommands {
                 .then(Commands.literal("status")
                         .executes(context -> treasuryWithdrawalPolicyStatus(
                                 context.getSource())))
+                .then(Commands.literal("history")
+                        .executes(context -> treasuryWithdrawalPolicyHistory(
+                                context.getSource())))
                 .then(Commands.literal("schedule").then(request));
     }
 
@@ -351,6 +354,29 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(
                 () -> Component.literal("Treasury Withdrawal approval policy status queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int treasuryWithdrawalPolicyHistory(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .withdrawalApprovalPolicyHistory(player)
+                .whenComplete((policies, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Treasury Withdrawal approval policy history", failure);
+                    } else {
+                        String result = policies.isEmpty()
+                                ? "No Withdrawal Approval Policy versions exist for your Nation"
+                                : policies.stream()
+                                        .map(WithdrawalApprovalPolicyFormatter::format)
+                                        .collect(Collectors.joining("; "));
+                        source.sendSuccess(() -> Component.literal(result), false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Treasury Withdrawal approval policy history queued"),
                 false);
         return Command.SINGLE_SUCCESS;
     }

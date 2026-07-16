@@ -573,7 +573,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Treasury Withdrawal approval actions");
         helper.assertValueEqual(
-                Set.of("schedule", "status"),
+                Set.of("schedule", "status", "history"),
                 economy.getChild("nation")
                         .getChild("treasury")
                         .getChild("withdraw")
@@ -2336,6 +2336,13 @@ public final class CivicServerRuntimeGameTests {
                                         initiator.createCommandSourceStack()
                                                 .withSuppressedOutput()),
                                 "Withdrawal policy status command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        "civic economy nation treasury withdraw policy history",
+                                        initiator.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Withdrawal policy history command result");
                         helper.assertValueEqual(
                                 1,
                                 dispatcher.execute(

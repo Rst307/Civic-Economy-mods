@@ -44,6 +44,10 @@ public final class TreasuryWithdrawalInspection {
         return policies.current(nationForCitizen(actorPlayerId), clock.instant());
     }
 
+    public List<WithdrawalApprovalPolicyVersion> policyHistory(UUID actorPlayerId) {
+        return policies.history(nationForCitizen(actorPlayerId));
+    }
+
     public List<TreasuryWithdrawalApprovalStatus> approvalStatuses(UUID actorPlayerId) {
         NationId nationId = authorizedApprovalNation(actorPlayerId);
         return approvals.listForNation(nationId).stream()

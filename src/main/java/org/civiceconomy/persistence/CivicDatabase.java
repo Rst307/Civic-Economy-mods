@@ -7105,6 +7105,35 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredWithdrawalApprovalPolicy> withdrawalApprovalPolicies(
+            UUID nationId) {
+        List<String[]> requests = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT service_identity, request_id
+                FROM withdrawal_approval_policy
+                WHERE nation_id = ?
+                ORDER BY effective_at_epoch_millis,
+                         recorded_at_epoch_millis,
+                         policy_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    requests.add(new String[] {
+                        result.getString("service_identity"),
+                        result.getString("request_id")
+                    });
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Withdrawal Approval Policy history", failure);
+        }
+        return requests.stream()
+                .map(request -> withdrawalApprovalPolicy(request[0], request[1]))
+                .toList();
+    }
+
     public synchronized StoredWithdrawalApprovalPolicy scheduleWithdrawalApprovalPolicy(
             UUID policyId,
             String serviceIdentity,

@@ -56,6 +56,17 @@ class TreasuryWithdrawalInspectionTest {
                     database, Clock.fixed(NOW.minus(Duration.ofDays(2)), ZoneOffset.UTC));
             WithdrawalApprovalPolicyVersion ownPolicy = policies.schedule(
                     policy("policy-one", fixtures.nationOne(), CITIZEN_ONE, 2));
+            WithdrawalApprovalPolicyVersion futurePolicy = policies.schedule(
+                    new ScheduleWithdrawalApprovalPolicy(
+                            new ServiceIdentity("civiceconomy-withdrawal-governance"),
+                            "policy-one-future",
+                            fixtures.nationOne(),
+                            CITIZEN_ONE,
+                            List.of(new WithdrawalApprovalTier(
+                                    MoneyAmount.ZERO, 3)),
+                            Duration.ofDays(3L),
+                            NOW.plus(Duration.ofDays(1L)),
+                            "Future inspection policy"));
             policies.schedule(policy("policy-two", fixtures.nationTwo(), CITIZEN_TWO, 3));
             TreasuryWithdrawalInspection inspection = new TreasuryWithdrawalInspection(
                     fixtures.provider(),
@@ -65,7 +76,11 @@ class TreasuryWithdrawalInspectionTest {
                     CLOCK);
 
             assertEquals(ownPolicy, inspection.currentPolicy(CITIZEN_ONE));
+            assertEquals(
+                    List.of(ownPolicy, futurePolicy),
+                    inspection.policyHistory(CITIZEN_ONE));
             assertThrows(SecurityException.class, () -> inspection.currentPolicy(OUTSIDER));
+            assertThrows(SecurityException.class, () -> inspection.policyHistory(OUTSIDER));
         }
     }
 

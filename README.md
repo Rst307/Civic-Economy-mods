@@ -122,6 +122,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 /civic economy nation treasury withdraw approval status <approvalRequestId>
 /civic economy nation treasury withdraw approval cancel <approvalRequestId> <requestId> <reason>
 /civic economy nation treasury withdraw policy status
+/civic economy nation treasury withdraw policy history
 /civic economy nation treasury withdraw policy schedule <requestId> <effectiveAtEpochMillis> <approvalLifetimeMillis> <thresholdMinorUnits> <requiredApprovals> <reason>
 /civic economy nation treasury destroy <requestId> <amountMinorUnits> <reason>
 /civic economy nation territory allowance
@@ -162,7 +163,7 @@ Mint 匹配世界进程重启演练使用同一 `run/world` 连续执行两轮�
 
 `withdraw policy schedule` 需要同一 Nation 的 `MANAGE_APPROVAL_POLICY`。策略只能未来生效，`approvalLifetimeMillis` 必须为正；`thresholdMinorUnits=0` 表示所有提现都需要指定人数，正阈值表示低于阈值保持单人、达到或超过阈值需要 `requiredApprovals`（1–16）名不同 Citizen。策略版本、操作者、门槛、人数、审批有效时长、生效时间和理由都会持久化审计；相同 request ID 改变任一字段会冲突。每个新审批只读取创建时生效的政策并固定计算出的到期时间，后续政策版本不会改写旧审批。
 
-`withdraw policy status` 只从真实玩家当前有效 Citizenship 推导 Nation，任何正式 Citizen 都可查看本国当前生效策略，不能提交 Nation 或账户作用域。`withdraw approval list|status` 进一步要求同一 Nation 的精确 `MANAGE_WITHDRAWAL`，只返回本国审批，并显示发起人、金额、策略、所需人数、每名审批人及其理由/时间、`PENDING`/`APPROVED`/`EXECUTED` 状态和当前玩家是否仍可审批；外部 Nation 的真实 approval UUID 也会失败关闭。OP/控制台的 `admin withdrawal recovery status` 只读取已批准但尚未创建 Operation 的决定及仍为 `PREPARED` 的 Operation，不会触发、准备或提交提现，自动恢复仍是唯一执行路径。
+`withdraw policy status|history` 只从真实玩家当前有效 Citizenship 推导 Nation，任何正式 Citizen 都可查看本国当前政策以及按生效时间排序的全部当前/未来版本，不能提交 Nation 或账户作用域；历史显示操作者、理由、层级、有效时长和时间戳，且不触发政策生效或任何写操作。`withdraw approval list|status` 进一步要求同一 Nation 的精确 `MANAGE_WITHDRAWAL`，只返回本国审批，并显示发起人、金额、策略、所需人数、每名审批人及其理由/时间、`PENDING`/`APPROVED`/`EXECUTED` 状态和当前玩家是否仍可审批；外部 Nation 的真实 approval UUID 也会失败关闭。OP/控制台的 `admin withdrawal recovery status` 只读取已批准但尚未创建 Operation 的决定及仍为 `PREPARED` 的 Operation，不会触发、准备或提交提现，自动恢复仍是唯一执行路径。
 
 每个新 Withdrawal Approval 固定其政策版本和由该版本 `approvalLifetime` 计算出的到期时间。未配置政策的 Nation 使用保守的单人审批、7 天默认值；schema v60 的既有政策在迁移时也回填 7 天。只有一直未达到人数的 `PENDING` 决定会由现有异步 Withdrawal recovery 扫描转为 `EXPIRED`；`APPROVED`、已有 Operation、`EXECUTED` 或已取消决定不会被到期器改写。
 
