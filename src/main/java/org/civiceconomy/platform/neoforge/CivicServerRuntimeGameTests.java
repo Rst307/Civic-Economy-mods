@@ -532,7 +532,7 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Fiscal Bill command actions");
         helper.assertValueEqual(
-                Set.of("list", "status"),
+                Set.of("list", "status", "fund"),
                 economy.getChild("bill").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -1144,6 +1144,7 @@ public final class CivicServerRuntimeGameTests {
         AtomicBoolean viewPermissionReady = new AtomicBoolean();
         AtomicBoolean inspectionReady = new AtomicBoolean();
         AtomicBoolean inspectionCommandsStarted = new AtomicBoolean();
+        AtomicBoolean fundingCommandsStarted = new AtomicBoolean();
         Path databaseFile = helper.getLevel()
                 .getServer()
                 .getWorldPath(LevelResource.ROOT)
@@ -1400,6 +1401,40 @@ public final class CivicServerRuntimeGameTests {
                             nationId.get(),
                             payerId,
                             dueAt);
+                })
+                .thenExecute(() -> seedPlayerBank(payerId, 1_000L))
+                .thenExecute(() -> helper.getLevel().getServer().execute(() -> {
+                    try {
+                        String command = "civic economy bill fund " + billId.get()
+                                + " fund-player-bill-" + billId.get();
+                        var dispatcher = helper.getLevel().getServer().getCommands().getDispatcher();
+                        int first = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        int replay = dispatcher.execute(
+                                command, payer.createCommandSourceStack().withSuppressedOutput());
+                        helper.assertValueEqual(1, first, "Fiscal Bill funding command result");
+                        helper.assertValueEqual(1, replay, "Fiscal Bill funding replay result");
+                        fundingCommandsStarted.set(true);
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                }))
+                .thenWaitUntil(() -> {
+                    assertNoAsyncFailure(helper, asyncFailure, "Fiscal Bill funding command");
+                    helper.assertTrue(
+                            fundingCommandsStarted.get(),
+                            "Fiscal Bill funding commands started");
+                    assertFundedFiscalBill(
+                            helper,
+                            databaseFile,
+                            billId.get(),
+                            payerId,
+                            "fund-player-bill-" + billId.get(),
+                            "nation:" + nationId.get().value() + ":treasury");
+                    helper.assertValueEqual(
+                            1_000L,
+                            playerBankBalance(payerId),
+                            "Fiscal Bill funding does not move LC");
                 })
                 .thenSucceed();
     }
@@ -4691,6 +4726,76 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect Fiscal Bill request", failure);
         }
+    }
+
+    private static void assertFundedFiscalBill(
+            GameTestHelper helper,
+            Path databaseFile,
+            UUID billId,
+            UUID payerId,
+            String fundingRequestId,
+            String beneficiaryAccount) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile);
+                var query = connection.prepareStatement("""
+                        SELECT b.state, b.funding_service_identity, b.funding_request_id,
+                               b.beneficiary_account, e.required_recipient_account,
+                               e.state, r.source_account, r.amount_minor_units, r.state,
+                               (SELECT COUNT(*) FROM fiscal_reservation
+                                WHERE service_identity = ? AND request_id = ?),
+                               (SELECT COUNT(*) FROM fiscal_escrow
+                                WHERE service_identity = ? AND request_id = ?)
+                        FROM fiscal_bill b
+                        JOIN fiscal_escrow e ON e.escrow_id = b.escrow_id
+                        JOIN fiscal_reservation r ON r.reservation_id = e.reservation_id
+                        WHERE b.bill_id = ?
+                        """)) {
+            String serviceIdentity = "civiceconomy-fiscal-bill-funding";
+            query.setString(1, serviceIdentity);
+            query.setString(2, fundingRequestId);
+            query.setString(3, serviceIdentity);
+            query.setString(4, fundingRequestId);
+            query.setString(5, billId.toString());
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "funded Fiscal Bill row");
+                helper.assertValueEqual("RESERVED", result.getString(1), "funded Bill state");
+                helper.assertValueEqual(
+                        serviceIdentity, result.getString(2), "funding service identity");
+                helper.assertValueEqual(
+                        fundingRequestId, result.getString(3), "funding request ID");
+                helper.assertValueEqual(
+                        beneficiaryAccount, result.getString(4), "persisted beneficiary");
+                helper.assertValueEqual(
+                        beneficiaryAccount, result.getString(5), "Escrow required recipient");
+                helper.assertValueEqual("RESERVED", result.getString(6), "Escrow state");
+                helper.assertValueEqual(
+                        "player:" + payerId, result.getString(7), "Reservation payer");
+                helper.assertValueEqual(300L, result.getLong(8), "Reservation amount");
+                helper.assertValueEqual("ACTIVE", result.getString(9), "Reservation state");
+                helper.assertValueEqual(1, result.getInt(10), "one funding Reservation");
+                helper.assertValueEqual(1, result.getInt(11), "one funding Escrow");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect funded Fiscal Bill", failure);
+        }
+    }
+
+    private static void seedPlayerBank(UUID playerId, long amountMinorUnits) {
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        var account = bankData.getAccount(playerId);
+        account.getMoneyStorage().clear();
+        if (!BankAPI.getApi().BankDepositFromServer(
+                account, CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, amountMinorUnits))) {
+            throw new IllegalStateException("Unable to seed Fiscal Bill payer LC account");
+        }
+    }
+
+    private static long playerBankBalance(UUID playerId) {
+        BankDataCache bankData = CustomSaveData.getData(BankDataCache.TYPE);
+        var unit = CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1L);
+        return bankData.getAccount(playerId)
+                .getMoneyStorage()
+                .valueOf(unit.getUniqueName())
+                .getCoreValue();
     }
 
     private static void assertIssuedFiscalBill(

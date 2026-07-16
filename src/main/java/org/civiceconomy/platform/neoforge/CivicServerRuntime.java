@@ -38,6 +38,7 @@ import org.civiceconomy.fiscal.FiscalBillExpiryProcessor;
 import org.civiceconomy.fiscal.FiscalAuthorization;
 import org.civiceconomy.fiscal.FiscalBill;
 import org.civiceconomy.fiscal.FiscalBillFiscalServiceProvisioner;
+import org.civiceconomy.fiscal.FiscalBillFundingCoordinator;
 import org.civiceconomy.fiscal.FiscalBillInspection;
 import org.civiceconomy.fiscal.FiscalBillKind;
 import org.civiceconomy.fiscal.FiscalLedger;
@@ -606,6 +607,26 @@ public final class CivicServerRuntime {
         UUID actorPlayerId = actor.getUUID();
         return current.writer.submitDatabase(database ->
                 new FiscalBillInspection(database).statusForPayer(actorPlayerId, billId));
+    }
+
+    CompletableFuture<FiscalBill> fundPlayerFiscalBill(
+            ServerPlayer actor, UUID billId, String requestId) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        AccountId payerAccount = new AccountId("player:" + actorPlayerId);
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return current.writer.submitDatabase(database ->
+                        new FiscalBillInspection(database)
+                                .statusForPayer(actorPlayerId, billId))
+                .thenCompose(ignored -> onServer(current, () ->
+                        LightmansCurrencyAccountBalances.live(current.server.overworld())
+                                .balance(payerAccount)))
+                .thenCompose(balance -> current.writer.submitDatabase(database ->
+                        new FiscalBillFundingCoordinator(
+                                        database,
+                                        ignored -> balance,
+                                        commandClock)
+                                .fund(actorPlayerId, billId, requestId)));
     }
 
     CompletableFuture<List<FiscalBill>> nationFiscalBills(ServerPlayer actor) {

@@ -1,6 +1,7 @@
 package org.civiceconomy.platform.neoforge;
 
 import com.mojang.brigadier.Command;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.logging.LogUtils;
 import java.util.UUID;
@@ -27,7 +28,15 @@ final class FiscalBillCommands {
                         .then(Commands.argument("billId", UuidArgument.uuid())
                                 .executes(context -> statusForPayer(
                                         context.getSource(),
-                                        UuidArgument.getUuid(context, "billId")))));
+                                        UuidArgument.getUuid(context, "billId")))))
+                .then(Commands.literal("fund")
+                        .then(Commands.argument("billId", UuidArgument.uuid())
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .executes(context -> fund(
+                                                context.getSource(),
+                                                UuidArgument.getUuid(context, "billId"),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"))))));
     }
 
     private static int listForPayer(CommandSourceStack source)
@@ -66,6 +75,25 @@ final class FiscalBillCommands {
                     }
                 }));
         source.sendSuccess(() -> Component.literal("Fiscal Bill payer status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int fund(CommandSourceStack source, UUID billId, String requestId)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .fundPlayerFiscalBill(player, billId, requestId)
+                .whenComplete((bill, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Fiscal Bill funding", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Funded " + formatFiscalBill(bill)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Fiscal Bill funding queued"), false);
         return Command.SINGLE_SUCCESS;
     }
 
