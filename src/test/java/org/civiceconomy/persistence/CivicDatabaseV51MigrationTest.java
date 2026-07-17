@@ -65,7 +65,7 @@ class CivicDatabaseV51MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(66, migrated.schemaVersion());
+            assertEquals(67, migrated.schemaVersion());
             StoredMintBatch batch = migrated.mintBatch(batchId);
             assertEquals("PROCESSING", batch.state());
             assertEquals("HELD", batch.custodyState());

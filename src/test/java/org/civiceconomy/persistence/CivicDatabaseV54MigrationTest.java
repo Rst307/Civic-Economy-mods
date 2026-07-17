@@ -47,7 +47,7 @@ class CivicDatabaseV54MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(66, migrated.schemaVersion());
+            assertEquals(67, migrated.schemaVersion());
             StoredPermanentDestructionOperation operation =
                     migrated.permanentDestructionOperation(
                             "legacy-destruction-service", "destroy-200");

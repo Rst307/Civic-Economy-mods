@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 66;
+    private static final int SCHEMA_VERSION = 67;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -10257,6 +10257,134 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredAuditableEconomicActivityEvidence
+            registerAuditableEconomicActivityEvidence(
+                    String serviceIdentity,
+                    String requestId,
+                    UUID paymentTransactionId,
+                    UUID nationId,
+                    String subject,
+                    String subjectReference,
+                    String payerController,
+                    String recipientController,
+                    long referenceValueMinorUnits,
+                    String evidenceReference,
+                    long recordedAtEpochMillis) {
+        StoredAuditableEconomicActivityEvidence replay =
+                auditableEconomicActivityEvidence(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.paymentTransactionId().equals(paymentTransactionId)
+                    || !replay.nationId().equals(nationId)
+                    || !replay.subject().equals(subject)
+                    || !replay.subjectReference().equals(subjectReference)
+                    || !replay.payerController().equals(payerController)
+                    || !replay.recipientController().equals(recipientController)
+                    || replay.referenceValueMinorUnits() != referenceValueMinorUnits
+                    || !replay.evidenceReference().equals(evidenceReference)
+                    || replay.recordedAtEpochMillis() != recordedAtEpochMillis) {
+                throw new org.civiceconomy.fiscal.IdempotencyConflictException(
+                        new org.civiceconomy.fiscal.ServiceIdentity(serviceIdentity),
+                        requestId);
+            }
+            return replay;
+        }
+        StoredPaymentTransaction payment = paymentTransaction(paymentTransactionId);
+        if (payment == null
+                || !payment.serviceIdentity().equals(serviceIdentity)
+                || !"PAYMENT".equals(payment.kind())) {
+            throw new IllegalArgumentException(
+                    "Auditable Economic Activity requires an exact service-owned Payment");
+        }
+        if (!"CIVIC_COMMITTED".equals(payment.state())) {
+            throw new IllegalStateException(
+                    "Auditable Economic Activity Payment is not Civic committed");
+        }
+        if (nation(nationId) == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Nation for Auditable Economic Activity " + nationId);
+        }
+        String treasury = "nation:" + nationId + ":treasury";
+        if (!treasury.equals(payment.sourceAccount())) {
+            throw new IllegalArgumentException(
+                    "Auditable Economic Activity Payment is outside the exact Nation Treasury");
+        }
+        String decision;
+        long includedValue;
+        if (payment.refundedMinorUnits() != 0L) {
+            decision = "EXCLUDED_REFUNDED";
+            includedValue = 0L;
+        } else if (payerController.equals(recipientController)) {
+            decision = "EXCLUDED_COMMON_CONTROL";
+            includedValue = 0L;
+        } else {
+            decision = "INCLUDED";
+            includedValue = Math.min(payment.amountMinorUnits(), referenceValueMinorUnits);
+        }
+        UUID evidenceId = UUID.randomUUID();
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO auditable_economic_activity_evidence (
+                    evidence_id, service_identity, request_id, payment_transaction_id,
+                    nation_id, subject, subject_reference, payer_controller,
+                    recipient_controller, reference_value_minor_units, decision,
+                    included_value_minor_units, evidence_reference,
+                    recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, evidenceId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, paymentTransactionId.toString());
+            insert.setString(5, nationId.toString());
+            insert.setString(6, subject);
+            insert.setString(7, subjectReference);
+            insert.setString(8, payerController);
+            insert.setString(9, recipientController);
+            insert.setLong(10, referenceValueMinorUnits);
+            insert.setString(11, decision);
+            insert.setLong(12, includedValue);
+            insert.setString(13, evidenceReference);
+            insert.setLong(14, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return auditableEconomicActivityEvidence(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to register Auditable Economic Activity Evidence", failure);
+        }
+    }
+
+    public synchronized StoredAuditableEconomicActivityEvidence
+            auditableEconomicActivityEvidence(String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM auditable_economic_activity_evidence
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next()
+                        ? new StoredAuditableEconomicActivityEvidence(
+                                UUID.fromString(result.getString("evidence_id")),
+                                result.getString("service_identity"),
+                                result.getString("request_id"),
+                                UUID.fromString(result.getString("payment_transaction_id")),
+                                UUID.fromString(result.getString("nation_id")),
+                                result.getString("subject"),
+                                result.getString("subject_reference"),
+                                result.getString("payer_controller"),
+                                result.getString("recipient_controller"),
+                                result.getLong("reference_value_minor_units"),
+                                result.getString("decision"),
+                                result.getLong("included_value_minor_units"),
+                                result.getString("evidence_reference"),
+                                result.getLong("recorded_at_epoch_millis"))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Auditable Economic Activity Evidence", failure);
+        }
+    }
+
     public synchronized StoredPaymentTransaction paymentTransaction(String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM payment_transaction WHERE request_id = ?
@@ -13072,6 +13200,99 @@ public final class CivicDatabase implements AutoCloseable {
                         "INTEGER CHECK (external_applied_at_epoch_millis IS NULL "
                                 + "OR external_applied_at_epoch_millis >= prepared_at_epoch_millis)");
                 statement.execute("PRAGMA user_version = 66");
+            }
+            if (version < 67) {
+                statement.execute("DROP INDEX fiscal_service_grant_active_scope");
+                statement.execute("ALTER TABLE fiscal_service_grant_revocation RENAME TO fiscal_service_grant_revocation_v66");
+                statement.execute("ALTER TABLE fiscal_service_grant RENAME TO fiscal_service_grant_v66");
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            capability TEXT NOT NULL CHECK (capability IN (
+                                'READ_ACCOUNT', 'RESERVE_FUNDS', 'MANAGE_ESCROW',
+                                'MANAGE_BUDGET', 'ISSUE_BILL', 'FUND_BILL',
+                                'SETTLE_PAYMENT', 'REFUND_PAYMENT', 'COMPENSATE_PAYMENT',
+                                'PERMANENT_DESTRUCTION', 'WITHDRAW_CASH', 'MANAGE_ISSUANCE',
+                                'RECORD_ECONOMIC_ACTIVITY'
+                            )),
+                            account_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant
+                        SELECT * FROM fiscal_service_grant_v66
+                        """);
+                statement.execute("""
+                        CREATE INDEX fiscal_service_grant_active_scope
+                        ON fiscal_service_grant (service_identity, capability, account_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE fiscal_service_grant_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES fiscal_service_grant(grant_id),
+                            administrator_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (administrator_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO fiscal_service_grant_revocation
+                        SELECT * FROM fiscal_service_grant_revocation_v66
+                        """);
+                statement.execute("DROP TABLE fiscal_service_grant_revocation_v66");
+                statement.execute("DROP TABLE fiscal_service_grant_v66");
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS auditable_economic_activity_evidence (
+                            evidence_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                REFERENCES fiscal_service(service_identity),
+                            request_id TEXT NOT NULL,
+                            payment_transaction_id TEXT NOT NULL UNIQUE
+                                REFERENCES payment_transaction(transaction_id),
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            subject TEXT NOT NULL CHECK (subject IN ('PUBLIC_PROJECT')),
+                            subject_reference TEXT NOT NULL
+                                CHECK (length(trim(subject_reference)) > 0),
+                            payer_controller TEXT NOT NULL
+                                CHECK (length(trim(payer_controller)) > 0),
+                            recipient_controller TEXT NOT NULL
+                                CHECK (length(trim(recipient_controller)) > 0),
+                            reference_value_minor_units INTEGER NOT NULL
+                                CHECK (reference_value_minor_units > 0),
+                            decision TEXT NOT NULL CHECK (decision IN (
+                                'INCLUDED', 'EXCLUDED_REFUNDED',
+                                'EXCLUDED_COMMON_CONTROL', 'EXCLUDED_NOT_COMMITTED'
+                            )),
+                            included_value_minor_units INTEGER NOT NULL
+                                CHECK (included_value_minor_units >= 0),
+                            evidence_reference TEXT NOT NULL
+                                CHECK (length(trim(evidence_reference)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((decision = 'INCLUDED' AND included_value_minor_units > 0)
+                                OR (decision != 'INCLUDED' AND included_value_minor_units = 0))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS auditable_economic_activity_nation_time
+                        ON auditable_economic_activity_evidence (
+                            nation_id, recorded_at_epoch_millis, evidence_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 67");
             }
             connection.commit();
         } catch (SQLException failure) {
