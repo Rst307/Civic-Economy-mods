@@ -26,8 +26,10 @@ public final class CreateMillstoneObservationBridge {
 
     private static final MillstoneCompletionDetector DETECTOR =
             new MillstoneCompletionDetector();
-    private static volatile Consumer<CreateRecipeCompletion> sink = ignored -> {};
-    private static volatile Clock clock = Clock.systemUTC();
+    private static volatile Consumer<CreateRecipeCompletion> runtimeSink = ignored -> {};
+    private static volatile Consumer<CreateRecipeCompletion> testSink = ignored -> {};
+    private static volatile Clock runtimeClock = Clock.systemUTC();
+    private static volatile Clock testClock = Clock.systemUTC();
 
     private CreateMillstoneObservationBridge() {}
 
@@ -60,13 +62,27 @@ public final class CreateMillstoneObservationBridge {
         if (observationSink == null || observationClock == null) {
             throw new IllegalArgumentException("Create observation sink cannot be null");
         }
-        sink = observationSink;
-        clock = observationClock;
+        testSink = observationSink;
+        testClock = observationClock;
+    }
+
+    static void installRuntime(
+            Consumer<CreateRecipeCompletion> observationSink, Clock observationClock) {
+        if (observationSink == null || observationClock == null) {
+            throw new IllegalArgumentException("Create observation sink cannot be null");
+        }
+        runtimeSink = observationSink;
+        runtimeClock = observationClock;
     }
 
     public static void reset() {
-        sink = ignored -> {};
-        clock = Clock.systemUTC();
+        testSink = ignored -> {};
+        testClock = Clock.systemUTC();
+    }
+
+    static void resetRuntime() {
+        runtimeSink = ignored -> {};
+        runtimeClock = Clock.systemUTC();
     }
 
     public static List<ItemStack> snapshot(
@@ -100,17 +116,32 @@ public final class CreateMillstoneObservationBridge {
                                 .map(stack -> toProductionStack(stack, level))
                                 .toList())
                 .ifPresent(delta -> recipeId(millstone, level.getRecipeManager().getRecipes())
-                        .ifPresent(recipeId -> sink.accept(new CreateRecipeCompletion(
-                                UUID.randomUUID(),
-                                CREATE_VERSION,
-                                CreateMachineKind.MILLSTONE,
-                                recipeId,
-                                level.dimension().location().toString(),
-                                blockEntity.getBlockPos().getX(),
-                                blockEntity.getBlockPos().getY(),
-                                blockEntity.getBlockPos().getZ(),
-                                clock.millis(),
-                                delta))));
+                        .ifPresent(recipeId -> {
+                            UUID observationId = UUID.randomUUID();
+                            runtimeSink.accept(completion(
+                                    observationId, recipeId, blockEntity, runtimeClock, delta));
+                            testSink.accept(completion(
+                                    observationId, recipeId, blockEntity, testClock, delta));
+                        }));
+    }
+
+    private static CreateRecipeCompletion completion(
+            UUID observationId,
+            String recipeId,
+            BlockEntity blockEntity,
+            Clock observationClock,
+            org.civiceconomy.production.MachineInventoryDelta delta) {
+        return new CreateRecipeCompletion(
+                observationId,
+                CREATE_VERSION,
+                CreateMachineKind.MILLSTONE,
+                recipeId,
+                blockEntity.getLevel().dimension().location().toString(),
+                blockEntity.getBlockPos().getX(),
+                blockEntity.getBlockPos().getY(),
+                blockEntity.getBlockPos().getZ(),
+                observationClock.millis(),
+                delta);
     }
 
     private static ProductionStack toProductionStack(

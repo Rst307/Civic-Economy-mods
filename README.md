@@ -216,6 +216,8 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 
 `nation facility baseline activate` 使用相同的三阶段线程边界，激活前重新读取真实世界并要求 Create 版本、接口和固定机器集合与已捕获基线一致；库存数量可以变化，但不会改写原始起点。成功后基线和 Registered Facility 在同一 SQLite 事务中变为 `ACTIVE`。`nation facility status` 只读取当前玩家所在设施的服务端权威 Facility、Interface 和 Baseline 状态，要求同一精确权限，不读取 Create 世界也不推进状态。
 
+激活后的 Civic Facility Accounting Interface 会在服务器 tick 中比较真实 27 槽库存前后状态，只把按物品与组件身份计算的全接口净增加量形成 Facility Accounting Receipt；接口内部换槽、拆堆或合堆不会伪造入库。Create `6.0.6` 磨石的真实配方完成先进入五秒保守匹配窗口，SQLite 写线程再通过注册设施、精确接口、活动基线、固定机器和 Effective Territory 规则选择最早的精确完成并原子保存 Completion、Receipt 和 Decision。同一 Completion 或 Receipt 不能重复消费，玩家和命令没有提交产物事实的入口；崩溃只可能漏掉尚未提交的短时证据，不能产生重复或虚假贡献。
+
 `nation budget create` 创建一条不移动 LC、也不创建 Reservation 或 Escrow 的 National Treasury Budget draft。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导精确来源国库，并在注册内部 Budget 服务前要求该 Citizen 具有本国 `DRAFT_BUDGET`。命令只接受稳定请求 ID、正金额、预算代码、未来到期时间和用途；调用者不能提交 Nation、Team 或来源账户。同一请求重放返回原 draft，改变任一字段会冲突。
 
 `nation budget list|status` 从真实命令玩家的 effective Citizenship 推导 Nation，要求精确 `VIEW_ACCOUNT`，并只返回 source 为本国 National Treasury 的 Budget。列表按到期时间和 Budget UUID 稳定排序；foreign 与 unknown Budget UUID 使用同一失败路径。输出包含来源、总额、已结算额、剩余额、预算代码、状态、到期时间、Escrow 和用途；读取不会批准 Budget、创建 Reservation/Escrow、移动 LC 或推进状态。

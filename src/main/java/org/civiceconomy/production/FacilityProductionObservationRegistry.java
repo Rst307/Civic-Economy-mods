@@ -2,6 +2,7 @@ package org.civiceconomy.production;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -44,6 +45,31 @@ public final class FacilityProductionObservationRegistry {
                         decision.reason(),
                         clock.millis()));
         return observation(completion.observationId());
+    }
+
+    public FacilityProductionObservation recordFirstMatching(
+            FacilityAccountingReceipt receipt,
+            List<CreateRecipeCompletion> candidates) {
+        if (receipt == null || candidates == null
+                || candidates.stream().anyMatch(java.util.Objects::isNull)) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Receipt and completion candidates are required");
+        }
+        return candidates.stream()
+                .sorted(Comparator
+                        .comparingLong(CreateRecipeCompletion::observedAtEpochMillis)
+                        .thenComparing(CreateRecipeCompletion::observationId))
+                .filter(completion ->
+                        database.createRecipeCompletion(completion.observationId()) == null)
+                .filter(completion -> {
+                    FacilityProductionDecisionKind kind =
+                            matcher.match(completion, receipt).kind();
+                    return kind != FacilityProductionDecisionKind.UNMATCHED_FACILITY
+                            && kind != FacilityProductionDecisionKind.UNMATCHED_INTERFACE_RECEIPT;
+                })
+                .findFirst()
+                .map(completion -> record(completion, receipt))
+                .orElse(null);
     }
 
     public FacilityProductionObservation observation(UUID observationId) {

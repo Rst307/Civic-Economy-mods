@@ -22,6 +22,8 @@ import dev.ftb.mods.ftbchunks.data.ChunkTeamDataImpl;
 import dev.ftb.mods.ftblibrary.math.ChunkDimPos;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Clock;
@@ -47,11 +49,13 @@ import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.CommonListenerCookie;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
+import net.neoforged.neoforge.items.ItemStackHandler;
 import org.civiceconomy.CivicEconomy;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalRegistry;
@@ -108,6 +112,9 @@ import org.civiceconomy.persistence.StoredFacilityAccountingBaseline;
 import org.civiceconomy.persistence.StoredFacilityAccountingInterface;
 import org.civiceconomy.persistence.StoredFacilityBaselineInventory;
 import org.civiceconomy.persistence.StoredFacilityBaselineMachine;
+import org.civiceconomy.persistence.StoredFacilityAccountingReceipt;
+import org.civiceconomy.persistence.StoredFacilityProductionDecision;
+import org.civiceconomy.persistence.StoredProductionInventoryChange;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
 import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.production.FacilityAccountingBaseline;
@@ -1659,6 +1666,15 @@ public final class CivicServerRuntimeGameTests {
                 new AtomicReference<>();
         AtomicReference<FacilityAccountingStatus> inspectedStatus =
                 new AtomicReference<>();
+        AtomicBoolean receiptFinished = new AtomicBoolean();
+        AtomicReference<Throwable> receiptFailure = new AtomicReference<>();
+        AtomicReference<StoredFacilityAccountingReceipt> persistedReceipt =
+                new AtomicReference<>();
+        AtomicReference<StoredFacilityProductionDecision> persistedDecision =
+                new AtomicReference<>();
+        AtomicReference<List<StoredProductionInventoryChange>> persistedReceiptChanges =
+                new AtomicReference<>(List.of());
+        AtomicReference<UUID> productionObservationId = new AtomicReference<>();
         String baselineRequestId = requestId + "-baseline";
         String baselineReason = "Capture trusted Facility Accounting Baseline";
         String activationRequestId = requestId + "-activation";
@@ -2065,6 +2081,106 @@ public final class CivicServerRuntimeGameTests {
                             7,
                             persistedBaselineInventory.get().getFirst().count(),
                             "activation preserves captured starting inventory");
+                })
+                .thenExecute(() -> {
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        receiptFinished.set(true);
+                        return;
+                    }
+                    AtomicReference<org.civiceconomy.production.CreateRecipeCompletion>
+                            observedCompletion = new AtomicReference<>();
+                    CreateMillstoneObservationBridge.install(
+                            observedCompletion::set,
+                            Clock.systemUTC());
+                    try {
+                        BlockEntity millstone =
+                                helper.getLevel().getBlockEntity(expectedCore);
+                        Field inputField =
+                                millstone.getClass().getDeclaredField("inputInv");
+                        Field outputField =
+                                millstone.getClass().getDeclaredField("outputInv");
+                        inputField.setAccessible(true);
+                        outputField.setAccessible(true);
+                        ItemStackHandler input =
+                                (ItemStackHandler) inputField.get(millstone);
+                        ItemStackHandler output =
+                                (ItemStackHandler) outputField.get(millstone);
+                        input.setStackInSlot(0, new ItemStack(Items.WHEAT, 1));
+                        Method process = millstone.getClass().getDeclaredMethod("process");
+                        process.setAccessible(true);
+                        process.invoke(millstone);
+                        var completion = observedCompletion.get();
+                        helper.assertTrue(
+                                completion != null,
+                                "real Create completion reached the runtime bridge");
+                        productionObservationId.set(completion.observationId());
+                        FacilityAccountingInterfaceBlockEntity accountingInventory =
+                                (FacilityAccountingInterfaceBlockEntity) helper.getLevel()
+                                        .getBlockEntity(expectedInterfaceBlock);
+                        int receiptSlot = 5;
+                        for (int outputSlot = 0;
+                                outputSlot < output.getSlots();
+                                outputSlot++) {
+                            ItemStack produced = output.getStackInSlot(outputSlot).copy();
+                            if (!produced.isEmpty()) {
+                                accountingInventory.setItem(receiptSlot++, produced);
+                                output.setStackInSlot(outputSlot, ItemStack.EMPTY);
+                            }
+                        }
+                        helper.runAfterDelay(60L, () -> runtime
+                                .submitDatabase(database -> {
+                                    UUID observationId = productionObservationId.get();
+                                    StoredFacilityProductionDecision decision =
+                                            database.facilityProductionDecision(
+                                                    observationId);
+                                    persistedDecision.set(decision);
+                                    if (decision != null) {
+                                        persistedReceipt.set(
+                                                database.facilityAccountingReceipt(
+                                                        decision.receiptId()));
+                                        persistedReceiptChanges.set(
+                                                database.facilityAccountingReceiptChanges(
+                                                        decision.receiptId()));
+                                    }
+                                    return null;
+                                })
+                                .whenComplete((ignored, failure) -> {
+                                    receiptFailure.set(failure);
+                                    receiptFinished.set(true);
+                                }));
+                    } catch (Throwable failure) {
+                        receiptFailure.set(failure);
+                        receiptFinished.set(true);
+                    } finally {
+                        CreateMillstoneObservationBridge.reset();
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(
+                            receiptFinished.get(),
+                            "Facility Accounting Receipt ingestion completed");
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        return;
+                    }
+                    helper.assertTrue(
+                            receiptFailure.get() == null,
+                            receiptFailure.get() == null
+                                    ? "Facility Accounting Receipt state"
+                                    : "Facility Accounting Receipt failure: "
+                                            + rootCause(receiptFailure.get()).getMessage());
+                    helper.assertTrue(
+                            persistedDecision.get() != null,
+                            "persisted Facility Production decision");
+                    helper.assertValueEqual(
+                            "INCLUDED",
+                            persistedDecision.get().decision(),
+                            "real Create completion and interface receipt decision");
+                    helper.assertTrue(
+                            persistedReceipt.get() != null,
+                            "persisted server-authoritative Facility Accounting Receipt");
+                    helper.assertTrue(
+                            !persistedReceiptChanges.get().isEmpty(),
+                            "persisted real interface inventory increase");
                 })
                 .thenExecute(() -> {
                     if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {

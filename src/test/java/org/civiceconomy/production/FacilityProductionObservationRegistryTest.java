@@ -61,6 +61,55 @@ class FacilityProductionObservationRegistryTest {
     }
 
     @Test
+    void recordsTheOldestExactFacilityCompletionForAnAuthoritativeReceipt() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("authoritative-receipt.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            FacilityProductionObservationRegistry registry = registry(database);
+            CreateRecipeCompletion outsideFacility = new CreateRecipeCompletion(
+                    UUID.fromString("88888888-8888-8888-8888-888888888888"),
+                    completion().createVersion(),
+                    completion().machineKind(),
+                    completion().recipeId(),
+                    completion().dimensionId(),
+                    48,
+                    completion().blockY(),
+                    48,
+                    completion().observedAtEpochMillis() - 1L,
+                    completion().inventoryDelta());
+
+            FacilityProductionObservation recorded = registry.recordFirstMatching(
+                    receipt(), List.of(outsideFacility, completion()));
+
+            assertEquals(COMPLETION, recorded.completion().observationId());
+            assertEquals(RECEIPT, recorded.receipt().receiptId());
+            assertNull(database.createRecipeCompletion(outsideFacility.observationId()));
+        }
+    }
+
+    @Test
+    void doesNotConsumeOneCompletionForASecondAuthoritativeReceipt() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("duplicate-authoritative-receipt.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            FacilityProductionObservationRegistry registry = registry(database);
+            registry.recordFirstMatching(receipt(), List.of(completion()));
+            UUID secondReceiptId =
+                    UUID.fromString("99999999-9999-9999-9999-999999999999");
+            FacilityAccountingReceipt secondReceipt = new FacilityAccountingReceipt(
+                    secondReceiptId,
+                    INTERFACE,
+                    receipt().position(),
+                    receipt().observedAtEpochMillis() + 1L,
+                    receipt().receivedOutputs());
+
+            assertNull(registry.recordFirstMatching(
+                    secondReceipt, List.of(completion())));
+            assertNull(database.facilityAccountingReceipt(secondReceiptId));
+        }
+    }
+
+    @Test
     void rejectsReplayWhenTheCreateRecipeCompletionChanges() {
         try (CivicDatabase database = database(
                 temporaryDirectory.resolve("changed-completion.sqlite3"))) {

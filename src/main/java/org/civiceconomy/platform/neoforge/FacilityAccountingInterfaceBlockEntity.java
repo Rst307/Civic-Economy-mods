@@ -10,8 +10,10 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ChestMenu;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import java.util.List;
 
 public final class FacilityAccountingInterfaceBlockEntity
         extends RandomizableContainerBlockEntity {
@@ -19,6 +21,7 @@ public final class FacilityAccountingInterfaceBlockEntity
 
     private NonNullList<ItemStack> items =
             NonNullList.withSize(SLOT_COUNT, ItemStack.EMPTY);
+    private List<ItemStack> lastObservedInventory = List.of();
 
     public FacilityAccountingInterfaceBlockEntity(BlockPos position, BlockState state) {
         super(CivicContent.FACILITY_ACCOUNTING_INTERFACE_BLOCK_ENTITY.get(), position, state);
@@ -44,6 +47,23 @@ public final class FacilityAccountingInterfaceBlockEntity
     @Override
     public int getContainerSize() {
         return SLOT_COUNT;
+    }
+
+    static void serverTick(
+            Level level,
+            BlockPos position,
+            BlockState state,
+            FacilityAccountingInterfaceBlockEntity blockEntity) {
+        List<ItemStack> current =
+                FacilityAccountingInterfaceObservationBridge.snapshot(blockEntity);
+        if (!blockEntity.lastObservedInventory.isEmpty()) {
+            FacilityAccountingInterfaceObservationBridge.observe(
+                    level,
+                    position,
+                    blockEntity.lastObservedInventory,
+                    current);
+        }
+        blockEntity.lastObservedInventory = current;
     }
 
     @Override

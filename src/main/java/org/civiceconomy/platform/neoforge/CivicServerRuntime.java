@@ -8,11 +8,13 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -113,10 +115,13 @@ import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.EffectiveTerritoryFacilityAuthority;
+import org.civiceconomy.production.CreateMachineKind;
+import org.civiceconomy.production.CreateRecipeCompletion;
 import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.production.FacilityAccountingBaseline;
 import org.civiceconomy.production.FacilityAccountingBaselineSnapshot;
 import org.civiceconomy.production.FacilityAccountingStatus;
+import org.civiceconomy.production.FacilityAccountingReceipt;
 import org.civiceconomy.production.FacilityAccountingInterfaceRegistry;
 import org.civiceconomy.production.FacilityAccountingInterface;
 import org.civiceconomy.production.FacilityAccountingInterfacePosition;
@@ -126,6 +131,9 @@ import org.civiceconomy.production.FacilityBaselineActivationWork;
 import org.civiceconomy.production.FacilityBaselineCaptureReplay;
 import org.civiceconomy.production.FacilityBaselineCaptureWork;
 import org.civiceconomy.production.FacilityCorePosition;
+import org.civiceconomy.production.FacilityProductionMatcher;
+import org.civiceconomy.production.FacilityProductionObservation;
+import org.civiceconomy.production.FacilityProductionObservationRegistry;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
@@ -226,6 +234,8 @@ public final class CivicServerRuntime {
     private static final int NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE = 100;
     private static final long NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE = 10_000L;
     private static final int REGISTERED_FACILITY_MAX_SCOPE_CHUNKS = 16;
+    private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
+            Duration.ofSeconds(5);
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
         @Override
         public Optional<NationTeam> find(UUID teamId) {
@@ -333,6 +343,15 @@ public final class CivicServerRuntime {
                 restores,
                 new ServerPlayerMintMaterialCustody(server),
                 now);
+        if (CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+            RuntimeState active = state;
+            CreateMillstoneObservationBridge.installRuntime(
+                    completion -> observeCreateRecipeCompletion(active, completion),
+                    clock);
+            FacilityAccountingInterfaceObservationBridge.installRuntime(
+                    increase -> observeFacilityAccountingInventoryIncrease(active, increase),
+                    clock);
+        }
         scheduleDatabaseBackupRecovery(state);
         scheduleFiscalExpiry(state);
         scheduleBudgetDisbursementRecovery(state);
@@ -478,6 +497,8 @@ public final class CivicServerRuntime {
         try {
             current.writer.close();
         } finally {
+            CreateMillstoneObservationBridge.resetRuntime();
+            FacilityAccountingInterfaceObservationBridge.resetRuntime();
             state = null;
             territoryClaimAuthorizationReady.set(false);
             territoryForceLoadRestrictionsReady.set(false);
@@ -487,6 +508,143 @@ public final class CivicServerRuntime {
             nationByFtbTeam.clear();
         }
         LOGGER.info("Civic server runtime closed SQLite after draining buffered online-time intervals");
+    }
+
+    private void observeCreateRecipeCompletion(
+            RuntimeState current,
+            CreateRecipeCompletion completion) {
+        if (state != current || completion == null) {
+            return;
+        }
+        long earliest = Math.max(
+                0L,
+                completion.observedAtEpochMillis()
+                        - FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW.toMillis());
+        current.pendingFacilityCompletions.removeIf(candidate ->
+                candidate.observedAtEpochMillis() < earliest);
+        current.pendingFacilityCompletions.addLast(completion);
+    }
+
+    private void observeFacilityAccountingInventoryIncrease(
+            RuntimeState current,
+            FacilityAccountingInterfaceInventoryIncrease increase) {
+        if (state != current || increase == null) {
+            return;
+        }
+        long earliest = Math.max(
+                0L,
+                increase.observedAtEpochMillis()
+                        - FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW.toMillis());
+        current.pendingFacilityCompletions.removeIf(candidate ->
+                candidate.observedAtEpochMillis() < earliest);
+        List<CreateRecipeCompletion> candidates = current.pendingFacilityCompletions.stream()
+                .filter(candidate ->
+                        candidate.observedAtEpochMillis() <= increase.observedAtEpochMillis())
+                .toList();
+        if (candidates.isEmpty()) {
+            return;
+        }
+        current.writer.submitDatabase(database ->
+                        prepareFacilityAccountingReceipt(
+                                database, increase, candidates))
+                .thenCompose(preparation -> preparation == null
+                        ? CompletableFuture.completedFuture(null)
+                        : onServer(current, () ->
+                                snapshotFacilityAccountingReceiptOwnership(preparation)))
+                .thenCompose(snapshot -> snapshot == null
+                        ? CompletableFuture.completedFuture(null)
+                        : current.writer.submitDatabase(database ->
+                                recordFacilityAccountingReceipt(database, snapshot)))
+                .whenComplete((observation, failure) -> {
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Facility Accounting Receipt ingestion failed closed",
+                                failure);
+                    } else if (observation != null) {
+                        onServer(current, () -> {
+                            current.pendingFacilityCompletions.removeIf(candidate ->
+                                    candidate.observationId().equals(
+                                            observation.completion().observationId()));
+                            return null;
+                        });
+                    }
+                });
+    }
+
+    private static FacilityReceiptPreparation prepareFacilityAccountingReceipt(
+            CivicDatabase database,
+            FacilityAccountingInterfaceInventoryIncrease increase,
+            List<CreateRecipeCompletion> candidates) {
+        var facility = database.registeredFacilityAt(
+                increase.position().dimensionId(),
+                increase.position().blockX(),
+                increase.position().blockZ());
+        if (facility == null) {
+            return null;
+        }
+        var accountingInterface =
+                database.facilityAccountingInterface(facility.facilityId());
+        if (accountingInterface == null
+                || !accountingInterface.dimensionId().equals(
+                        increase.position().dimensionId())
+                || accountingInterface.blockX() != increase.position().blockX()
+                || accountingInterface.blockY() != increase.position().blockY()
+                || accountingInterface.blockZ() != increase.position().blockZ()) {
+            return null;
+        }
+        return new FacilityReceiptPreparation(
+                accountingInterface.interfaceId(),
+                facility.ftbTeamId(),
+                increase,
+                candidates);
+    }
+
+    private static FacilityReceiptSnapshot snapshotFacilityAccountingReceiptOwnership(
+            FacilityReceiptPreparation preparation) {
+        Map<TerritoryClaimPosition, UUID> currentClaims =
+                FtbChunksAdapter.live().claimsForTeam(preparation.ftbTeamId()).stream()
+                        .collect(Collectors.toUnmodifiableMap(
+                                claim -> new TerritoryClaimPosition(
+                                        claim.dimension().location().toString(),
+                                        claim.chunkPos().x,
+                                        claim.chunkPos().z),
+                                claim -> preparation.ftbTeamId()));
+        TerritoryOwnershipSource ownership =
+                (dimensionId, chunkX, chunkZ) -> Optional.ofNullable(currentClaims.get(
+                        new TerritoryClaimPosition(dimensionId, chunkX, chunkZ)));
+        return new FacilityReceiptSnapshot(preparation, ownership);
+    }
+
+    private FacilityProductionObservation recordFacilityAccountingReceipt(
+            CivicDatabase database,
+            FacilityReceiptSnapshot snapshot) {
+        FacilityReceiptPreparation preparation = snapshot.preparation();
+        FacilityAccountingInterfaceInventoryIncrease increase = preparation.increase();
+        Clock operationClock = Clock.fixed(
+                Instant.ofEpochMilli(increase.observedAtEpochMillis()),
+                ZoneOffset.UTC);
+        FacilityAccountingReceipt receipt = new FacilityAccountingReceipt(
+                UUID.randomUUID(),
+                preparation.interfaceId(),
+                increase.position(),
+                increase.observedAtEpochMillis(),
+                increase.receivedOutputs());
+        EffectiveTerritoryFacilityAuthority territory =
+                new EffectiveTerritoryFacilityAuthority(
+                        database,
+                        new EffectiveTerritoryQuery(
+                                new TerritoryMaintenanceRegistry(database, operationClock),
+                                snapshot.ownership()),
+                        operationClock);
+        return new FacilityProductionObservationRegistry(
+                        database,
+                        new FacilityProductionMatcher(
+                                database,
+                                territory,
+                                Set.of(CreateMachineKind.MILLSTONE),
+                                FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW),
+                        operationClock)
+                .recordFirstMatching(receipt, preparation.candidates());
     }
 
     <T> CompletableFuture<T> submitAdministration(
@@ -4079,6 +4237,8 @@ public final class CivicServerRuntime {
         private final OnlineDatabaseBackupManager backups;
         private final OnlineDatabaseRestoreManager restores;
         private final ServerPlayerMintMaterialCustody mintCustody;
+        private final ArrayDeque<CreateRecipeCompletion> pendingFacilityCompletions =
+                new ArrayDeque<>();
         private final long startedAtEpochMillis;
         private final AtomicBoolean fiscalExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean budgetDisbursementRecoveryQueued =
@@ -4167,6 +4327,20 @@ public final class CivicServerRuntime {
     private record FacilityBaselineServerSnapshot(
             FacilityAccountingBaselineSnapshot snapshot,
             NationTeam team,
+            TerritoryOwnershipSource ownership) {}
+
+    private record FacilityReceiptPreparation(
+            UUID interfaceId,
+            UUID ftbTeamId,
+            FacilityAccountingInterfaceInventoryIncrease increase,
+            List<CreateRecipeCompletion> candidates) {
+        private FacilityReceiptPreparation {
+            candidates = List.copyOf(candidates);
+        }
+    }
+
+    private record FacilityReceiptSnapshot(
+            FacilityReceiptPreparation preparation,
             TerritoryOwnershipSource ownership) {}
 
     private record PreparedMintTake(
