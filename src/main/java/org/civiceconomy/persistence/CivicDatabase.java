@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 69;
+    private static final int SCHEMA_VERSION = 70;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2210,6 +2210,385 @@ public final class CivicDatabase implements AutoCloseable {
                     UUID.fromString(result.getString("actor_player_id")),
                     result.getString("reason"),
                     result.getLong("registered_at_epoch_millis"));
+        }
+    }
+
+    public synchronized StoredFacilityProductionDecision recordFacilityProductionObservation(
+            StoredCreateRecipeCompletion completion,
+            List<StoredProductionInventoryChange> inputs,
+            List<StoredProductionInventoryChange> outputs,
+            StoredFacilityAccountingReceipt receipt,
+            List<StoredProductionInventoryChange> receiptChanges,
+            StoredFacilityProductionDecision decision) {
+        validateFacilityProductionObservation(
+                completion, inputs, outputs, receipt, receiptChanges, decision);
+        StoredCreateRecipeCompletion replay = createRecipeCompletion(completion.observationId());
+        if (replay != null) {
+            return assertFacilityProductionObservationReplay(
+                    replay, completion, inputs, outputs, receipt, receiptChanges, decision);
+        }
+        if (facilityAccountingReceipt(receipt.receiptId()) != null) {
+            throw new IllegalStateException(
+                    "Facility Accounting Receipt is already bound to another observation");
+        }
+        try {
+            connection.setAutoCommit(false);
+            insertCreateRecipeCompletion(completion);
+            insertCreateRecipeCompletionChanges(inputs);
+            insertCreateRecipeCompletionChanges(outputs);
+            insertFacilityAccountingReceipt(receipt);
+            insertFacilityAccountingReceiptChanges(receiptChanges);
+            insertFacilityProductionDecision(decision);
+            connection.commit();
+            return facilityProductionDecision(completion.observationId());
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to record Facility Production Observation "
+                            + completion.observationId(),
+                    failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Facility Production transaction mode", failure);
+            }
+        }
+    }
+
+    private static void validateFacilityProductionObservation(
+            StoredCreateRecipeCompletion completion,
+            List<StoredProductionInventoryChange> inputs,
+            List<StoredProductionInventoryChange> outputs,
+            StoredFacilityAccountingReceipt receipt,
+            List<StoredProductionInventoryChange> receiptChanges,
+            StoredFacilityProductionDecision decision) {
+        if (completion == null || inputs == null || inputs.isEmpty()
+                || outputs == null || outputs.isEmpty() || receipt == null
+                || receiptChanges == null || receiptChanges.isEmpty() || decision == null
+                || completion.observationId() == null || receipt.receiptId() == null
+                || receipt.interfaceId() == null || decision.receiptId() == null
+                || !completion.observationId().equals(decision.observationId())
+                || !receipt.receiptId().equals(decision.receiptId())
+                || completion.createVersion() == null || completion.createVersion().isBlank()
+                || completion.machineKind() == null || completion.machineKind().isBlank()
+                || completion.recipeId() == null || completion.recipeId().isBlank()
+                || completion.dimensionId() == null || completion.dimensionId().isBlank()
+                || completion.observedAtEpochMillis() < 0L
+                || receipt.dimensionId() == null || receipt.dimensionId().isBlank()
+                || receipt.observedAtEpochMillis() < 0L
+                || decision.decision() == null || decision.decision().isBlank()
+                || decision.reason() == null || decision.reason().isBlank()
+                || decision.decidedAtEpochMillis() < 0L
+                || !validChanges(completion.observationId(), "INPUT", inputs)
+                || !validChanges(completion.observationId(), "OUTPUT", outputs)
+                || !validChanges(receipt.receiptId(), "RECEIPT", receiptChanges)) {
+            throw new IllegalArgumentException("Facility Production Observation values are invalid");
+        }
+    }
+
+    private static boolean validChanges(
+            UUID sourceId, String role, List<StoredProductionInventoryChange> changes) {
+        Set<Integer> slots = new java.util.HashSet<>();
+        for (StoredProductionInventoryChange change : changes) {
+            if (change == null || !sourceId.equals(change.sourceId())
+                    || !role.equals(change.role()) || change.slot() < 0
+                    || change.itemId() == null || change.itemId().isBlank()
+                    || change.componentFingerprint() == null
+                    || change.componentFingerprint().isBlank() || change.count() <= 0
+                    || !slots.add(change.slot())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private StoredFacilityProductionDecision assertFacilityProductionObservationReplay(
+            StoredCreateRecipeCompletion replay,
+            StoredCreateRecipeCompletion completion,
+            List<StoredProductionInventoryChange> inputs,
+            List<StoredProductionInventoryChange> outputs,
+            StoredFacilityAccountingReceipt receipt,
+            List<StoredProductionInventoryChange> receiptChanges,
+            StoredFacilityProductionDecision decision) {
+        StoredFacilityProductionDecision storedDecision =
+                facilityProductionDecision(completion.observationId());
+        if (!replay.equals(completion)
+                || !createRecipeCompletionChanges(
+                                completion.observationId(), "INPUT")
+                        .equals(inputs)
+                || !createRecipeCompletionChanges(
+                                completion.observationId(), "OUTPUT")
+                        .equals(outputs)
+                || !receipt.equals(facilityAccountingReceipt(receipt.receiptId()))
+                || !facilityAccountingReceiptChanges(receipt.receiptId())
+                        .equals(receiptChanges)
+                || storedDecision == null
+                || !java.util.Objects.equals(
+                        storedDecision.facilityId(), decision.facilityId())
+                || !java.util.Objects.equals(
+                        storedDecision.interfaceId(), decision.interfaceId())
+                || !storedDecision.receiptId().equals(decision.receiptId())
+                || !storedDecision.decision().equals(decision.decision())
+                || !storedDecision.reason().equals(decision.reason())) {
+            throw new IllegalStateException(
+                    "Facility Production Observation replay changed its immutable payload");
+        }
+        return storedDecision;
+    }
+
+    private void insertCreateRecipeCompletion(StoredCreateRecipeCompletion completion)
+            throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO create_recipe_completion (
+                    observation_id, create_version, machine_kind, recipe_id,
+                    dimension_id, block_x, block_y, block_z, observed_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, completion.observationId().toString());
+            insert.setString(2, completion.createVersion());
+            insert.setString(3, completion.machineKind());
+            insert.setString(4, completion.recipeId());
+            insert.setString(5, completion.dimensionId());
+            insert.setInt(6, completion.blockX());
+            insert.setInt(7, completion.blockY());
+            insert.setInt(8, completion.blockZ());
+            insert.setLong(9, completion.observedAtEpochMillis());
+            insert.executeUpdate();
+        }
+    }
+
+    private void insertCreateRecipeCompletionChanges(
+            List<StoredProductionInventoryChange> changes) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO create_recipe_completion_change (
+                    observation_id, role, slot, item_id, component_fingerprint, count
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            for (StoredProductionInventoryChange change : changes) {
+                insert.setString(1, change.sourceId().toString());
+                insert.setString(2, change.role());
+                insert.setInt(3, change.slot());
+                insert.setString(4, change.itemId());
+                insert.setString(5, change.componentFingerprint());
+                insert.setInt(6, change.count());
+                insert.addBatch();
+            }
+            insert.executeBatch();
+        }
+    }
+
+    private void insertFacilityAccountingReceipt(StoredFacilityAccountingReceipt receipt)
+            throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO facility_accounting_receipt_event (
+                    receipt_id, interface_id, dimension_id, block_x, block_y, block_z,
+                    observed_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, receipt.receiptId().toString());
+            insert.setString(2, receipt.interfaceId().toString());
+            insert.setString(3, receipt.dimensionId());
+            insert.setInt(4, receipt.blockX());
+            insert.setInt(5, receipt.blockY());
+            insert.setInt(6, receipt.blockZ());
+            insert.setLong(7, receipt.observedAtEpochMillis());
+            insert.executeUpdate();
+        }
+    }
+
+    private void insertFacilityAccountingReceiptChanges(
+            List<StoredProductionInventoryChange> changes) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO facility_accounting_receipt_change (
+                    receipt_id, slot, item_id, component_fingerprint, count
+                ) VALUES (?, ?, ?, ?, ?)
+                """)) {
+            for (StoredProductionInventoryChange change : changes) {
+                insert.setString(1, change.sourceId().toString());
+                insert.setInt(2, change.slot());
+                insert.setString(3, change.itemId());
+                insert.setString(4, change.componentFingerprint());
+                insert.setInt(5, change.count());
+                insert.addBatch();
+            }
+            insert.executeBatch();
+        }
+    }
+
+    private void insertFacilityProductionDecision(StoredFacilityProductionDecision decision)
+            throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO facility_production_decision (
+                    observation_id, facility_id, interface_id, receipt_id,
+                    decision, reason, decided_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, decision.observationId().toString());
+            if (decision.facilityId() == null) {
+                insert.setNull(2, java.sql.Types.VARCHAR);
+            } else {
+                insert.setString(2, decision.facilityId().toString());
+            }
+            if (decision.interfaceId() == null) {
+                insert.setNull(3, java.sql.Types.VARCHAR);
+            } else {
+                insert.setString(3, decision.interfaceId().toString());
+            }
+            insert.setString(4, decision.receiptId().toString());
+            insert.setString(5, decision.decision());
+            insert.setString(6, decision.reason());
+            insert.setLong(7, decision.decidedAtEpochMillis());
+            insert.executeUpdate();
+        }
+    }
+
+    public synchronized StoredCreateRecipeCompletion createRecipeCompletion(UUID observationId) {
+        if (observationId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM create_recipe_completion WHERE observation_id = ?
+                """)) {
+            query.setString(1, observationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredCreateRecipeCompletion(
+                        UUID.fromString(result.getString("observation_id")),
+                        result.getString("create_version"),
+                        result.getString("machine_kind"),
+                        result.getString("recipe_id"),
+                        result.getString("dimension_id"),
+                        result.getInt("block_x"),
+                        result.getInt("block_y"),
+                        result.getInt("block_z"),
+                        result.getLong("observed_at_epoch_millis"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Create Recipe Completion", failure);
+        }
+    }
+
+    public synchronized List<StoredProductionInventoryChange> createRecipeCompletionChanges(
+            UUID observationId, String role) {
+        return productionChanges(
+                """
+                SELECT observation_id AS source_id, role, slot, item_id,
+                       component_fingerprint, count
+                FROM create_recipe_completion_change
+                WHERE observation_id = ? AND role = ? ORDER BY slot
+                """,
+                observationId,
+                role,
+                "Unable to read Create Recipe Completion changes");
+    }
+
+    public synchronized StoredFacilityAccountingReceipt facilityAccountingReceipt(UUID receiptId) {
+        if (receiptId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_receipt_event WHERE receipt_id = ?
+                """)) {
+            query.setString(1, receiptId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredFacilityAccountingReceipt(
+                        UUID.fromString(result.getString("receipt_id")),
+                        UUID.fromString(result.getString("interface_id")),
+                        result.getString("dimension_id"),
+                        result.getInt("block_x"),
+                        result.getInt("block_y"),
+                        result.getInt("block_z"),
+                        result.getLong("observed_at_epoch_millis"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Facility Accounting Receipt", failure);
+        }
+    }
+
+    public synchronized List<StoredProductionInventoryChange>
+            facilityAccountingReceiptChanges(UUID receiptId) {
+        return productionChanges(
+                """
+                SELECT receipt_id AS source_id, 'RECEIPT' AS role, slot, item_id,
+                       component_fingerprint, count
+                FROM facility_accounting_receipt_change
+                WHERE receipt_id = ? ORDER BY slot
+                """,
+                receiptId,
+                null,
+                "Unable to read Facility Accounting Receipt changes");
+    }
+
+    private List<StoredProductionInventoryChange> productionChanges(
+            String sql, UUID sourceId, String role, String failureMessage) {
+        if (sourceId == null) {
+            return List.of();
+        }
+        List<StoredProductionInventoryChange> changes = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement(sql)) {
+            query.setString(1, sourceId.toString());
+            if (role != null) {
+                query.setString(2, role);
+            }
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    changes.add(new StoredProductionInventoryChange(
+                            UUID.fromString(result.getString("source_id")),
+                            result.getString("role"),
+                            result.getInt("slot"),
+                            result.getString("item_id"),
+                            result.getString("component_fingerprint"),
+                            result.getInt("count")));
+                }
+            }
+            return List.copyOf(changes);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(failureMessage, failure);
+        }
+    }
+
+    public synchronized StoredFacilityProductionDecision facilityProductionDecision(
+            UUID observationId) {
+        if (observationId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_decision WHERE observation_id = ?
+                """)) {
+            query.setString(1, observationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredFacilityProductionDecision(
+                        UUID.fromString(result.getString("observation_id")),
+                        optionalUuid(result.getString("facility_id")),
+                        optionalUuid(result.getString("interface_id")),
+                        UUID.fromString(result.getString("receipt_id")),
+                        result.getString("decision"),
+                        result.getString("reason"),
+                        result.getLong("decided_at_epoch_millis"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Facility Production Decision", failure);
         }
     }
 
@@ -13815,6 +14194,88 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 69");
+            }
+            if (version < 70) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS create_recipe_completion (
+                            observation_id TEXT PRIMARY KEY,
+                            create_version TEXT NOT NULL
+                                CHECK (length(trim(create_version)) > 0),
+                            machine_kind TEXT NOT NULL
+                                CHECK (length(trim(machine_kind)) > 0),
+                            recipe_id TEXT NOT NULL
+                                CHECK (length(trim(recipe_id)) > 0),
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            block_x INTEGER NOT NULL,
+                            block_y INTEGER NOT NULL,
+                            block_z INTEGER NOT NULL,
+                            observed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (observed_at_epoch_millis >= 0)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS create_recipe_completion_change (
+                            observation_id TEXT NOT NULL
+                                REFERENCES create_recipe_completion(observation_id)
+                                ON DELETE CASCADE,
+                            role TEXT NOT NULL CHECK (role IN ('INPUT', 'OUTPUT')),
+                            slot INTEGER NOT NULL CHECK (slot >= 0),
+                            item_id TEXT NOT NULL CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            count INTEGER NOT NULL CHECK (count > 0),
+                            PRIMARY KEY (observation_id, role, slot)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_receipt_event (
+                            receipt_id TEXT PRIMARY KEY,
+                            interface_id TEXT NOT NULL
+                                REFERENCES facility_accounting_interface(interface_id),
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            block_x INTEGER NOT NULL,
+                            block_y INTEGER NOT NULL,
+                            block_z INTEGER NOT NULL,
+                            observed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (observed_at_epoch_millis >= 0)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_receipt_change (
+                            receipt_id TEXT NOT NULL
+                                REFERENCES facility_accounting_receipt_event(receipt_id)
+                                ON DELETE CASCADE,
+                            slot INTEGER NOT NULL CHECK (slot >= 0),
+                            item_id TEXT NOT NULL CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            count INTEGER NOT NULL CHECK (count > 0),
+                            PRIMARY KEY (receipt_id, slot)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_production_decision (
+                            observation_id TEXT PRIMARY KEY
+                                REFERENCES create_recipe_completion(observation_id)
+                                ON DELETE CASCADE,
+                            facility_id TEXT REFERENCES registered_facility(facility_id),
+                            interface_id TEXT
+                                REFERENCES facility_accounting_interface(interface_id),
+                            receipt_id TEXT NOT NULL UNIQUE
+                                REFERENCES facility_accounting_receipt_event(receipt_id),
+                            decision TEXT NOT NULL CHECK (decision IN (
+                                'INCLUDED', 'UNMATCHED_FACILITY',
+                                'UNMATCHED_INTERFACE_RECEIPT', 'FACILITY_BASELINING',
+                                'FACILITY_TERRITORY_INEFFECTIVE', 'UNSUPPORTED_MACHINE'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            decided_at_epoch_millis INTEGER NOT NULL
+                                CHECK (decided_at_epoch_millis >= 0)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 70");
             }
             connection.commit();
         } catch (SQLException failure) {

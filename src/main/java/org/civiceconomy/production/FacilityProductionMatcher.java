@@ -46,7 +46,7 @@ public final class FacilityProductionMatcher {
                 completion.dimensionId(), completion.blockX(), completion.blockZ());
         if (facility == null) {
             return decision(
-                    completion, null, null, null,
+                    completion, null, null, receipt.receiptId(),
                     FacilityProductionDecisionKind.UNMATCHED_FACILITY,
                     "Create machine is outside every Registered Facility scope");
         }
