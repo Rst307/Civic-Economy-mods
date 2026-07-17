@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 68;
+    private static final int SCHEMA_VERSION = 69;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2013,6 +2013,28 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredRegisteredFacility registeredFacilityAt(
+            String dimensionId, int blockX, int blockZ) {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT facility.*
+                FROM registered_facility facility
+                JOIN registered_facility_claim claim
+                  ON claim.facility_id = facility.facility_id
+                WHERE claim.dimension_id = ? AND claim.chunk_x = ? AND claim.chunk_z = ?
+                """)) {
+            query.setString(1, dimensionId);
+            query.setInt(2, Math.floorDiv(blockX, 16));
+            query.setInt(3, Math.floorDiv(blockZ, 16));
+            return readRegisteredFacility(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to locate Registered Facility at machine position", failure);
+        }
+    }
+
     public synchronized List<StoredFacilityClaim> registeredFacilityClaims(UUID facilityId) {
         List<StoredFacilityClaim> scope = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""
@@ -2053,6 +2075,139 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getInt("core_block_z"),
                     UUID.fromString(result.getString("actor_player_id")),
                     result.getString("state"),
+                    result.getString("reason"),
+                    result.getLong("registered_at_epoch_millis"));
+        }
+    }
+
+    public synchronized StoredFacilityAccountingInterface registerFacilityAccountingInterface(
+            UUID interfaceId,
+            String serviceIdentity,
+            String requestId,
+            UUID facilityId,
+            String dimensionId,
+            int blockX,
+            int blockY,
+            int blockZ,
+            UUID actorPlayerId,
+            String reason,
+            long registeredAtEpochMillis) {
+        if (interfaceId == null || serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank() || facilityId == null
+                || dimensionId == null || dimensionId.isBlank() || actorPlayerId == null
+                || reason == null || reason.isBlank() || registeredAtEpochMillis < 0L) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Interface values are invalid");
+        }
+        StoredFacilityAccountingInterface replay = facilityAccountingInterface(
+                serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.interfaceId().equals(interfaceId)
+                    || !replay.facilityId().equals(facilityId)
+                    || !replay.dimensionId().equals(dimensionId)
+                    || replay.blockX() != blockX
+                    || replay.blockY() != blockY
+                    || replay.blockZ() != blockZ
+                    || !replay.actorPlayerId().equals(actorPlayerId)
+                    || !replay.reason().equals(reason)) {
+                throw new IllegalStateException(
+                        "Facility Accounting Interface replay changed its immutable payload");
+            }
+            return replay;
+        }
+        int chunkX = Math.floorDiv(blockX, 16);
+        int chunkZ = Math.floorDiv(blockZ, 16);
+        try (PreparedStatement scope = connection.prepareStatement("""
+                SELECT 1 FROM registered_facility_claim
+                WHERE facility_id = ? AND dimension_id = ? AND chunk_x = ? AND chunk_z = ?
+                """)) {
+            scope.setString(1, facilityId.toString());
+            scope.setString(2, dimensionId);
+            scope.setInt(3, chunkX);
+            scope.setInt(4, chunkZ);
+            try (ResultSet result = scope.executeQuery()) {
+                if (!result.next()) {
+                    throw new IllegalArgumentException(
+                            "Facility Accounting Interface is outside its Registered Facility scope");
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to verify Facility Accounting Interface scope", failure);
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO facility_accounting_interface (
+                    interface_id, service_identity, request_id, facility_id,
+                    dimension_id, block_x, block_y, block_z,
+                    actor_player_id, reason, registered_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, interfaceId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, facilityId.toString());
+            insert.setString(5, dimensionId);
+            insert.setInt(6, blockX);
+            insert.setInt(7, blockY);
+            insert.setInt(8, blockZ);
+            insert.setString(9, actorPlayerId.toString());
+            insert.setString(10, reason);
+            insert.setLong(11, registeredAtEpochMillis);
+            insert.executeUpdate();
+            return facilityAccountingInterface(facilityId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to register Facility Accounting Interface " + interfaceId, failure);
+        }
+    }
+
+    public synchronized StoredFacilityAccountingInterface facilityAccountingInterface(
+            UUID facilityId) {
+        if (facilityId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_interface WHERE facility_id = ?
+                """)) {
+            query.setString(1, facilityId.toString());
+            return readFacilityAccountingInterface(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Interface", failure);
+        }
+    }
+
+    public synchronized StoredFacilityAccountingInterface facilityAccountingInterface(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_interface
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readFacilityAccountingInterface(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Interface request", failure);
+        }
+    }
+
+    private static StoredFacilityAccountingInterface readFacilityAccountingInterface(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredFacilityAccountingInterface(
+                    UUID.fromString(result.getString("interface_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("facility_id")),
+                    result.getString("dimension_id"),
+                    result.getInt("block_x"),
+                    result.getInt("block_y"),
+                    result.getInt("block_z"),
+                    UUID.fromString(result.getString("actor_player_id")),
                     result.getString("reason"),
                     result.getLong("registered_at_epoch_millis"));
         }
@@ -13638,6 +13793,28 @@ public final class CivicDatabase implements AutoCloseable {
                         ON registered_facility (nation_id, state, facility_id)
                         """);
                 statement.execute("PRAGMA user_version = 68");
+            }
+            if (version < 69) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_interface (
+                            interface_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            facility_id TEXT NOT NULL UNIQUE
+                                REFERENCES registered_facility(facility_id) ON DELETE CASCADE,
+                            dimension_id TEXT NOT NULL CHECK (length(trim(dimension_id)) > 0),
+                            block_x INTEGER NOT NULL,
+                            block_y INTEGER NOT NULL,
+                            block_z INTEGER NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            registered_at_epoch_millis INTEGER NOT NULL
+                                CHECK (registered_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (dimension_id, block_x, block_y, block_z)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 69");
             }
             connection.commit();
         } catch (SQLException failure) {

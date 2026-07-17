@@ -87,7 +87,7 @@ class CivicDatabaseV64MigrationTest {
                                     "Default single-Citizen migrated approval"));
             StoredBudget budget = migrated.budget(budgetId);
 
-            assertEquals(68, migrated.schemaVersion());
+            assertEquals(69, migrated.schemaVersion());
             assertEquals("APPROVED", approval.state());
             assertEquals(1, approval.requiredApprovals());
             assertEquals("APPROVED", budget.state());

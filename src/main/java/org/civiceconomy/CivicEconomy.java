@@ -7,8 +7,10 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterGameTestsEvent;
 import org.civiceconomy.compat.CompatibilityReport;
+import org.civiceconomy.compat.CompatibilityProblem;
 import org.civiceconomy.compat.CompatibilityScanner;
 import org.civiceconomy.gametest.FtbIntegrationGameTests;
+import org.civiceconomy.gametest.CreateIntegrationGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyFiscalAccountsGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyMonetaryGuardGameTests;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPermanentDestructionsGameTests;
@@ -17,6 +19,7 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAcc
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMonetaryGuard;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
 import org.civiceconomy.platform.neoforge.CivicCommandArgumentTypes;
+import org.civiceconomy.platform.neoforge.CreateMillstoneObservationBridge;
 import org.civiceconomy.platform.neoforge.CivicServerRuntime;
 import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
 import org.civiceconomy.platform.neoforge.MintMaterialCustodyGameTests;
@@ -37,6 +40,14 @@ public final class CivicEconomy {
         serverRuntime = runtime;
         modEventBus.addListener(RegisterGameTestsEvent.class, CivicEconomy::registerGameTests);
         CompatibilityReport report = CompatibilityScanner.firstSlice().scan(new NeoForgeModCatalog());
+        if (report.productionScoringEnabled()) {
+            var problem = CreateMillstoneObservationBridge.verifyRuntimeContract();
+            if (problem.isPresent()) {
+                var problems = new java.util.ArrayList<>(report.problems());
+                problems.add(new CompatibilityProblem("create", problem.orElseThrow()));
+                report = new CompatibilityReport(report.startupAllowed(), false, problems);
+            }
+        }
         if (!report.startupAllowed()) {
             String details = report.problems().stream()
                     .map(problem -> problem.modId() + ": " + problem.reason())
@@ -82,5 +93,8 @@ public final class CivicEconomy {
         event.register(LightmansCurrencyMonetaryGuardGameTests.class);
         event.register(LightmansCurrencyPermanentDestructionsGameTests.class);
         event.register(LightmansCurrencyPlayerPaymentsGameTests.class);
+        if (compatibilityReport().productionScoringEnabled()) {
+            event.register(CreateIntegrationGameTests.class);
+        }
     }
 }

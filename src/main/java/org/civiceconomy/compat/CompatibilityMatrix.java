@@ -26,7 +26,9 @@ public final class CompatibilityMatrix {
             "dev.ftb.mods.ftbchunks.api.ClaimedChunkManager",
             "dev.ftb.mods.ftbchunks.api.event.ClaimedChunkEvent");
     public static final Set<String> CREATE_PROBE_CLASSES = Set.of(
-            "com.simibubi.create.content.processing.recipe.ProcessingRecipe");
+            "com.simibubi.create.content.processing.recipe.ProcessingRecipe",
+            "com.simibubi.create.content.kinetics.millstone.MillstoneBlockEntity",
+            "com.simibubi.create.content.kinetics.millstone.MillingRecipe");
 
     private final Map<String, SupportedMod> requiredMods;
     private final SupportedMod create;

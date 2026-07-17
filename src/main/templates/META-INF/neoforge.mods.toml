@@ -14,6 +14,9 @@ Civic Economy fiscal and monetary infrastructure.
 [[mixins]]
 config="civiceconomy.mixins.json"
 
+[[mixins]]
+config="civiceconomy.create.mixins.json"
+
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"

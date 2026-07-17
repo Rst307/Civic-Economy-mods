@@ -26,7 +26,7 @@ class CivicDatabaseV68MigrationTest {
         downgradeToV67(file);
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(68, migrated.schemaVersion());
+            assertEquals(69, migrated.schemaVersion());
             assertEquals(teamId, migrated.nation(nationId).ftbTeamId());
             assertEquals(0, migrated.registeredFacilityClaims(
                             UUID.fromString("33333333-3333-3333-3333-333333333333"))

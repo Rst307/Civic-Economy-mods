@@ -260,6 +260,14 @@ _Avoid_: 任意机器集合、工厂建筑外观
 一个 Registered Facility 在首次登记或范围变化后、开始接受生产证据前建立的固定机器、核算接口和库存起点；基线尚未完成时设施不能贡献国力。
 _Avoid_: 当前库存价值、Create 动力容量、自动生产分
 
+**设施核算接口（Facility Accounting Interface）**:
+一个 Registered Facility 唯一绑定、位置固定的 Civic 专用库存核算边界，用于确认产物进入该设施的可审计库存路径。
+_Avoid_: 普通箱子、任意物流网、设施核心
+
+**设施核算入库记录（Facility Accounting Receipt）**:
+Facility Accounting Interface 对一次精确产物入库形成的服务器权威记录；它必须能与受支持机器的真实配方完成对应，但对应成功本身不保证形成国力贡献。
+_Avoid_: 玩家收据、库存快照、机器完成次数
+
 **生产净增值（Production Value Added）**:
 受验证产出的全服参考价值减去已消耗原料参考价值后的生产贡献。
 _Avoid_: 产出总价、机器次数、库存总值
