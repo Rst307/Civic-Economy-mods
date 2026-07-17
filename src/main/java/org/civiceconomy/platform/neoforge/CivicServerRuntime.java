@@ -9,7 +9,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -147,10 +146,9 @@ import org.civiceconomy.territory.TerritoryMaintenanceRestorationHistory;
 import org.civiceconomy.territory.SettleAvailableTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryFiscalValidity;
 import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
-import org.civiceconomy.strength.NationalStrengthComponent;
-import org.civiceconomy.strength.NationalStrengthComponents;
 import org.civiceconomy.strength.NationalStrengthRecalculation;
-import org.civiceconomy.strength.NationalStrengthRecalculator;
+import org.civiceconomy.strength.NationalStrengthSnapshot;
+import org.civiceconomy.strength.NationalStrengthSnapshotBuilder;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.MoneyAmount;
@@ -193,11 +191,14 @@ public final class CivicServerRuntime {
     private static final int TREASURY_WITHDRAWAL_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int MINT_BATCH_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
+    private static final int NATIONAL_STRENGTH_RECALCULATION_INTERVAL_TICKS = 20 * 60;
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
     private static final int DATABASE_BACKUP_RETENTION = 8;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
+    private static final Duration NATIONAL_STRENGTH_ACTIVITY_WINDOW = Duration.ofDays(30);
+    private static final long NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE = 10_000L;
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
         @Override
         public Optional<NationTeam> find(UUID teamId) {
@@ -248,6 +249,13 @@ public final class CivicServerRuntime {
             throw new IllegalStateException("Civic server runtime has not been constructed");
         }
         return runtime;
+    }
+
+    Optional<NationalStrengthSnapshot> nationalStrengthSnapshotForGameTest() {
+        RuntimeState current = state;
+        return current == null
+                ? Optional.empty()
+                : Optional.ofNullable(current.nationalStrengthSnapshot);
     }
 
     public void onServerStarted(ServerStartedEvent event) {
@@ -312,6 +320,7 @@ public final class CivicServerRuntime {
         scheduleTreasuryWithdrawalRecovery(state);
         scheduleMintBatchRecovery(state);
         scheduleTerritoryMaintenanceAssessment(state);
+        scheduleNationalStrengthRecalculation(state);
         scheduleTerritoryForceLoadEnforcementRecovery(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
         if (CivicDebugWorldData.get(server).enabled()) {
@@ -411,6 +420,12 @@ public final class CivicServerRuntime {
         if (current.ticksSinceDatabaseBackup >= DATABASE_BACKUP_INTERVAL_TICKS) {
             current.ticksSinceDatabaseBackup = 0;
             scheduleLifecycleDatabaseBackup(current, "scheduled");
+        }
+        current.ticksSinceNationalStrengthRecalculation++;
+        if (current.ticksSinceNationalStrengthRecalculation
+                >= NATIONAL_STRENGTH_RECALCULATION_INTERVAL_TICKS) {
+            current.ticksSinceNationalStrengthRecalculation = 0;
+            scheduleNationalStrengthRecalculation(current);
         }
         Throwable failure = current.writer.failure();
         if (failure != null && !current.failureLogged) {
@@ -592,7 +607,6 @@ public final class CivicServerRuntime {
     CompletableFuture<NationalStrengthRecalculation> nationalStrengthStatus(ServerPlayer actor) {
         RuntimeState current = requireState();
         UUID actorPlayerId = actor.getUUID();
-        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         return onServer(current, () -> requireActorTeam(actorPlayerId))
                 .thenCompose(team -> current.writer.submitDatabase(database -> {
                     NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
@@ -600,24 +614,26 @@ public final class CivicServerRuntime {
                     var nation = nations.findByFtbTeam(team.teamId())
                             .orElseThrow(() -> new SecurityException(
                                     "Your FTB Team is not bound to a formal Nation"));
-                    return new NationalStrengthRecalculator(
+                    NationalStrengthSnapshot snapshot = current.nationalStrengthSnapshot;
+                    NationalStrengthRecalculation cached = snapshot == null
+                            ? null
+                            : snapshot.nations().get(nation.nationId());
+                    if (cached != null) {
+                        return cached;
+                    }
+                    NationalStrengthSnapshot refreshed = new NationalStrengthSnapshotBuilder(
                                     database,
-                                    Duration.ofDays(30).toMillis(),
-                                    10_000L)
-                            .recalculate(
-                                    nation.nationId(),
-                                    commandClock.millis(),
-                                    new NationalStrengthComponents(
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            EnumSet.of(
-                                                    NationalStrengthComponent.EFFECTIVE_CITIZENS,
-                                                    NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE,
-                                                    NationalStrengthComponent.EFFECTIVE_TERRITORY,
-                                                    NationalStrengthComponent.COMPLIANCE)));
+                                    NATIONAL_STRENGTH_ACTIVITY_WINDOW.toMillis(),
+                                    NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE)
+                            .recalculateAll(clock.millis());
+                    current.nationalStrengthSnapshot = refreshed;
+                    NationalStrengthRecalculation recalculation =
+                            refreshed.nations().get(nation.nationId());
+                    if (recalculation == null) {
+                        throw new IllegalStateException(
+                                "National Strength snapshot does not contain the formal Nation");
+                    }
+                    return recalculation;
                 }));
     }
 
@@ -3478,6 +3494,27 @@ public final class CivicServerRuntime {
                 "Disable FTB force-load for suspended Territory");
     }
 
+    private void scheduleNationalStrengthRecalculation(RuntimeState current) {
+        if (state != current
+                || !current.nationalStrengthRecalculationQueued.compareAndSet(false, true)) {
+            return;
+        }
+        long recalculatedAt = clock.millis();
+        current.writer.submitDatabase(database -> new NationalStrengthSnapshotBuilder(
+                        database,
+                        NATIONAL_STRENGTH_ACTIVITY_WINDOW.toMillis(),
+                        NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE)
+                .recalculateAll(recalculatedAt))
+                .whenComplete((snapshot, failure) -> {
+                    current.nationalStrengthRecalculationQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error("Automatic National Strength recalculation failed closed", failure);
+                    } else if (state == current) {
+                        current.nationalStrengthSnapshot = snapshot;
+                    }
+                });
+    }
+
     private void scheduleTerritoryForceLoadEnforcementRecovery(RuntimeState current) {
         if (state != current
                 || !current.territoryForceLoadEnforcementQueued.compareAndSet(false, true)) {
@@ -3657,7 +3694,9 @@ public final class CivicServerRuntime {
         private final AtomicBoolean territoryForceLoadEnforcementQueued = new AtomicBoolean();
         private final AtomicBoolean territoryForceLoadRestrictionRefreshQueued =
                 new AtomicBoolean();
+        private final AtomicBoolean nationalStrengthRecalculationQueued = new AtomicBoolean();
         private final AtomicBoolean databaseBackupQueued = new AtomicBoolean();
+        private volatile NationalStrengthSnapshot nationalStrengthSnapshot;
         private int ticksSinceCheckpoint;
         private int ticksSinceFiscalExpiry;
         private int ticksSinceNationApplicationExpiry;
@@ -3667,6 +3706,7 @@ public final class CivicServerRuntime {
         private int ticksSinceTreasuryWithdrawalRecovery;
         private int ticksSinceMintBatchRecovery;
         private int ticksSinceTerritoryMaintenanceAssessment;
+        private int ticksSinceNationalStrengthRecalculation;
         private int ticksSinceDatabaseBackup;
         private boolean failureLogged;
 

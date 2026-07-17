@@ -1440,6 +1440,14 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "server-authoritative Budget command actions");
         helper.assertValueEqual(
+                Set.of("status"),
+                economy.getChild("nation")
+                        .getChild("strength")
+                        .getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "read-only National Strength inspection actions");
+        helper.assertValueEqual(
                 Set.of("request", "approve", "approval", "policy"),
                 economy.getChild("nation")
                         .getChild("budget")
@@ -1547,7 +1555,9 @@ public final class CivicServerRuntimeGameTests {
                     civic.getChild("debug") == null,
                     "dedicated GameTest server omits DEBUG WORLD writes by default");
         }
-        helper.succeed();
+        helper.succeedWhen(() -> helper.assertTrue(
+                CivicServerRuntime.current().nationalStrengthSnapshotForGameTest().isPresent(),
+                "startup National Strength snapshot"));
     }
 
     @GameTest(template = "empty", timeoutTicks = 200)
