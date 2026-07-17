@@ -142,6 +142,43 @@ class FacilityBaselineAdministrationTest {
             assertEquals(snapshot.machines(), captured.machines());
             assertEquals(snapshot.startingInventory(), captured.startingInventory());
             assertEquals(captured, replay.baseline());
+
+            FacilityBaselineActivationWork activationWork = assertInstanceOf(
+                    FacilityBaselineActivationWork.class,
+                    administration.prepareActivation(
+                            ACTOR,
+                            TEAM,
+                            "activate-current-baseline",
+                            INTERFACE_POSITION,
+                            "Activate current trusted Baseline"));
+            FacilityAccountingBaseline activated = administration.completeActivation(
+                    activationWork,
+                    new FacilityAccountingBaselineSnapshot(
+                            "6.0.6",
+                            snapshot.machines(),
+                            List.of(new MachineInventoryChange(
+                                    2,
+                                    new ProductionStack(
+                                            "minecraft:flour",
+                                            "{id:\"minecraft:flour\"}",
+                                            11)))));
+            FacilityBaselineActivationReplay activationReplay = assertInstanceOf(
+                    FacilityBaselineActivationReplay.class,
+                    administration.prepareActivation(
+                            ACTOR,
+                            TEAM,
+                            "activate-current-baseline",
+                            INTERFACE_POSITION,
+                            "Activate current trusted Baseline"));
+            FacilityAccountingStatus status = administration.status(
+                    ACTOR, TEAM, INTERFACE_POSITION);
+
+            assertEquals(FacilityAccountingBaselineState.ACTIVE, activated.state());
+            assertEquals(snapshot.startingInventory(), activated.startingInventory());
+            assertEquals(activated, activationReplay.baseline());
+            assertEquals(RegisteredFacilityState.ACTIVE, status.facility().state());
+            assertEquals(INTERFACE, status.accountingInterface().interfaceId());
+            assertEquals(activated, status.baseline());
         }
     }
 

@@ -111,6 +111,7 @@ import org.civiceconomy.persistence.StoredFacilityBaselineMachine;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
 import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.production.FacilityAccountingBaseline;
+import org.civiceconomy.production.FacilityAccountingStatus;
 import org.civiceconomy.mint.MintBatch;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
@@ -1365,13 +1366,13 @@ public final class CivicServerRuntimeGameTests {
                 .getChild("backup");
         var facility = economy.getChild("nation").getChild("facility");
         helper.assertValueEqual(
-                Set.of("interface", "register", "baseline"),
+                Set.of("interface", "register", "baseline", "status"),
                 facility.getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Registered Facility actions");
         helper.assertValueEqual(
-                Set.of("capture"),
+                Set.of("capture", "activate"),
                 facility.getChild("baseline").getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -1648,8 +1649,20 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<FacilityAccountingBaseline> replayedBaseline =
                 new AtomicReference<>();
         AtomicReference<Throwable> replayFailure = new AtomicReference<>();
+        AtomicBoolean activationFinished = new AtomicBoolean();
+        AtomicReference<Throwable> activationFailure = new AtomicReference<>();
+        AtomicReference<StoredFacilityAccountingBaseline> activatedBaseline =
+                new AtomicReference<>();
+        AtomicReference<StoredRegisteredFacility> activatedFacility =
+                new AtomicReference<>();
+        AtomicReference<FacilityAccountingBaseline> replayedActivation =
+                new AtomicReference<>();
+        AtomicReference<FacilityAccountingStatus> inspectedStatus =
+                new AtomicReference<>();
         String baselineRequestId = requestId + "-baseline";
         String baselineReason = "Capture trusted Facility Accounting Baseline";
+        String activationRequestId = requestId + "-activation";
+        String activationReason = "Activate trusted Facility Accounting Baseline";
 
         runtime.submitDatabase(database -> {
                     ServiceIdentity setupService =
@@ -1986,17 +1999,109 @@ public final class CivicServerRuntimeGameTests {
                 })
                 .thenExecute(() -> {
                     if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        activationFinished.set(true);
+                        return;
+                    }
+                    try {
+                        int result = helper.getLevel()
+                                .getServer()
+                                .getCommands()
+                                .getDispatcher()
+                                .execute(
+                                        "civic economy nation facility baseline activate "
+                                                + activationRequestId
+                                                + " "
+                                                + activationReason,
+                                        player.createCommandSourceStack()
+                                                .withSuppressedOutput());
+                        helper.assertValueEqual(
+                                1, result, "Facility Baseline activation command result");
+                        helper.runAfterDelay(20L, () -> runtime
+                                .submitDatabase(database -> {
+                                    UUID facilityId = persisted.get().facilityId();
+                                    activatedBaseline.set(
+                                            database.facilityAccountingBaseline(facilityId));
+                                    activatedFacility.set(
+                                            database.registeredFacility(facilityId));
+                                    return null;
+                                })
+                                .whenComplete((ignored, failure) -> {
+                                    activationFailure.set(failure);
+                                    activationFinished.set(true);
+                                }));
+                    } catch (Throwable failure) {
+                        activationFailure.set(failure);
+                        activationFinished.set(true);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(
+                            activationFinished.get(),
+                            "Facility Baseline activation completed");
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        return;
+                    }
+                    helper.assertTrue(
+                            activationFailure.get() == null,
+                            activationFailure.get() == null
+                                    ? "Facility Baseline activation state"
+                                    : "Facility Baseline activation failure: "
+                                            + rootCause(activationFailure.get()).getMessage());
+                    helper.assertTrue(
+                            activatedBaseline.get() != null,
+                            "persisted activated Facility Baseline");
+                    helper.assertTrue(
+                            activatedFacility.get() != null,
+                            "persisted activated Facility");
+                    helper.assertValueEqual(
+                            "ACTIVE",
+                            activatedBaseline.get().state(),
+                            "activated Baseline state");
+                    helper.assertValueEqual(
+                            "ACTIVE",
+                            activatedFacility.get().state(),
+                            "activated Facility state");
+                    helper.assertValueEqual(
+                            7,
+                            persistedBaselineInventory.get().getFirst().count(),
+                            "activation preserves captured starting inventory");
+                })
+                .thenExecute(() -> {
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
                         replayFinished.set(true);
                         return;
                     }
                     helper.getLevel().removeBlock(expectedInterfaceBlock, false);
                     helper.getLevel().removeBlock(expectedCore, false);
-                    runtime.captureFacilityAccountingBaseline(
-                                    player,
-                                    baselineRequestId,
-                                    baselineReason)
-                            .whenComplete((baseline, failure) -> {
-                                replayedBaseline.set(baseline);
+                    try {
+                        int statusResult = helper.getLevel()
+                                .getServer()
+                                .getCommands()
+                                .getDispatcher()
+                                .execute(
+                                        "civic economy nation facility status",
+                                        player.createCommandSourceStack()
+                                                .withSuppressedOutput());
+                        helper.assertValueEqual(
+                                1, statusResult, "Facility status command result");
+                    } catch (Throwable failure) {
+                        replayFailure.set(failure);
+                        replayFinished.set(true);
+                        return;
+                    }
+                    CompletableFuture<FacilityAccountingBaseline> captureReplay =
+                            runtime.captureFacilityAccountingBaseline(
+                                    player, baselineRequestId, baselineReason);
+                    CompletableFuture<FacilityAccountingBaseline> activationReplay =
+                            runtime.activateFacilityAccountingBaseline(
+                                    player, activationRequestId, activationReason);
+                    CompletableFuture<FacilityAccountingStatus> status =
+                            runtime.facilityAccountingStatus(player);
+                    captureReplay.thenAccept(replayedBaseline::set);
+                    activationReplay.thenAccept(replayedActivation::set);
+                    status.thenAccept(inspectedStatus::set);
+                    CompletableFuture.allOf(captureReplay, activationReplay, status)
+                            .whenComplete((ignored, failure) -> {
                                 replayFailure.set(failure);
                                 replayFinished.set(true);
                             });
@@ -2015,6 +2120,23 @@ public final class CivicServerRuntimeGameTests {
                                 persistedBaseline.get().baselineId(),
                                 replayedBaseline.get().baselineId(),
                                 "Facility Baseline replay identity");
+                        helper.assertValueEqual(
+                                activatedBaseline.get().baselineId(),
+                                replayedActivation.get().baselineId(),
+                                "Facility Baseline activation replay identity");
+                        helper.assertValueEqual(
+                                persisted.get().facilityId(),
+                                inspectedStatus.get().facility().facilityId(),
+                                "Facility status exact identity");
+                        helper.assertValueEqual(
+                                org.civiceconomy.production.RegisteredFacilityState.ACTIVE,
+                                inspectedStatus.get().facility().state(),
+                                "Facility status active Facility");
+                        helper.assertValueEqual(
+                                org.civiceconomy.production
+                                        .FacilityAccountingBaselineState.ACTIVE,
+                                inspectedStatus.get().baseline().state(),
+                                "Facility status active Baseline");
                     }
                 })
                 .thenExecute(() -> {

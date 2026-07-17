@@ -116,10 +116,13 @@ import org.civiceconomy.production.EffectiveTerritoryFacilityAuthority;
 import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.production.FacilityAccountingBaseline;
 import org.civiceconomy.production.FacilityAccountingBaselineSnapshot;
+import org.civiceconomy.production.FacilityAccountingStatus;
 import org.civiceconomy.production.FacilityAccountingInterfaceRegistry;
 import org.civiceconomy.production.FacilityAccountingInterface;
 import org.civiceconomy.production.FacilityAccountingInterfacePosition;
 import org.civiceconomy.production.FacilityBaselineAdministration;
+import org.civiceconomy.production.FacilityBaselineActivationReplay;
+import org.civiceconomy.production.FacilityBaselineActivationWork;
 import org.civiceconomy.production.FacilityBaselineCaptureReplay;
 import org.civiceconomy.production.FacilityBaselineCaptureWork;
 import org.civiceconomy.production.FacilityCorePosition;
@@ -1694,7 +1697,10 @@ public final class CivicServerRuntime {
                     FacilityBaselineCaptureWork work =
                             (FacilityBaselineCaptureWork) preparation;
                     return onServer(current, () ->
-                                    captureFacilityBaselineServerState(actor, work))
+                                    snapshotFacilityBaselineServerState(
+                                            actor,
+                                            work.facility(),
+                                            work.accountingInterface()))
                             .thenCompose(captured -> current.writer.submitDatabase(database ->
                                     facilityBaselineAdministration(
                                                     database,
@@ -1702,9 +1708,68 @@ public final class CivicServerRuntime {
                                                     captured.ownership(),
                                                     commandClock)
                                             .completeCapture(
-                                                    captured.work(),
+                                                    work,
                                                     captured.snapshot())));
                 });
+    }
+
+    CompletableFuture<FacilityAccountingBaseline> activateFacilityAccountingBaseline(
+            ServerPlayer actor, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityBaselineActor(actor))
+                .thenCompose(actorSnapshot -> current.writer.submitDatabase(database ->
+                        facilityBaselineAdministration(
+                                        database,
+                                        actorSnapshot.team(),
+                                        NO_TERRITORY_OWNERSHIP,
+                                        commandClock)
+                                .prepareActivation(
+                                        actorPlayerId,
+                                        actorSnapshot.team().teamId(),
+                                        requestId,
+                                        actorSnapshot.position(),
+                                        reason)))
+                .thenCompose(preparation -> {
+                    if (preparation instanceof FacilityBaselineActivationReplay replay) {
+                        return CompletableFuture.completedFuture(replay.baseline());
+                    }
+                    FacilityBaselineActivationWork work =
+                            (FacilityBaselineActivationWork) preparation;
+                    return onServer(current, () ->
+                                    snapshotFacilityBaselineServerState(
+                                            actor,
+                                            work.facility(),
+                                            work.accountingInterface()))
+                            .thenCompose(captured -> current.writer.submitDatabase(database ->
+                                    facilityBaselineAdministration(
+                                                    database,
+                                                    captured.team(),
+                                                    captured.ownership(),
+                                                    commandClock)
+                                            .completeActivation(
+                                                    work,
+                                                    captured.snapshot())));
+                });
+    }
+
+    CompletableFuture<FacilityAccountingStatus> facilityAccountingStatus(
+            ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityBaselineActor(actor))
+                .thenCompose(actorSnapshot -> current.writer.submitDatabase(database ->
+                        facilityBaselineAdministration(
+                                        database,
+                                        actorSnapshot.team(),
+                                        NO_TERRITORY_OWNERSHIP,
+                                        commandClock)
+                                .status(
+                                        actorPlayerId,
+                                        actorSnapshot.team().teamId(),
+                                        actorSnapshot.position())));
     }
 
     private FacilityBaselineActorSnapshot snapshotFacilityBaselineActor(ServerPlayer actor) {
@@ -1719,10 +1784,12 @@ public final class CivicServerRuntime {
                         position.getZ()));
     }
 
-    private FacilityBaselineServerCapture captureFacilityBaselineServerState(
-            ServerPlayer actor, FacilityBaselineCaptureWork work) {
+    private FacilityBaselineServerSnapshot snapshotFacilityBaselineServerState(
+            ServerPlayer actor,
+            RegisteredFacility facility,
+            FacilityAccountingInterface accountingInterface) {
         NationTeam team = requireActorTeam(actor.getUUID());
-        if (!team.teamId().equals(work.facility().ftbTeamId())) {
+        if (!team.teamId().equals(facility.ftbTeamId())) {
             throw new SecurityException(
                     "Facility actor changed FTB Team before Baseline capture");
         }
@@ -1739,8 +1806,8 @@ public final class CivicServerRuntime {
                         new TerritoryClaimPosition(dimensionId, chunkX, chunkZ)));
         FacilityAccountingBaselineSnapshot snapshot =
                 new ServerFacilityAccountingBaselineSnapshotSource(actor.getServer())
-                        .capture(work.facility(), work.accountingInterface());
-        return new FacilityBaselineServerCapture(work, snapshot, team, ownership);
+                        .capture(facility, accountingInterface);
+        return new FacilityBaselineServerSnapshot(snapshot, team, ownership);
     }
 
     private FacilityBaselineAdministration facilityBaselineAdministration(
@@ -4097,8 +4164,7 @@ public final class CivicServerRuntime {
     private record FacilityBaselineActorSnapshot(
             NationTeam team, FacilityAccountingInterfacePosition position) {}
 
-    private record FacilityBaselineServerCapture(
-            FacilityBaselineCaptureWork work,
+    private record FacilityBaselineServerSnapshot(
             FacilityAccountingBaselineSnapshot snapshot,
             NationTeam team,
             TerritoryOwnershipSource ownership) {}

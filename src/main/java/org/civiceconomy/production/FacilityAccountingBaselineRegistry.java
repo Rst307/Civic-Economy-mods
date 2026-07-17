@@ -124,15 +124,9 @@ public final class FacilityAccountingBaselineRegistry {
             throw new IllegalArgumentException(
                     "Facility Accounting Baseline activation request is required");
         }
-        StoredFacilityAccountingBaseline replay =
-                database.facilityAccountingBaselineActivationReplay(
-                        request.serviceIdentity().value(),
-                        request.requestId(),
-                        request.facilityId(),
-                        request.actorPlayerId(),
-                        request.reason());
+        FacilityAccountingBaseline replay = activationReplay(request);
         if (replay != null) {
-            return toBaseline(replay);
+            return replay;
         }
         StoredFacilityAccountingBaseline stored = database.facilityAccountingBaseline(
                 request.facilityId());
@@ -176,6 +170,22 @@ public final class FacilityAccountingBaselineRegistry {
                 request.actorPlayerId(),
                 request.reason(),
                 clock.millis()));
+    }
+
+    public FacilityAccountingBaseline activationReplay(
+            ActivateFacilityAccountingBaseline request) {
+        if (request == null) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Baseline activation request is required");
+        }
+        StoredFacilityAccountingBaseline replay =
+                database.facilityAccountingBaselineActivationReplay(
+                        request.serviceIdentity().value(),
+                        request.requestId(),
+                        request.facilityId(),
+                        request.actorPlayerId(),
+                        request.reason());
+        return replay == null ? null : toBaseline(replay);
     }
 
     private void assertCaptureReplay(

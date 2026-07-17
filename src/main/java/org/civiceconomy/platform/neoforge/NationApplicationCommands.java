@@ -1386,52 +1386,100 @@ final class NationApplicationCommands {
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> facilityCommand() {
+        var capture = Commands.argument("requestId", StringArgumentType.word())
+                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                        .executes(context -> captureFacilityAccountingBaseline(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "requestId"),
+                                StringArgumentType.getString(context, "reason"))));
+        var activate = Commands.argument("requestId", StringArgumentType.word())
+                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                        .executes(context -> activateFacilityAccountingBaseline(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "requestId"),
+                                StringArgumentType.getString(context, "reason"))));
+        var bind = Commands.argument("requestId", StringArgumentType.word())
+                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                        .executes(context -> bindFacilityAccountingInterface(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "requestId"),
+                                StringArgumentType.getString(context, "reason"))));
+        var register = Commands.argument("requestId", StringArgumentType.word())
+                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                        .executes(context -> registerFacility(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "requestId"),
+                                StringArgumentType.getString(context, "reason"))));
         return Commands.literal("facility")
                 .then(Commands.literal("baseline")
-                        .then(Commands.literal("capture")
-                                .then(Commands.argument(
-                                                "requestId",
-                                                StringArgumentType.word())
-                                        .then(Commands.argument(
-                                                        "reason",
-                                                        StringArgumentType.greedyString())
-                                                .executes(context ->
-                                                        captureFacilityAccountingBaseline(
-                                                                context.getSource(),
-                                                                StringArgumentType.getString(
-                                                                        context,
-                                                                        "requestId"),
-                                                                StringArgumentType.getString(
-                                                                        context,
-                                                                        "reason")))))))
+                        .then(Commands.literal("capture").then(capture))
+                        .then(Commands.literal("activate").then(activate)))
                 .then(Commands.literal("interface")
-                        .then(Commands.literal("bind")
-                                .then(Commands.argument(
-                                                "requestId",
-                                                StringArgumentType.word())
-                                        .then(Commands.argument(
-                                                        "reason",
-                                                        StringArgumentType.greedyString())
-                                                .executes(context ->
-                                                        bindFacilityAccountingInterface(
-                                                                context.getSource(),
-                                                                StringArgumentType.getString(
-                                                                        context,
-                                                                        "requestId"),
-                                                                StringArgumentType.getString(
-                                                                        context,
-                                                                        "reason")))))))
-                .then(Commands.literal("register")
-                        .then(Commands.argument("requestId", StringArgumentType.word())
-                                .then(Commands.argument(
-                                                "reason",
-                                                StringArgumentType.greedyString())
-                                        .executes(context -> registerFacility(
-                                                context.getSource(),
-                                                StringArgumentType.getString(
-                                                        context, "requestId"),
-                                                StringArgumentType.getString(
-                                                        context, "reason"))))));
+                        .then(Commands.literal("bind").then(bind)))
+                .then(Commands.literal("register").then(register))
+                .then(Commands.literal("status")
+                        .executes(context -> facilityAccountingStatus(context.getSource())));
+    }
+
+    private static int activateFacilityAccountingBaseline(
+            CommandSourceStack source, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .activateFacilityAccountingBaseline(player, requestId, reason)
+                .whenComplete((baseline, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Facility Accounting Baseline activation", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Activated Facility Accounting Baseline "
+                                                + baseline.baselineId()
+                                                + " facility="
+                                                + baseline.facilityId()
+                                                + " machines="
+                                                + baseline.machines().size()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Facility Accounting Baseline activation queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int facilityAccountingStatus(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .facilityAccountingStatus(player)
+                .whenComplete((status, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Facility Accounting status", failure);
+                    } else {
+                        var accountingInterface = status.accountingInterface();
+                        var baseline = status.baseline();
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Facility "
+                                                + status.facility().facilityId()
+                                                + " state="
+                                                + status.facility().state()
+                                                + " interface="
+                                                + (accountingInterface == null
+                                                        ? "UNBOUND"
+                                                        : accountingInterface.interfaceId())
+                                                + " baseline="
+                                                + (baseline == null
+                                                        ? "NOT_CAPTURED"
+                                                        : baseline.baselineId()
+                                                                + ":"
+                                                                + baseline.state())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Facility Accounting status queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int captureFacilityAccountingBaseline(

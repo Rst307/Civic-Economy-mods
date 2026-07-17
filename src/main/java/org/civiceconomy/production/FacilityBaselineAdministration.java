@@ -118,6 +118,102 @@ public final class FacilityBaselineAdministration {
                 .capture(request);
     }
 
+    public FacilityBaselineActivationPreparation prepareActivation(
+            UUID actorPlayerId,
+            UUID ftbTeamId,
+            String requestId,
+            FacilityAccountingInterfacePosition currentPosition,
+            String reason) {
+        if (actorPlayerId == null || ftbTeamId == null || currentPosition == null) {
+            throw new IllegalArgumentException(
+                    "Facility Baseline actor, FTB Team, and position are required");
+        }
+        NationId nationId = requireAuthority(actorPlayerId, ftbTeamId);
+        RegisteredFacility facility = facilities.facilityAt(currentPosition);
+        requireExactFacility(facility, nationId, ftbTeamId);
+        FacilityAccountingInterface accountingInterface =
+                interfaces.interfaceFor(facility.facilityId());
+        if (accountingInterface == null) {
+            throw new IllegalStateException(
+                    "Facility Accounting Baseline requires a registered interface");
+        }
+        ActivateFacilityAccountingBaseline request =
+                new ActivateFacilityAccountingBaseline(
+                        FacilityAdministration.SERVICE_IDENTITY,
+                        requestId,
+                        facility.facilityId(),
+                        actorPlayerId,
+                        reason);
+        FacilityAccountingBaseline replay = registry(null).activationReplay(request);
+        if (replay != null) {
+            return new FacilityBaselineActivationReplay(replay);
+        }
+        FacilityAccountingBaseline baseline = registry(null).baseline(facility.facilityId());
+        if (baseline == null
+                || baseline.state() != FacilityAccountingBaselineState.CAPTURED
+                || facility.state() != RegisteredFacilityState.BASELINING) {
+            throw new IllegalStateException(
+                    "Facility Accounting Baseline must be captured before activation");
+        }
+        return new FacilityBaselineActivationWork(
+                request, facility, accountingInterface);
+    }
+
+    public FacilityAccountingBaseline completeActivation(
+            FacilityBaselineActivationWork work,
+            FacilityAccountingBaselineSnapshot snapshot) {
+        if (work == null || snapshot == null) {
+            throw new IllegalArgumentException(
+                    "Facility Baseline activation work and snapshot are required");
+        }
+        ActivateFacilityAccountingBaseline request = work.request();
+        if (!FacilityAdministration.SERVICE_IDENTITY.equals(request.serviceIdentity())) {
+            throw new SecurityException(
+                    "Facility Baseline activation work has an invalid trusted identity");
+        }
+        NationId nationId = requireAuthority(
+                request.actorPlayerId(), work.facility().ftbTeamId());
+        RegisteredFacility facility = facilities.facility(work.facility().facilityId());
+        requireExactFacility(facility, nationId, work.facility().ftbTeamId());
+        FacilityAccountingInterface accountingInterface =
+                interfaces.interfaceFor(facility.facilityId());
+        if (accountingInterface == null
+                || !accountingInterface.interfaceId()
+                        .equals(work.accountingInterface().interfaceId())
+                || !accountingInterface.position()
+                        .equals(work.accountingInterface().position())) {
+            throw new SecurityException(
+                    "Facility Accounting Interface changed before Baseline activation");
+        }
+        return registry((requestedFacility, requestedInterface) -> {
+                    if (!requestedFacility.facilityId().equals(facility.facilityId())
+                            || !requestedInterface.interfaceId()
+                                    .equals(accountingInterface.interfaceId())) {
+                        throw new SecurityException(
+                                "Facility Baseline activation snapshot target changed");
+                    }
+                    return snapshot;
+                })
+                .activate(request);
+    }
+
+    public FacilityAccountingStatus status(
+            UUID actorPlayerId,
+            UUID ftbTeamId,
+            FacilityAccountingInterfacePosition currentPosition) {
+        if (actorPlayerId == null || ftbTeamId == null || currentPosition == null) {
+            throw new IllegalArgumentException(
+                    "Facility status actor, FTB Team, and position are required");
+        }
+        NationId nationId = requireAuthority(actorPlayerId, ftbTeamId);
+        RegisteredFacility facility = facilities.facilityAt(currentPosition);
+        requireExactFacility(facility, nationId, ftbTeamId);
+        return new FacilityAccountingStatus(
+                facility,
+                interfaces.interfaceFor(facility.facilityId()),
+                registry(null).baseline(facility.facilityId()));
+    }
+
     private NationId requireAuthority(UUID actorPlayerId, UUID ftbTeamId) {
         NationFacts actorNation = provider.findForCitizen(actorPlayerId)
                 .orElseThrow(() -> new SecurityException(
