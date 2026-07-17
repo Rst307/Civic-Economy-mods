@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.persistence.StoredFacilityAccountingBaseline;
 import org.civiceconomy.persistence.StoredFacilityAccountingInterface;
 import org.civiceconomy.persistence.StoredFacilityClaim;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
@@ -87,6 +88,36 @@ public final class FacilityProductionMatcher {
                     receipt.receiptId(),
                     FacilityProductionDecisionKind.FACILITY_BASELINING,
                     "Registered Facility has not completed its Facility Accounting Baseline");
+        }
+        StoredFacilityAccountingBaseline baseline =
+                database.facilityAccountingBaseline(facility.facilityId());
+        if (baseline == null || !FacilityAccountingBaselineState.ACTIVE.name().equals(
+                baseline.state()) || baseline.activatedAtEpochMillis() == null
+                || completion.observedAtEpochMillis() < baseline.activatedAtEpochMillis()) {
+            return decision(
+                    completion,
+                    facility.facilityId(),
+                    accountingInterface.interfaceId(),
+                    receipt.receiptId(),
+                    FacilityProductionDecisionKind.FACILITY_BASELINING,
+                    "Create Recipe Completion occurred before the active Facility Accounting Baseline");
+        }
+        boolean fixedMachine = baseline.createVersion().equals(completion.createVersion())
+                && database.facilityAccountingBaselineMachines(baseline.baselineId()).stream()
+                        .anyMatch(machine ->
+                                machine.machineKind().equals(completion.machineKind().name())
+                                        && machine.dimensionId().equals(completion.dimensionId())
+                                        && machine.blockX() == completion.blockX()
+                                        && machine.blockY() == completion.blockY()
+                                        && machine.blockZ() == completion.blockZ());
+        if (!fixedMachine) {
+            return decision(
+                    completion,
+                    facility.facilityId(),
+                    accountingInterface.interfaceId(),
+                    receipt.receiptId(),
+                    FacilityProductionDecisionKind.UNSUPPORTED_MACHINE,
+                    "Create machine is not bound by the active Facility Accounting Baseline");
         }
         return decision(
                 completion,

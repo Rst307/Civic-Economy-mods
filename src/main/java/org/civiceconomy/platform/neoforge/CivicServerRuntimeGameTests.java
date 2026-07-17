@@ -4461,6 +4461,29 @@ public final class CivicServerRuntimeGameTests {
                                     .minorUnits(),
                             "approval alone does not debit real LC");
                 })
+                .thenExecute(runtime::recoverTreasuryWithdrawalsNowForGameTest)
+                .thenWaitUntil(() -> {
+                    TreasuryWithdrawalApprovalRow approval =
+                            treasuryWithdrawalApprovalByRequest(
+                                    databaseFile, withdrawalRequestId);
+                    TreasuryWithdrawalRow operation =
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId);
+                    helper.assertValueEqual(
+                            "APPROVED", approval.state(),
+                            "automatic recovery preserves the approved decision");
+                    helper.assertTrue(
+                            operation != null,
+                            "automatic recovery prepares the approved Withdrawal");
+                    helper.assertValueEqual(
+                            "PREPARED", operation.state(),
+                            "offline actor leaves the recovered Withdrawal prepared");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(operation.sourceAccount()))
+                                    .minorUnits(),
+                            "preparation alone does not debit real LC");
+                })
                 .thenExecute(() -> {
                     try {
                         helper.assertValueEqual(
@@ -4489,9 +4512,17 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertValueEqual(
                             "APPROVED", approval.state(),
                             "read-only OP inspection preserves approved state");
-                    helper.assertTrue(
-                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId) == null,
-                            "OP inspection does not prepare a Withdrawal operation");
+                    TreasuryWithdrawalRow operation =
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId);
+                    helper.assertValueEqual(
+                            "PREPARED", operation.state(),
+                            "read-only OP inspection does not advance the Withdrawal operation");
+                    helper.assertValueEqual(
+                            1_000L,
+                            LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                                    .balance(new AccountId(operation.sourceAccount()))
+                                    .minorUnits(),
+                            "read-only OP inspection does not debit real LC");
                 })
                 .thenExecute(() -> {
                     try {
@@ -6724,7 +6755,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(70, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(71, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

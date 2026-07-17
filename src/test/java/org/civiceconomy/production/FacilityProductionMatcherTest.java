@@ -119,6 +119,88 @@ class FacilityProductionMatcherTest {
         }
     }
 
+    @Test
+    void activeFacilityDoesNotRetroactivelyIncludeBaselinePeriodOutput() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("baseline-period.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            FacilityAccountingBaselineRegistry baselineRegistry =
+                    new FacilityAccountingBaselineRegistry(
+                            database,
+                            (nation, team, claim) -> true,
+                            (facility, accountingInterface) -> new FacilityAccountingBaselineSnapshot(
+                                    "6.0.6",
+                                    List.of(new FacilityBaselineMachine(
+                                            CreateMachineKind.MILLSTONE,
+                                            new FacilityMachinePosition(
+                                                    "minecraft:overworld", 2, 70, 2))),
+                                    List.of()),
+                            CLOCK);
+            baselineRegistry.capture(new CaptureFacilityAccountingBaseline(
+                    SERVICE,
+                    "capture-baseline-period",
+                    UUID.fromString("88888888-8888-8888-8888-888888888888"),
+                    FACILITY,
+                    ACTOR,
+                    "Capture baseline period"));
+            baselineRegistry = new FacilityAccountingBaselineRegistry(
+                    database,
+                    (nation, team, claim) -> true,
+                    (facility, accountingInterface) -> new FacilityAccountingBaselineSnapshot(
+                            "6.0.6",
+                            List.of(new FacilityBaselineMachine(
+                                    CreateMachineKind.MILLSTONE,
+                                    new FacilityMachinePosition(
+                                            "minecraft:overworld", 2, 70, 2))),
+                            List.of()),
+                    Clock.offset(CLOCK, Duration.ofMinutes(1)));
+            baselineRegistry.activate(new ActivateFacilityAccountingBaseline(
+                    SERVICE,
+                    "activate-baseline-period",
+                    FACILITY,
+                    ACTOR,
+                    "Activate after baseline output"));
+            FacilityProductionMatcher matcher = new FacilityProductionMatcher(
+                    database,
+                    (nation, team, claim) -> true,
+                    Set.of(CreateMachineKind.MILLSTONE),
+                    Duration.ofSeconds(5));
+
+            FacilityProductionDecision decision = matcher.match(completion(), exactReceipt());
+
+            assertEquals(FacilityProductionDecisionKind.FACILITY_BASELINING, decision.kind());
+        }
+    }
+
+    @Test
+    void onlyPostActivationCompletionFromABaselinedMachineCanBeIncluded() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("active-baseline-machine.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            activateBaseline(database);
+            FacilityProductionMatcher matcher = new FacilityProductionMatcher(
+                    database,
+                    (nation, team, claim) -> true,
+                    Set.of(CreateMachineKind.MILLSTONE),
+                    Duration.ofSeconds(5));
+            long completionTime = CLOCK.millis() + Duration.ofMinutes(2).toMillis();
+            CreateRecipeCompletion bound = completionAt(COMPLETION, 2, 70, 2, completionTime);
+            FacilityAccountingReceipt receipt = receiptAt(
+                    RECEIPT, completionTime + 1_000L);
+            CreateRecipeCompletion unbound = completionAt(
+                    UUID.fromString("99999999-9999-9999-9999-999999999999"),
+                    3,
+                    70,
+                    2,
+                    completionTime);
+
+            assertEquals(FacilityProductionDecisionKind.INCLUDED,
+                    matcher.match(bound, receipt).kind());
+            assertEquals(FacilityProductionDecisionKind.UNSUPPORTED_MACHINE,
+                    matcher.match(unbound, receipt).kind());
+        }
+    }
+
     private void registerFacilityAndInterface(CivicDatabase database) {
         database.registerNation(NATION.value(), SERVICE.value(), "nation", TEAM, CLOCK.millis() - 1L);
         new RegisteredFacilityRegistry(
@@ -148,6 +230,38 @@ class FacilityProductionMatcherTest {
                         "Interface for matcher"));
     }
 
+    private void activateBaseline(CivicDatabase database) {
+        FacilityAccountingBaselineSnapshot snapshot = new FacilityAccountingBaselineSnapshot(
+                "6.0.6",
+                List.of(new FacilityBaselineMachine(
+                        CreateMachineKind.MILLSTONE,
+                        new FacilityMachinePosition("minecraft:overworld", 2, 70, 2))),
+                List.of());
+        new FacilityAccountingBaselineRegistry(
+                        database,
+                        (nation, team, claim) -> true,
+                        (facility, accountingInterface) -> snapshot,
+                        CLOCK)
+                .capture(new CaptureFacilityAccountingBaseline(
+                        SERVICE,
+                        "capture-active-baseline",
+                        UUID.fromString("88888888-8888-8888-8888-888888888888"),
+                        FACILITY,
+                        ACTOR,
+                        "Capture active baseline"));
+        new FacilityAccountingBaselineRegistry(
+                        database,
+                        (nation, team, claim) -> true,
+                        (facility, accountingInterface) -> snapshot,
+                        Clock.offset(CLOCK, Duration.ofMinutes(1)))
+                .activate(new ActivateFacilityAccountingBaseline(
+                        SERVICE,
+                        "activate-active-baseline",
+                        FACILITY,
+                        ACTOR,
+                        "Activate exact baseline"));
+    }
+
     private static CreateRecipeCompletion completion() {
         return new CreateRecipeCompletion(
                 COMPLETION,
@@ -164,6 +278,23 @@ class FacilityProductionMatcherTest {
                         List.of(change(0, "create:wheat_flour", 1))));
     }
 
+    private static CreateRecipeCompletion completionAt(
+            UUID observationId, int blockX, int blockY, int blockZ, long observedAt) {
+        return new CreateRecipeCompletion(
+                observationId,
+                "6.0.6",
+                CreateMachineKind.MILLSTONE,
+                "create:milling/wheat",
+                "minecraft:overworld",
+                blockX,
+                blockY,
+                blockZ,
+                observedAt,
+                new MachineInventoryDelta(
+                        List.of(change(0, "minecraft:wheat", 1)),
+                        List.of(change(0, "create:wheat_flour", 1))));
+    }
+
     private static FacilityAccountingReceipt exactReceipt() {
         return new FacilityAccountingReceipt(
                 RECEIPT,
@@ -171,6 +302,16 @@ class FacilityProductionMatcherTest {
                 new FacilityAccountingInterfacePosition(
                         "minecraft:overworld", 17, 72, 4),
                 CLOCK.millis() + 1_000L,
+                List.of(change(4, "create:wheat_flour", 1)));
+    }
+
+    private static FacilityAccountingReceipt receiptAt(UUID receiptId, long observedAt) {
+        return new FacilityAccountingReceipt(
+                receiptId,
+                INTERFACE,
+                new FacilityAccountingInterfacePosition(
+                        "minecraft:overworld", 17, 72, 4),
+                observedAt,
                 List.of(change(4, "create:wheat_flour", 1)));
     }
 

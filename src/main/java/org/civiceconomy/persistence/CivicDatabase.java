@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 70;
+    private static final int SCHEMA_VERSION = 71;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2210,6 +2210,432 @@ public final class CivicDatabase implements AutoCloseable {
                     UUID.fromString(result.getString("actor_player_id")),
                     result.getString("reason"),
                     result.getLong("registered_at_epoch_millis"));
+        }
+    }
+
+    public synchronized StoredFacilityAccountingBaseline captureFacilityAccountingBaseline(
+            StoredFacilityAccountingBaseline baseline,
+            List<StoredFacilityBaselineMachine> machines,
+            List<StoredFacilityBaselineInventory> inventory) {
+        validateFacilityAccountingBaseline(baseline, machines, inventory);
+        StoredFacilityAccountingBaseline replay = facilityAccountingBaseline(
+                baseline.serviceIdentity(), baseline.requestId());
+        if (replay != null) {
+            return assertFacilityAccountingBaselineReplay(
+                    replay, baseline, machines, inventory);
+        }
+        if (facilityAccountingBaseline(baseline.facilityId()) != null) {
+            throw new IllegalStateException(
+                    "Registered Facility already has a Facility Accounting Baseline");
+        }
+        StoredRegisteredFacility facility = registeredFacility(baseline.facilityId());
+        StoredFacilityAccountingInterface accountingInterface =
+                facilityAccountingInterface(baseline.facilityId());
+        if (facility == null || !"BASELINING".equals(facility.state())
+                || accountingInterface == null
+                || !accountingInterface.interfaceId().equals(baseline.interfaceId())) {
+            throw new IllegalStateException(
+                    "Facility Accounting Baseline references an invalid Facility state or interface");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO facility_accounting_baseline (
+                        baseline_id, service_identity, request_id, facility_id, interface_id,
+                        create_version, actor_player_id, state, reason,
+                        captured_at_epoch_millis, activated_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CAPTURED', ?, ?, NULL)
+                    """)) {
+                insert.setString(1, baseline.baselineId().toString());
+                insert.setString(2, baseline.serviceIdentity());
+                insert.setString(3, baseline.requestId());
+                insert.setString(4, baseline.facilityId().toString());
+                insert.setString(5, baseline.interfaceId().toString());
+                insert.setString(6, baseline.createVersion());
+                insert.setString(7, baseline.actorPlayerId().toString());
+                insert.setString(8, baseline.reason());
+                insert.setLong(9, baseline.capturedAtEpochMillis());
+                insert.executeUpdate();
+            }
+            try (PreparedStatement insertMachine = connection.prepareStatement("""
+                    INSERT INTO facility_accounting_baseline_machine (
+                        baseline_id, machine_kind, dimension_id,
+                        block_x, block_y, block_z
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """)) {
+                for (StoredFacilityBaselineMachine machine : machines) {
+                    insertMachine.setString(1, machine.baselineId().toString());
+                    insertMachine.setString(2, machine.machineKind());
+                    insertMachine.setString(3, machine.dimensionId());
+                    insertMachine.setInt(4, machine.blockX());
+                    insertMachine.setInt(5, machine.blockY());
+                    insertMachine.setInt(6, machine.blockZ());
+                    insertMachine.addBatch();
+                }
+                insertMachine.executeBatch();
+            }
+            try (PreparedStatement insertInventory = connection.prepareStatement("""
+                    INSERT INTO facility_accounting_baseline_inventory (
+                        baseline_id, slot, item_id, component_fingerprint, count
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """)) {
+                for (StoredFacilityBaselineInventory change : inventory) {
+                    insertInventory.setString(1, change.baselineId().toString());
+                    insertInventory.setInt(2, change.slot());
+                    insertInventory.setString(3, change.itemId());
+                    insertInventory.setString(4, change.componentFingerprint());
+                    insertInventory.setInt(5, change.count());
+                    insertInventory.addBatch();
+                }
+                insertInventory.executeBatch();
+            }
+            connection.commit();
+            return facilityAccountingBaseline(baseline.facilityId());
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to capture Facility Accounting Baseline " + baseline.baselineId(),
+                    failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Facility Baseline transaction mode", failure);
+            }
+        }
+    }
+
+    private static void validateFacilityAccountingBaseline(
+            StoredFacilityAccountingBaseline baseline,
+            List<StoredFacilityBaselineMachine> machines,
+            List<StoredFacilityBaselineInventory> inventory) {
+        if (baseline == null || baseline.baselineId() == null
+                || baseline.serviceIdentity() == null || baseline.serviceIdentity().isBlank()
+                || baseline.requestId() == null || baseline.requestId().isBlank()
+                || baseline.facilityId() == null || baseline.interfaceId() == null
+                || baseline.createVersion() == null || baseline.createVersion().isBlank()
+                || baseline.actorPlayerId() == null
+                || !"CAPTURED".equals(baseline.state())
+                || baseline.reason() == null || baseline.reason().isBlank()
+                || baseline.capturedAtEpochMillis() < 0L
+                || baseline.activatedAtEpochMillis() != null
+                || machines == null || machines.isEmpty()
+                || inventory == null) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Baseline values are invalid");
+        }
+        Set<String> positions = new java.util.HashSet<>();
+        for (StoredFacilityBaselineMachine machine : machines) {
+            if (machine == null || !baseline.baselineId().equals(machine.baselineId())
+                    || machine.machineKind() == null || machine.machineKind().isBlank()
+                    || machine.dimensionId() == null || machine.dimensionId().isBlank()
+                    || !positions.add(machine.dimensionId() + "\u0000"
+                            + machine.blockX() + "\u0000" + machine.blockY()
+                            + "\u0000" + machine.blockZ())) {
+                throw new IllegalArgumentException(
+                        "Facility Accounting Baseline machines are invalid");
+            }
+        }
+        Set<Integer> slots = new java.util.HashSet<>();
+        for (StoredFacilityBaselineInventory change : inventory) {
+            if (change == null || !baseline.baselineId().equals(change.baselineId())
+                    || change.slot() < 0 || change.itemId() == null || change.itemId().isBlank()
+                    || change.componentFingerprint() == null
+                    || change.componentFingerprint().isBlank() || change.count() <= 0
+                    || !slots.add(change.slot())) {
+                throw new IllegalArgumentException(
+                        "Facility Accounting Baseline inventory is invalid");
+            }
+        }
+    }
+
+    private StoredFacilityAccountingBaseline assertFacilityAccountingBaselineReplay(
+            StoredFacilityAccountingBaseline replay,
+            StoredFacilityAccountingBaseline baseline,
+            List<StoredFacilityBaselineMachine> machines,
+            List<StoredFacilityBaselineInventory> inventory) {
+        if (!replay.baselineId().equals(baseline.baselineId())
+                || !replay.facilityId().equals(baseline.facilityId())
+                || !replay.interfaceId().equals(baseline.interfaceId())
+                || !replay.createVersion().equals(baseline.createVersion())
+                || !replay.actorPlayerId().equals(baseline.actorPlayerId())
+                || !replay.reason().equals(baseline.reason())
+                || !facilityAccountingBaselineMachines(replay.baselineId()).equals(machines)
+                || !facilityAccountingBaselineInventory(replay.baselineId()).equals(inventory)) {
+            throw new IllegalStateException(
+                    "Facility Accounting Baseline replay changed its immutable payload");
+        }
+        return replay;
+    }
+
+    public synchronized StoredFacilityAccountingBaseline facilityAccountingBaseline(
+            UUID facilityId) {
+        if (facilityId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_baseline WHERE facility_id = ?
+                """)) {
+            query.setString(1, facilityId.toString());
+            return readFacilityAccountingBaseline(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline", failure);
+        }
+    }
+
+    public synchronized StoredFacilityAccountingBaseline facilityAccountingBaseline(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_baseline
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readFacilityAccountingBaseline(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline request", failure);
+        }
+    }
+
+    private static StoredFacilityAccountingBaseline readFacilityAccountingBaseline(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredFacilityAccountingBaseline(
+                    UUID.fromString(result.getString("baseline_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("facility_id")),
+                    UUID.fromString(result.getString("interface_id")),
+                    result.getString("create_version"),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("state"),
+                    result.getString("reason"),
+                    result.getLong("captured_at_epoch_millis"),
+                    optionalLong(result, "activated_at_epoch_millis"));
+        }
+    }
+
+    public synchronized List<StoredFacilityBaselineMachine> facilityAccountingBaselineMachines(
+            UUID baselineId) {
+        List<StoredFacilityBaselineMachine> machines = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_baseline_machine
+                WHERE baseline_id = ?
+                ORDER BY dimension_id, block_x, block_y, block_z, machine_kind
+                """)) {
+            query.setString(1, baselineId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    machines.add(new StoredFacilityBaselineMachine(
+                            UUID.fromString(result.getString("baseline_id")),
+                            result.getString("machine_kind"),
+                            result.getString("dimension_id"),
+                            result.getInt("block_x"),
+                            result.getInt("block_y"),
+                            result.getInt("block_z")));
+                }
+            }
+            return List.copyOf(machines);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline machines", failure);
+        }
+    }
+
+    public synchronized List<StoredFacilityBaselineInventory> facilityAccountingBaselineInventory(
+            UUID baselineId) {
+        List<StoredFacilityBaselineInventory> inventory = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_baseline_inventory
+                WHERE baseline_id = ? ORDER BY slot
+                """)) {
+            query.setString(1, baselineId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    inventory.add(new StoredFacilityBaselineInventory(
+                            UUID.fromString(result.getString("baseline_id")),
+                            result.getInt("slot"),
+                            result.getString("item_id"),
+                            result.getString("component_fingerprint"),
+                            result.getInt("count")));
+                }
+            }
+            return List.copyOf(inventory);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline inventory", failure);
+        }
+    }
+
+    public synchronized StoredFacilityAccountingBaseline facilityAccountingBaselineActivationReplay(
+            String serviceIdentity,
+            String requestId,
+            UUID facilityId,
+            UUID actorPlayerId,
+            String reason) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank()
+                || facilityId == null || actorPlayerId == null
+                || reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Baseline activation replay values are invalid");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT baseline_id, actor_player_id, reason
+                FROM facility_accounting_baseline_activation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                StoredFacilityAccountingBaseline baseline = facilityAccountingBaselineById(
+                        UUID.fromString(result.getString("baseline_id")));
+                if (baseline == null
+                        || !baseline.facilityId().equals(facilityId)
+                        || !result.getString("actor_player_id").equals(
+                                actorPlayerId.toString())
+                        || !result.getString("reason").equals(reason)) {
+                    throw new IllegalStateException(
+                            "Facility Accounting Baseline activation replay changed its payload");
+                }
+                return baseline;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline activation replay", failure);
+        }
+    }
+
+    public synchronized StoredFacilityAccountingBaseline activateFacilityAccountingBaseline(
+            UUID baselineId,
+            String serviceIdentity,
+            String requestId,
+            UUID actorPlayerId,
+            String reason,
+            long activatedAtEpochMillis) {
+        if (baselineId == null || serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank() || actorPlayerId == null
+                || reason == null || reason.isBlank() || activatedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Baseline activation values are invalid");
+        }
+        try (PreparedStatement replay = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_baseline_activation
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            replay.setString(1, serviceIdentity);
+            replay.setString(2, requestId);
+            try (ResultSet result = replay.executeQuery()) {
+                if (result.next()) {
+                    if (!baselineId.toString().equals(result.getString("baseline_id"))
+                            || !actorPlayerId.toString().equals(
+                                    result.getString("actor_player_id"))
+                            || !reason.equals(result.getString("reason"))) {
+                        throw new IllegalStateException(
+                                "Facility Accounting Baseline activation replay changed its payload");
+                    }
+                    return facilityAccountingBaselineById(baselineId);
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline activation replay", failure);
+        }
+        StoredFacilityAccountingBaseline baseline = facilityAccountingBaselineById(baselineId);
+        if (baseline == null || !"CAPTURED".equals(baseline.state())
+                || activatedAtEpochMillis < baseline.capturedAtEpochMillis()) {
+            throw new IllegalStateException(
+                    "Facility Accounting Baseline is not eligible for activation");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO facility_accounting_baseline_activation (
+                        baseline_id, service_identity, request_id,
+                        actor_player_id, reason, activated_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, baselineId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, actorPlayerId.toString());
+                insert.setString(5, reason);
+                insert.setLong(6, activatedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            try (PreparedStatement updateBaseline = connection.prepareStatement("""
+                    UPDATE facility_accounting_baseline
+                    SET state = 'ACTIVE', activated_at_epoch_millis = ?
+                    WHERE baseline_id = ? AND state = 'CAPTURED'
+                    """);
+                    PreparedStatement updateFacility = connection.prepareStatement("""
+                    UPDATE registered_facility SET state = 'ACTIVE'
+                    WHERE facility_id = ? AND state = 'BASELINING'
+                    """)) {
+                updateBaseline.setLong(1, activatedAtEpochMillis);
+                updateBaseline.setString(2, baselineId.toString());
+                updateFacility.setString(1, baseline.facilityId().toString());
+                if (updateBaseline.executeUpdate() != 1 || updateFacility.executeUpdate() != 1) {
+                    throw new IllegalStateException(
+                            "Facility Accounting Baseline or Facility state changed before activation");
+                }
+            }
+            connection.commit();
+            return facilityAccountingBaselineById(baselineId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to activate Facility Accounting Baseline " + baselineId, failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Facility Baseline activation transaction mode", failure);
+            }
+        }
+    }
+
+    private StoredFacilityAccountingBaseline facilityAccountingBaselineById(UUID baselineId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_baseline WHERE baseline_id = ?
+                """)) {
+            query.setString(1, baselineId.toString());
+            return readFacilityAccountingBaseline(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Baseline identity", failure);
         }
     }
 
@@ -14276,6 +14702,78 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 70");
+            }
+            if (version < 71) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_baseline (
+                            baseline_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+                            facility_id TEXT NOT NULL UNIQUE
+                                REFERENCES registered_facility(facility_id),
+                            interface_id TEXT NOT NULL UNIQUE
+                                REFERENCES facility_accounting_interface(interface_id),
+                            create_version TEXT NOT NULL
+                                CHECK (length(trim(create_version)) > 0),
+                            actor_player_id TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN ('CAPTURED', 'ACTIVE')),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            captured_at_epoch_millis INTEGER NOT NULL
+                                CHECK (captured_at_epoch_millis >= 0),
+                            activated_at_epoch_millis INTEGER,
+                            UNIQUE (service_identity, request_id),
+                            CHECK ((state = 'CAPTURED' AND activated_at_epoch_millis IS NULL)
+                                OR (state = 'ACTIVE'
+                                    AND activated_at_epoch_millis >= captured_at_epoch_millis))
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_baseline_machine (
+                            baseline_id TEXT NOT NULL
+                                REFERENCES facility_accounting_baseline(baseline_id)
+                                ON DELETE CASCADE,
+                            machine_kind TEXT NOT NULL
+                                CHECK (length(trim(machine_kind)) > 0),
+                            dimension_id TEXT NOT NULL
+                                CHECK (length(trim(dimension_id)) > 0),
+                            block_x INTEGER NOT NULL,
+                            block_y INTEGER NOT NULL,
+                            block_z INTEGER NOT NULL,
+                            PRIMARY KEY (
+                                baseline_id, dimension_id, block_x, block_y, block_z
+                            ),
+                            UNIQUE (dimension_id, block_x, block_y, block_z)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_baseline_inventory (
+                            baseline_id TEXT NOT NULL
+                                REFERENCES facility_accounting_baseline(baseline_id)
+                                ON DELETE CASCADE,
+                            slot INTEGER NOT NULL CHECK (slot >= 0),
+                            item_id TEXT NOT NULL CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            count INTEGER NOT NULL CHECK (count > 0),
+                            PRIMARY KEY (baseline_id, slot)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_accounting_baseline_activation (
+                            baseline_id TEXT PRIMARY KEY
+                                REFERENCES facility_accounting_baseline(baseline_id),
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            activated_at_epoch_millis INTEGER NOT NULL
+                                CHECK (activated_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 71");
             }
             connection.commit();
         } catch (SQLException failure) {

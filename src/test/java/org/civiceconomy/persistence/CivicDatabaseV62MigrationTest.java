@@ -49,7 +49,7 @@ class CivicDatabaseV62MigrationTest {
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
             StoredBudgetApprovalAudit audit = migrated.budgetApprovalAudit(budgetId);
 
-            assertEquals(70, migrated.schemaVersion());
+            assertEquals(71, migrated.schemaVersion());
             assertEquals(
                     UUID.fromString("00000000-0000-0000-0000-000000000000"),
                     audit.actorPlayerId());
