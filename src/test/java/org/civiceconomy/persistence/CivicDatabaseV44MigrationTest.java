@@ -21,7 +21,7 @@ class CivicDatabaseV44MigrationTest {
                 "2101.1.10",
                 "2101.1.20");
         try (CivicDatabase ignored = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(67, ignored.schemaVersion());
+            assertEquals(68, ignored.schemaVersion());
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
@@ -33,7 +33,7 @@ class CivicDatabaseV44MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(67, migrated.schemaVersion());
+            assertEquals(68, migrated.schemaVersion());
             try (var connection = DriverManager.getConnection(
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                     var statement = connection.createStatement();

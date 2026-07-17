@@ -29,9 +29,38 @@ public final class EffectiveTerritoryQuery {
                 || dimensionId.isBlank()) {
             return false;
         }
-        return ownership.ownerTeam(dimensionId, chunkX, chunkZ)
+        return ownerTeam(dimensionId, chunkX, chunkZ)
+                .map(teamId -> isEffective(
+                        cycleId, nationId, teamId, dimensionId, chunkX, chunkZ))
+                .orElse(false);
+    }
+
+    public boolean isEffective(
+            UUID cycleId,
+            NationId nationId,
+            UUID expectedFtbTeamId,
+            String dimensionId,
+            int chunkX,
+            int chunkZ) {
+        if (cycleId == null
+                || nationId == null
+                || expectedFtbTeamId == null
+                || dimensionId == null
+                || dimensionId.isBlank()) {
+            return false;
+        }
+        return ownerTeam(dimensionId, chunkX, chunkZ)
+                .filter(expectedFtbTeamId::equals)
                 .filter(teamId -> maintenance.isEffective(
                         cycleId, nationId, teamId, dimensionId, chunkX, chunkZ))
                 .isPresent();
+    }
+
+    private java.util.Optional<UUID> ownerTeam(
+            String dimensionId, int chunkX, int chunkZ) {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        return ownership.ownerTeam(dimensionId, chunkX, chunkZ);
     }
 }

@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 67;
+    private static final int SCHEMA_VERSION = 68;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -1832,6 +1832,229 @@ public final class CivicDatabase implements AutoCloseable {
             return List.copyOf(nations);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to list registered Nations", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredFacility registerFacility(
+            UUID facilityId,
+            String serviceIdentity,
+            String requestId,
+            UUID nationId,
+            UUID ftbTeamId,
+            String dimensionId,
+            int coreBlockX,
+            int coreBlockY,
+            int coreBlockZ,
+            UUID actorPlayerId,
+            String reason,
+            long registeredAtEpochMillis,
+            List<StoredFacilityClaim> scope) {
+        if (facilityId == null || serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank() || nationId == null
+                || ftbTeamId == null || dimensionId == null || dimensionId.isBlank()
+                || actorPlayerId == null || reason == null || reason.isBlank()
+                || registeredAtEpochMillis < 0L || scope == null || scope.isEmpty()
+                || scope.stream().anyMatch(java.util.Objects::isNull)) {
+            throw new IllegalArgumentException("Registered Facility values are invalid");
+        }
+        StoredRegisteredFacility replay = registeredFacility(serviceIdentity, requestId);
+        if (replay != null) {
+            return assertRegisteredFacilityReplay(
+                    replay,
+                    facilityId,
+                    nationId,
+                    ftbTeamId,
+                    dimensionId,
+                    coreBlockX,
+                    coreBlockY,
+                    coreBlockZ,
+                    actorPlayerId,
+                    reason,
+                    scope);
+        }
+        StoredNation nation = nation(nationId);
+        if (nation == null || !nation.ftbTeamId().equals(ftbTeamId)) {
+            throw new IllegalStateException(
+                    "Registered Facility references an unknown exact Nation/FTB Team binding");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement overlap = connection.prepareStatement("""
+                    SELECT facility_id FROM registered_facility_claim
+                    WHERE dimension_id = ? AND chunk_x = ? AND chunk_z = ?
+                    """)) {
+                for (StoredFacilityClaim claim : scope) {
+                    overlap.setString(1, claim.dimensionId());
+                    overlap.setInt(2, claim.chunkX());
+                    overlap.setInt(3, claim.chunkZ());
+                    try (ResultSet result = overlap.executeQuery()) {
+                        if (result.next()) {
+                            throw new IllegalStateException(
+                                    "Registered Facility scope overlaps facility "
+                                            + result.getString("facility_id"));
+                        }
+                    }
+                }
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO registered_facility (
+                        facility_id, service_identity, request_id, nation_id, ftb_team_id,
+                        dimension_id, core_block_x, core_block_y, core_block_z,
+                        actor_player_id, state, reason, registered_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BASELINING', ?, ?)
+                    """)) {
+                insert.setString(1, facilityId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, nationId.toString());
+                insert.setString(5, ftbTeamId.toString());
+                insert.setString(6, dimensionId);
+                insert.setInt(7, coreBlockX);
+                insert.setInt(8, coreBlockY);
+                insert.setInt(9, coreBlockZ);
+                insert.setString(10, actorPlayerId.toString());
+                insert.setString(11, reason);
+                insert.setLong(12, registeredAtEpochMillis);
+                insert.executeUpdate();
+            }
+            try (PreparedStatement insertClaim = connection.prepareStatement("""
+                    INSERT INTO registered_facility_claim (
+                        facility_id, dimension_id, chunk_x, chunk_z
+                    ) VALUES (?, ?, ?, ?)
+                    """)) {
+                for (StoredFacilityClaim claim : scope) {
+                    insertClaim.setString(1, facilityId.toString());
+                    insertClaim.setString(2, claim.dimensionId());
+                    insertClaim.setInt(3, claim.chunkX());
+                    insertClaim.setInt(4, claim.chunkZ());
+                    insertClaim.addBatch();
+                }
+                insertClaim.executeBatch();
+            }
+            connection.commit();
+            return registeredFacility(facilityId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to register Facility " + facilityId, failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException("Unable to restore Facility transaction mode", failure);
+            }
+        }
+    }
+
+    private StoredRegisteredFacility assertRegisteredFacilityReplay(
+            StoredRegisteredFacility replay,
+            UUID facilityId,
+            UUID nationId,
+            UUID ftbTeamId,
+            String dimensionId,
+            int coreBlockX,
+            int coreBlockY,
+            int coreBlockZ,
+            UUID actorPlayerId,
+            String reason,
+            List<StoredFacilityClaim> scope) {
+        if (replay == null || !replay.facilityId().equals(facilityId)
+                || !replay.nationId().equals(nationId)
+                || !replay.ftbTeamId().equals(ftbTeamId)
+                || !replay.dimensionId().equals(dimensionId)
+                || replay.coreBlockX() != coreBlockX
+                || replay.coreBlockY() != coreBlockY
+                || replay.coreBlockZ() != coreBlockZ
+                || !replay.actorPlayerId().equals(actorPlayerId)
+                || !replay.reason().equals(reason)
+                || !registeredFacilityClaims(replay.facilityId()).equals(scope)) {
+            throw new IllegalStateException(
+                    "Registered Facility replay changed its immutable payload");
+        }
+        return replay;
+    }
+
+    public synchronized StoredRegisteredFacility registeredFacility(UUID facilityId) {
+        if (facilityId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_facility WHERE facility_id = ?
+                """)) {
+            query.setString(1, facilityId.toString());
+            return readRegisteredFacility(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Registered Facility", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredFacility registeredFacility(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_facility
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readRegisteredFacility(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Registered Facility request", failure);
+        }
+    }
+
+    public synchronized List<StoredFacilityClaim> registeredFacilityClaims(UUID facilityId) {
+        List<StoredFacilityClaim> scope = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT dimension_id, chunk_x, chunk_z FROM registered_facility_claim
+                WHERE facility_id = ?
+                ORDER BY dimension_id, chunk_x, chunk_z
+                """)) {
+            query.setString(1, facilityId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    scope.add(new StoredFacilityClaim(
+                            result.getString("dimension_id"),
+                            result.getInt("chunk_x"),
+                            result.getInt("chunk_z")));
+                }
+            }
+            return List.copyOf(scope);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Registered Facility scope", failure);
+        }
+    }
+
+    private static StoredRegisteredFacility readRegisteredFacility(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredRegisteredFacility(
+                    UUID.fromString(result.getString("facility_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    UUID.fromString(result.getString("nation_id")),
+                    UUID.fromString(result.getString("ftb_team_id")),
+                    result.getString("dimension_id"),
+                    result.getInt("core_block_x"),
+                    result.getInt("core_block_y"),
+                    result.getInt("core_block_z"),
+                    UUID.fromString(result.getString("actor_player_id")),
+                    result.getString("state"),
+                    result.getString("reason"),
+                    result.getLong("registered_at_epoch_millis"));
         }
     }
 
@@ -13375,6 +13598,46 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 67");
+            }
+            if (version < 68) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS registered_facility (
+                            facility_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            ftb_team_id TEXT NOT NULL,
+                            dimension_id TEXT NOT NULL CHECK (length(trim(dimension_id)) > 0),
+                            core_block_x INTEGER NOT NULL,
+                            core_block_y INTEGER NOT NULL,
+                            core_block_z INTEGER NOT NULL,
+                            actor_player_id TEXT NOT NULL,
+                            state TEXT NOT NULL CHECK (state IN (
+                                'BASELINING', 'ACTIVE', 'PAUSED_TERRITORY'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            registered_at_epoch_millis INTEGER NOT NULL
+                                CHECK (registered_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (dimension_id, core_block_x, core_block_y, core_block_z)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS registered_facility_claim (
+                            facility_id TEXT NOT NULL
+                                REFERENCES registered_facility(facility_id) ON DELETE CASCADE,
+                            dimension_id TEXT NOT NULL CHECK (length(trim(dimension_id)) > 0),
+                            chunk_x INTEGER NOT NULL,
+                            chunk_z INTEGER NOT NULL,
+                            PRIMARY KEY (facility_id, dimension_id, chunk_x, chunk_z),
+                            UNIQUE (dimension_id, chunk_x, chunk_z)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS registered_facility_nation_state
+                        ON registered_facility (nation_id, state, facility_id)
+                        """);
+                statement.execute("PRAGMA user_version = 68");
             }
             connection.commit();
         } catch (SQLException failure) {

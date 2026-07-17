@@ -43,7 +43,7 @@ class CivicDatabaseV36MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(67, migrated.schemaVersion());
+            assertEquals(68, migrated.schemaVersion());
             assertEquals(
                     cycleId,
                     migrated.territoryMaintenanceAssessmentBatch("migration", "batch")
