@@ -55,10 +55,13 @@ neoForge {
                     providers.gradleProperty('nationActivationRestartDrill').orNull
             def permanentDestructionRestartDrill =
                     providers.gradleProperty('permanentDestructionRestartDrill').orNull
+            def matchedWorldRollbackDrill =
+                    providers.gradleProperty('matchedWorldRollbackDrill').orNull
             if ([budgetDisbursementRestartDrill,
                     treasuryWithdrawalRestartDrill,
                     nationActivationRestartDrill,
-                    permanentDestructionRestartDrill].count { it != null } > 1) {
+                    permanentDestructionRestartDrill,
+                    matchedWorldRollbackDrill].count { it != null } > 1) {
                 throw new GradleException('Only one process restart drill may run at a time')
             }
             systemProperty 'neoforge.enabledGameTestNamespaces',
@@ -68,9 +71,11 @@ neoForge {
                                     ? "${project.mod_id}_treasury_withdrawal_restart"
                                     : nationActivationRestartDrill != null
                                             ? "${project.mod_id}_nation_activation_restart"
-                                    : permanentDestructionRestartDrill != null
-                                            ? "${project.mod_id}_permanent_destruction_restart"
-                                    : project.mod_id
+                                     : permanentDestructionRestartDrill != null
+                                             ? "${project.mod_id}_permanent_destruction_restart"
+                                     : matchedWorldRollbackDrill != null
+                                             ? "${project.mod_id}_matched_world_rollback"
+                                     : project.mod_id
             providers.gradleProperty('mintRestartDrill').orNull?.with { mode ->
                 systemProperty 'civiceconomy.mintRestartDrill', mode
             }
@@ -85,6 +90,9 @@ neoForge {
             }
             permanentDestructionRestartDrill?.with { mode ->
                 systemProperty 'civiceconomy.permanentDestructionRestartDrill', mode
+            }
+            matchedWorldRollbackDrill?.with { mode ->
+                systemProperty 'civiceconomy.matchedWorldRollbackDrill', mode
             }
         }
 
@@ -182,18 +190,22 @@ var generateGameTestStructures = tasks.register('generateGameTestStructures') {
             'generated/gametestResources/data/civiceconomy_nation_activation_restart/structure/empty.nbt')
     def permanentDestructionRestartEmpty = layout.buildDirectory.file(
             'generated/gametestResources/data/civiceconomy_permanent_destruction_restart/structure/empty.nbt')
+    def matchedWorldRollbackEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_matched_world_rollback/structure/empty.nbt')
     outputs.files standardEmpty,
             budgetRestartEmpty,
             withdrawalRestartEmpty,
             nationActivationRestartEmpty,
-            permanentDestructionRestartEmpty
+            permanentDestructionRestartEmpty,
+            matchedWorldRollbackEmpty
     doLast {
         def decoded = Base64.decoder.decode(inputs.files.singleFile.text.trim())
         [standardEmpty.get().asFile,
                 budgetRestartEmpty.get().asFile,
                 withdrawalRestartEmpty.get().asFile,
                 nationActivationRestartEmpty.get().asFile,
-                permanentDestructionRestartEmpty.get().asFile].each { outputFile ->
+                permanentDestructionRestartEmpty.get().asFile,
+                matchedWorldRollbackEmpty.get().asFile].each { outputFile ->
             outputFile.parentFile.mkdirs()
             outputFile.bytes = decoded
         }
@@ -203,6 +215,13 @@ var generateGameTestStructures = tasks.register('generateGameTestStructures') {
 sourceSets.main.resources.srcDir generateModMetadata
 sourceSets.main.resources.srcDir layout.buildDirectory.dir('generated/gametestResources')
 tasks.named('processResources').configure { dependsOn generateGameTestStructures }
+
+tasks.register('restoreMatchedWorldRollbackDrill', JavaExec) {
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.civiceconomy.platform.neoforge.MatchedWorldRollbackRestoreMain'
+    args layout.projectDirectory.dir('run').asFile.absolutePath
+}
 neoForge.ideSyncTask generateModMetadata
 neoForge.ideSyncTask generateGameTestStructures
 

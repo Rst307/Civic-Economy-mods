@@ -560,6 +560,170 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    static void prepareMatchedWorldRollback(GameTestHelper helper) {
+        UUID playerId = UUID.randomUUID();
+        ServerPlayer player = connectMockServerPlayer(
+                helper, playerId, "civic-rollback");
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String requestId = MatchedWorldRollbackDrill.REQUEST_PREFIX + UUID.randomUUID();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<PermanentDestructionRestartPreparation> preparation =
+                new AtomicReference<>();
+        AtomicBoolean snapshotReady = new AtomicBoolean();
+        AtomicBoolean destructionStarted = new AtomicBoolean();
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        Instant now = Instant.now();
+        Clock setupClock = Clock.fixed(now, ZoneOffset.UTC);
+        Path databaseBackup = MatchedWorldRollbackDrill.databaseBackup(
+                helper.getLevel().getServer());
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(
+                            database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "matched-rollback-nation-" + UUID.randomUUID(),
+                            team.getId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, Duration.ofDays(7L), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "matched-rollback-citizenship-" + UUID.randomUUID(),
+                            playerId,
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                            .grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "matched-rollback-authority-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    playerId,
+                                    playerId,
+                                    NationFiscalPermission.MANAGE_ISSUANCE,
+                                    "Matched full-world rollback drill"));
+                    long issuanceBefore = database.cumulativeNetIssuanceMinorUnits();
+                    database.confirmMonetarySupplyChange(
+                            UUID.randomUUID(),
+                            "civiceconomy-gametest",
+                            "matched-rollback-issuance-" + UUID.randomUUID(),
+                            "ISSUANCE",
+                            500L,
+                            "mint-batch:matched-rollback:" + UUID.randomUUID(),
+                            "Seed matched rollback state",
+                            now.toEpochMilli(),
+                            Math.addExact(issuanceBefore, 5_000L));
+                    return new PermanentDestructionRestartPreparation(
+                            nation.nationId(),
+                            database.cumulativeNetIssuanceMinorUnits());
+                })
+                .whenComplete((prepared, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                fundTreasury(
+                                        helper,
+                                        prepared.nationId(),
+                                        "Matched rollback Treasury",
+                                        500L);
+                                if (!helper.getLevel().getServer()
+                                        .saveEverything(false, true, false)) {
+                                    throw new IllegalStateException(
+                                            "Unable to flush matched rollback baseline world");
+                                }
+                                preparation.set(prepared);
+                                runtime.submitDatabase(database -> {
+                                            database.backup(databaseBackup);
+                                            return null;
+                                        })
+                                        .whenComplete((ignored, backupFailure) ->
+                                                helper.getLevel().getServer().execute(() -> {
+                                                    if (backupFailure != null) {
+                                                        asyncFailure.set(backupFailure);
+                                                        return;
+                                                    }
+                                                    try {
+                                                        MatchedWorldRollbackDrill.capture(
+                                                                helper.getLevel().getServer(),
+                                                                databaseBackup);
+                                                        snapshotReady.set(true);
+                                                    } catch (Throwable captureFailure) {
+                                                        asyncFailure.set(captureFailure);
+                                                    }
+                                                }));
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            assertNoAsyncFailure(helper, asyncFailure, "Matched world rollback preparation");
+            helper.assertTrue(snapshotReady.get(), "matched world snapshot is ready");
+            if (destructionStarted.compareAndSet(false, true)) {
+                runtime.destroyNationalTreasury(
+                                player,
+                                requestId,
+                                100L,
+                                "Later state after matched rollback snapshot")
+                        .whenComplete((ignored, failure) ->
+                                helper.getLevel().getServer().execute(() -> {
+                                    if (failure != null) {
+                                        asyncFailure.set(failure);
+                                        return;
+                                    }
+                                    PermanentDestructionRestartPreparation prepared =
+                                            preparation.get();
+                                    MatchedWorldRollbackDrill.haltAfterLaterState(
+                                            helper.getLevel().getServer(),
+                                            new MatchedWorldRollbackDrill.Marker(
+                                                    requestId,
+                                                    prepared.nationId().value(),
+                                                    "nation:" + prepared.nationId().value()
+                                                            + ":treasury",
+                                                    prepared.issuanceBeforeMinorUnits(),
+                                                    100L));
+                                }));
+            }
+            helper.assertTrue(false, "matched rollback preparation expected exit code 95");
+        });
+    }
+
+    static void verifyMatchedWorldRollback(GameTestHelper helper) {
+        MatchedWorldRollbackDrill.Marker marker = MatchedWorldRollbackDrill.readMarker(
+                helper.getLevel().getServer());
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        helper.assertValueEqual(
+                500L,
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                        .balance(new AccountId(marker.treasuryAccount()))
+                        .minorUnits(),
+                "matched rollback restores the Treasury balance");
+        helper.assertValueEqual(
+                marker.issuanceMinorUnits(),
+                cumulativeNetIssuance(databaseFile),
+                "matched rollback restores Cumulative Net Issuance");
+        helper.assertTrue(
+                permanentDestructionByRequest(databaseFile, marker.requestId()) == null,
+                "later Permanent Destruction operation is absent after matched rollback");
+        helper.assertValueEqual(
+                0L,
+                permanentDestructionEventCountByRequest(databaseFile, marker.requestId()),
+                "later Permanent Destruction event is absent after matched rollback");
+        helper.succeed();
+    }
+
     static void preparePermanentDestructionProcessRestart(
             GameTestHelper helper) {
         UUID playerId = UUID.randomUUID();
@@ -5897,6 +6061,27 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect Permanent Destruction event count", failure);
+        }
+    }
+
+    private static long permanentDestructionEventCountByRequest(
+            Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*)
+                        FROM monetary_supply_event
+                        WHERE change_kind = 'PERMANENT_DESTRUCTION'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0L;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Permanent Destruction event request count",
+                    failure);
         }
     }
 

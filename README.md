@@ -126,6 +126,14 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 .\gradlew.bat runGameTestServer -PpermanentDestructionRestartDrill=verify --no-daemon --console=plain
 ```
 
+匹配的完整世界 + Civic SQLite 回滚演练先保存一个一致快照，再完成后续真实永久销毁并以退出码 `95` 停止。服务器停止后运行专用离线恢复任务，随后用同一恢复世界验证；该任务只操作仓库 `run/` 下的任务自有目录，并拒绝路径逃逸与符号链接：
+
+```powershell
+.\gradlew.bat runGameTestServer -PmatchedWorldRollbackDrill=prepare --no-daemon --console=plain
+.\gradlew.bat restoreMatchedWorldRollbackDrill --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PmatchedWorldRollbackDrill=verify --no-daemon --console=plain
+```
+
 这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。每个演练使用独立 GameTest namespace，因此 matched-world `verify` 只重跑对应恢复测试，不会让其他测试用旧世界数据重新初始化。
 
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
