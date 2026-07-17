@@ -17,7 +17,8 @@ public record AuditableEconomicActivityWindowAssessment(
                 || windowEndEpochMillis <= windowStartEpochMillis
                 || acceptedValueMinorUnits < 0L || normalizedBasisPoints < 0
                 || normalizedBasisPoints > 10_000 || acceptedCount < 0 || excludedCount < 0
-                || excludedByDecision == null || excludedByDecision.containsKey(null)) {
+                || excludedByDecision == null
+                || excludedByDecision.keySet().stream().anyMatch(java.util.Objects::isNull)) {
             throw new IllegalArgumentException("Auditable Economic Activity window assessment is invalid");
         }
         excludedByDecision = Map.copyOf(excludedByDecision);

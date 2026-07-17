@@ -1,6 +1,7 @@
 package org.civiceconomy.strength;
 
 import org.civiceconomy.nation.NationId;
+import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
 import org.civiceconomy.persistence.CivicDatabase;
 
 public final class NationalStrengthRecalculator {
@@ -22,9 +23,13 @@ public final class NationalStrengthRecalculator {
     public NationalStrengthRecalculation recalculate(
             NationId nationId,
             long recalculatedAtEpochMillis,
+            NationEffectiveCitizenPopulation effectiveCitizenPopulation,
             NationalStrengthComponents serverDerivedComponents) {
         if (nationId == null || recalculatedAtEpochMillis <= 0L
-                || serverDerivedComponents == null) {
+                || effectiveCitizenPopulation == null || serverDerivedComponents == null
+                || !nationId.equals(effectiveCitizenPopulation.nationId())
+                || effectiveCitizenPopulation.asOf().toEpochMilli()
+                        != recalculatedAtEpochMillis) {
             throw new IllegalArgumentException("National Strength recalculation request is invalid");
         }
         long windowStart = recalculatedAtEpochMillis <= activityWindowMillis
@@ -43,6 +48,7 @@ public final class NationalStrengthRecalculator {
                 nationId,
                 recalculatedAtEpochMillis,
                 calculator.assess(authoritative),
+                effectiveCitizenPopulation,
                 activity);
     }
 }

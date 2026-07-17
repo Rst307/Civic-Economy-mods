@@ -1845,23 +1845,13 @@ final class NationApplicationCommands {
                         reportFailure(source, "National Strength status", failure);
                     } else {
                         source.sendSuccess(
-                                () -> Component.literal(formatStrengthStatus(recalculation)),
+                                () -> Component.literal(
+                                        NationalStrengthStatusFormatter.format(recalculation)),
                                 false);
                     }
                 }));
         source.sendSuccess(() -> Component.literal("National Strength status queued"), false);
         return Command.SINGLE_SUCCESS;
-    }
-
-    static String formatStrengthStatus(NationalStrengthRecalculation recalculation) {
-        var window = recalculation.activityWindow();
-        return "Nation " + recalculation.nationId().value()
-                + " strength=" + recalculation.assessment().totalBasisPoints()
-                + " activityBasisPoints=" + window.normalizedBasisPoints()
-                + " acceptedValue=" + window.acceptedValueMinorUnits()
-                + " accepted=" + window.acceptedCount()
-                + " excluded=" + window.excludedCount()
-                + " paused=" + recalculation.assessment().newMintAllocationPaused();
     }
 
     private static NationEffectiveCitizenPopulation calculatePopulation(

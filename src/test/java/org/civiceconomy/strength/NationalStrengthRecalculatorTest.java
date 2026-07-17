@@ -3,6 +3,8 @@ package org.civiceconomy.strength;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
 import java.util.EnumSet;
 import java.util.UUID;
 import org.civiceconomy.fiscal.FiscalAuthorization;
@@ -12,6 +14,7 @@ import org.civiceconomy.fiscal.GrantFiscalCapability;
 import org.civiceconomy.fiscal.RegisterFiscalService;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.NationId;
+import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.junit.jupiter.api.Test;
@@ -75,6 +78,8 @@ class NationalStrengthRecalculatorTest {
                     .recalculate(
                             NATION,
                             100L,
+                            new NationEffectiveCitizenPopulation(
+                                    NATION, Instant.ofEpochMilli(100L), List.of()),
                             new NationalStrengthComponents(
                                     1_000,
                                     2_000,

@@ -1,18 +1,18 @@
 package org.civiceconomy.strength;
 
 public final class DiminishingStrengthNormalizer {
-    private final long fullStrengthScale;
+    private final double fullStrengthScale;
 
-    public DiminishingStrengthNormalizer(long fullStrengthScale) {
-        if (fullStrengthScale <= 0L) {
+    public DiminishingStrengthNormalizer(double fullStrengthScale) {
+        if (!Double.isFinite(fullStrengthScale) || fullStrengthScale <= 0D) {
             throw new IllegalArgumentException(
                     "National Strength full-strength scale must be positive");
         }
         this.fullStrengthScale = fullStrengthScale;
     }
 
-    public int normalize(long observedValue) {
-        if (observedValue < 0L) {
+    public int normalize(double observedValue) {
+        if (!Double.isFinite(observedValue) || observedValue < 0D) {
             throw new IllegalArgumentException(
                     "National Strength observed value cannot be negative");
         }
