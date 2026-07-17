@@ -1,6 +1,7 @@
 package org.civiceconomy.strength;
 
 import java.util.Set;
+import java.util.Objects;
 
 public record NationalStrengthComponents(
         int effectiveCitizensBasisPoints,
@@ -15,7 +16,8 @@ public record NationalStrengthComponents(
         requireBasisPoints(auditableEconomicActivityBasisPoints);
         requireBasisPoints(effectiveTerritoryBasisPoints);
         requireBasisPoints(complianceBasisPoints);
-        if (anomalousComponents == null || anomalousComponents.contains(null)) {
+        if (anomalousComponents == null
+                || anomalousComponents.stream().anyMatch(Objects::isNull)) {
             throw new IllegalArgumentException("National Strength anomalies cannot contain null");
         }
         anomalousComponents = Set.copyOf(anomalousComponents);
