@@ -1387,6 +1387,23 @@ final class NationApplicationCommands {
 
     private static LiteralArgumentBuilder<CommandSourceStack> facilityCommand() {
         return Commands.literal("facility")
+                .then(Commands.literal("baseline")
+                        .then(Commands.literal("capture")
+                                .then(Commands.argument(
+                                                "requestId",
+                                                StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        captureFacilityAccountingBaseline(
+                                                                context.getSource(),
+                                                                StringArgumentType.getString(
+                                                                        context,
+                                                                        "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context,
+                                                                        "reason")))))))
                 .then(Commands.literal("interface")
                         .then(Commands.literal("bind")
                                 .then(Commands.argument(
@@ -1415,6 +1432,35 @@ final class NationApplicationCommands {
                                                         context, "requestId"),
                                                 StringArgumentType.getString(
                                                         context, "reason"))))));
+    }
+
+    private static int captureFacilityAccountingBaseline(
+            CommandSourceStack source, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .captureFacilityAccountingBaseline(player, requestId, reason)
+                .whenComplete((baseline, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Facility Accounting Baseline", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Captured Facility Accounting Baseline "
+                                                + baseline.baselineId()
+                                                + " state="
+                                                + baseline.state()
+                                                + " machines="
+                                                + baseline.machines().size()
+                                                + " inventorySlots="
+                                                + baseline.startingInventory().size()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Facility Accounting Baseline request queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int bindFacilityAccountingInterface(

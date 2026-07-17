@@ -50,11 +50,9 @@ public final class FacilityAccountingBaselineRegistry {
             throw new IllegalArgumentException(
                     "Facility Accounting Baseline capture request is required");
         }
-        StoredFacilityAccountingBaseline replay = database.facilityAccountingBaseline(
-                request.serviceIdentity().value(), request.requestId());
+        FacilityAccountingBaseline replay = captureReplay(request);
         if (replay != null) {
-            assertCaptureReplay(replay, request);
-            return toBaseline(replay);
+            return replay;
         }
         RegisteredFacility facility = requireFacility(request.facilityId());
         if (facility.state() != RegisteredFacilityState.BASELINING) {
@@ -99,6 +97,21 @@ public final class FacilityAccountingBaselineRegistry {
                                 change.stack().count()))
                         .toList());
         return toBaseline(stored);
+    }
+
+    public FacilityAccountingBaseline captureReplay(
+            CaptureFacilityAccountingBaseline request) {
+        if (request == null) {
+            throw new IllegalArgumentException(
+                    "Facility Accounting Baseline capture request is required");
+        }
+        StoredFacilityAccountingBaseline replay = database.facilityAccountingBaseline(
+                request.serviceIdentity().value(), request.requestId());
+        if (replay == null) {
+            return null;
+        }
+        assertCaptureReplay(replay, request);
+        return toBaseline(replay);
     }
 
     public FacilityAccountingBaseline baseline(UUID facilityId) {

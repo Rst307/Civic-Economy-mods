@@ -39,8 +39,10 @@ import java.util.stream.Collectors;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.PacketFlow;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.CommonListenerCookie;
@@ -102,9 +104,13 @@ import org.civiceconomy.persistence.StoredMintRecipeIngredient;
 import org.civiceconomy.persistence.StoredMintMaterialStack;
 import org.civiceconomy.persistence.StoredNationalIssuanceQuotaAllocation;
 import org.civiceconomy.persistence.StoredFacilityClaim;
+import org.civiceconomy.persistence.StoredFacilityAccountingBaseline;
 import org.civiceconomy.persistence.StoredFacilityAccountingInterface;
+import org.civiceconomy.persistence.StoredFacilityBaselineInventory;
+import org.civiceconomy.persistence.StoredFacilityBaselineMachine;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
 import org.civiceconomy.production.FacilityAdministration;
+import org.civiceconomy.production.FacilityAccountingBaseline;
 import org.civiceconomy.mint.MintBatch;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
@@ -1359,11 +1365,17 @@ public final class CivicServerRuntimeGameTests {
                 .getChild("backup");
         var facility = economy.getChild("nation").getChild("facility");
         helper.assertValueEqual(
-                Set.of("interface", "register"),
+                Set.of("interface", "register", "baseline"),
                 facility.getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "server-authoritative Registered Facility actions");
+        helper.assertValueEqual(
+                Set.of("capture"),
+                facility.getChild("baseline").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Facility Baseline actions");
         helper.assertValueEqual(
                 Set.of("list", "show", "register", "grant", "revoke", "disable", "enable"),
                 service.getChildren().stream()
@@ -1583,7 +1595,7 @@ public final class CivicServerRuntimeGameTests {
                 helper.getLevel(),
                 new GameProfile(UUID.randomUUID(), "civic-facility-register"),
                 ClientInformation.createDefault());
-        player.setPos(helper.absolutePos(new BlockPos(120, 0, 120)).getCenter());
+        player.setPos(helper.absolutePos(new BlockPos(8, 1, 8)).getCenter());
         BlockPos expectedCore = player.blockPosition();
         BlockPos expectedInterfaceBlock = expectedCore.below();
         helper.getLevel().setBlockAndUpdate(
@@ -1624,6 +1636,20 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<List<StoredFacilityClaim>> persistedClaims = new AtomicReference<>();
         AtomicReference<StoredFacilityAccountingInterface> persistedInterface =
                 new AtomicReference<>();
+        AtomicBoolean baselineFinished = new AtomicBoolean();
+        AtomicReference<Throwable> baselineFailure = new AtomicReference<>();
+        AtomicReference<StoredFacilityAccountingBaseline> persistedBaseline =
+                new AtomicReference<>();
+        AtomicReference<List<StoredFacilityBaselineMachine>> persistedBaselineMachines =
+                new AtomicReference<>(List.of());
+        AtomicReference<List<StoredFacilityBaselineInventory>> persistedBaselineInventory =
+                new AtomicReference<>(List.of());
+        AtomicBoolean replayFinished = new AtomicBoolean();
+        AtomicReference<FacilityAccountingBaseline> replayedBaseline =
+                new AtomicReference<>();
+        AtomicReference<Throwable> replayFailure = new AtomicReference<>();
+        String baselineRequestId = requestId + "-baseline";
+        String baselineReason = "Capture trusted Facility Accounting Baseline";
 
         runtime.submitDatabase(database -> {
                     ServiceIdentity setupService =
@@ -1831,6 +1857,165 @@ public final class CivicServerRuntimeGameTests {
                             expectedInterfaceBlock.getZ(),
                             accountingInterface.blockZ(),
                             "server-targeted interface Z");
+                })
+                .thenExecute(() -> {
+                    FacilityAccountingInterfaceBlockEntity accountingInventory =
+                            (FacilityAccountingInterfaceBlockEntity) helper.getLevel()
+                                    .getBlockEntity(expectedInterfaceBlock);
+                    accountingInventory.setItem(4, new ItemStack(Items.DIAMOND, 7));
+                    if (CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        helper.getLevel().setBlockAndUpdate(
+                                expectedCore,
+                                BuiltInRegistries.BLOCK.get(
+                                                ResourceLocation.parse("create:millstone"))
+                                        .defaultBlockState());
+                        try {
+                            int result = helper.getLevel()
+                                    .getServer()
+                                    .getCommands()
+                                    .getDispatcher()
+                                    .execute(
+                                            "civic economy nation facility baseline capture "
+                                                    + baselineRequestId
+                                                    + " "
+                                                    + baselineReason,
+                                            player.createCommandSourceStack()
+                                                    .withSuppressedOutput());
+                            helper.assertValueEqual(
+                                    1, result, "Facility Baseline command result");
+                            helper.runAfterDelay(20L, () -> runtime
+                                    .submitDatabase(database -> {
+                                        StoredFacilityAccountingBaseline stored =
+                                                database.facilityAccountingBaseline(
+                                                        FacilityAdministration
+                                                                .SERVICE_IDENTITY
+                                                                .value(),
+                                                        baselineRequestId);
+                                        persistedBaseline.set(stored);
+                                        if (stored != null) {
+                                            persistedBaselineMachines.set(
+                                                    database.facilityAccountingBaselineMachines(
+                                                            stored.baselineId()));
+                                            persistedBaselineInventory.set(
+                                                    database.facilityAccountingBaselineInventory(
+                                                            stored.baselineId()));
+                                        }
+                                        return null;
+                                    })
+                                    .whenComplete((ignored, failure) -> {
+                                        if (failure != null) {
+                                            baselineFailure.set(failure);
+                                        }
+                                        baselineFinished.set(true);
+                                    }));
+                        } catch (Throwable failure) {
+                            baselineFailure.set(failure);
+                            baselineFinished.set(true);
+                        }
+                    } else {
+                        runtime.captureFacilityAccountingBaseline(
+                                        player,
+                                        baselineRequestId,
+                                        baselineReason)
+                                .whenComplete((baseline, failure) -> runtime
+                                        .submitDatabase(database -> {
+                                            persistedBaseline.set(
+                                                    database.facilityAccountingBaseline(
+                                                            FacilityAdministration
+                                                                    .SERVICE_IDENTITY
+                                                                    .value(),
+                                                            baselineRequestId));
+                                            return null;
+                                        })
+                                        .whenComplete((ignored, inspectionFailure) -> {
+                                            baselineFailure.set(failure != null
+                                                    ? failure
+                                                    : inspectionFailure);
+                                            baselineFinished.set(true);
+                                        }));
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(
+                            baselineFinished.get(),
+                            "Facility Baseline capture completed");
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        Throwable failure = baselineFailure.get();
+                        helper.assertTrue(
+                                failure != null
+                                        && rootCause(failure).getMessage()
+                                                .contains("Create is unavailable"),
+                                "missing Create fails Facility Baseline capture closed");
+                        helper.assertTrue(
+                                persistedBaseline.get() == null,
+                                "missing Create writes no Facility Baseline");
+                        return;
+                    }
+                    helper.assertTrue(
+                            baselineFailure.get() == null,
+                            baselineFailure.get() == null
+                                    ? "Facility Baseline command state"
+                                    : "Facility Baseline command failure: "
+                                            + rootCause(baselineFailure.get()).getMessage());
+                    StoredFacilityAccountingBaseline baseline = persistedBaseline.get();
+                    helper.assertTrue(baseline != null, "persisted Facility Baseline");
+                    helper.assertValueEqual(
+                            "CAPTURED", baseline.state(), "safe captured Baseline state");
+                    helper.assertValueEqual(
+                            "6.0.6", baseline.createVersion(), "pinned Create version");
+                    helper.assertValueEqual(
+                            1,
+                            persistedBaselineMachines.get().size(),
+                            "real Create Millstone baseline count");
+                    helper.assertValueEqual(
+                            "MILLSTONE",
+                            persistedBaselineMachines.get().getFirst().machineKind(),
+                            "real Create machine kind");
+                    helper.assertValueEqual(
+                            1,
+                            persistedBaselineInventory.get().size(),
+                            "real Civic interface inventory count");
+                    helper.assertValueEqual(
+                            "minecraft:diamond",
+                            persistedBaselineInventory.get().getFirst().itemId(),
+                            "real Civic interface item identity");
+                    helper.assertValueEqual(
+                            7,
+                            persistedBaselineInventory.get().getFirst().count(),
+                            "real Civic interface item count");
+                })
+                .thenExecute(() -> {
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        replayFinished.set(true);
+                        return;
+                    }
+                    helper.getLevel().removeBlock(expectedInterfaceBlock, false);
+                    helper.getLevel().removeBlock(expectedCore, false);
+                    runtime.captureFacilityAccountingBaseline(
+                                    player,
+                                    baselineRequestId,
+                                    baselineReason)
+                            .whenComplete((baseline, failure) -> {
+                                replayedBaseline.set(baseline);
+                                replayFailure.set(failure);
+                                replayFinished.set(true);
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(
+                            replayFinished.get(), "Facility Baseline replay completed");
+                    if (CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        helper.assertTrue(
+                                replayFailure.get() == null,
+                                replayFailure.get() == null
+                                        ? "Facility Baseline replay state"
+                                        : "Facility Baseline replay failure: "
+                                                + rootCause(replayFailure.get()).getMessage());
+                        helper.assertValueEqual(
+                                persistedBaseline.get().baselineId(),
+                                replayedBaseline.get().baselineId(),
+                                "Facility Baseline replay identity");
+                    }
                 })
                 .thenExecute(() -> {
                     ClaimedChunk claimed = manager.getChunk(position);

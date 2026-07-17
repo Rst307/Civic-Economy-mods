@@ -17,6 +17,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
@@ -113,9 +114,14 @@ import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.EffectiveTerritoryFacilityAuthority;
 import org.civiceconomy.production.FacilityAdministration;
+import org.civiceconomy.production.FacilityAccountingBaseline;
+import org.civiceconomy.production.FacilityAccountingBaselineSnapshot;
 import org.civiceconomy.production.FacilityAccountingInterfaceRegistry;
 import org.civiceconomy.production.FacilityAccountingInterface;
 import org.civiceconomy.production.FacilityAccountingInterfacePosition;
+import org.civiceconomy.production.FacilityBaselineAdministration;
+import org.civiceconomy.production.FacilityBaselineCaptureReplay;
+import org.civiceconomy.production.FacilityBaselineCaptureWork;
 import org.civiceconomy.production.FacilityCorePosition;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
@@ -1661,6 +1667,115 @@ public final class CivicServerRuntime {
                                     snapshot.position(),
                                     reason);
                 }));
+    }
+
+    CompletableFuture<FacilityAccountingBaseline> captureFacilityAccountingBaseline(
+            ServerPlayer actor, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityBaselineActor(actor))
+                .thenCompose(actorSnapshot -> current.writer.submitDatabase(database ->
+                        facilityBaselineAdministration(
+                                        database,
+                                        actorSnapshot.team(),
+                                        NO_TERRITORY_OWNERSHIP,
+                                        commandClock)
+                                .prepareCapture(
+                                        actorPlayerId,
+                                        actorSnapshot.team().teamId(),
+                                        requestId,
+                                        actorSnapshot.position(),
+                                        reason)))
+                .thenCompose(preparation -> {
+                    if (preparation instanceof FacilityBaselineCaptureReplay replay) {
+                        return CompletableFuture.completedFuture(replay.baseline());
+                    }
+                    FacilityBaselineCaptureWork work =
+                            (FacilityBaselineCaptureWork) preparation;
+                    return onServer(current, () ->
+                                    captureFacilityBaselineServerState(actor, work))
+                            .thenCompose(captured -> current.writer.submitDatabase(database ->
+                                    facilityBaselineAdministration(
+                                                    database,
+                                                    captured.team(),
+                                                    captured.ownership(),
+                                                    commandClock)
+                                            .completeCapture(
+                                                    captured.work(),
+                                                    captured.snapshot())));
+                });
+    }
+
+    private FacilityBaselineActorSnapshot snapshotFacilityBaselineActor(ServerPlayer actor) {
+        NationTeam team = requireActorTeam(actor.getUUID());
+        BlockPos position = actor.blockPosition();
+        return new FacilityBaselineActorSnapshot(
+                team,
+                new FacilityAccountingInterfacePosition(
+                        actor.level().dimension().location().toString(),
+                        position.getX(),
+                        position.getY(),
+                        position.getZ()));
+    }
+
+    private FacilityBaselineServerCapture captureFacilityBaselineServerState(
+            ServerPlayer actor, FacilityBaselineCaptureWork work) {
+        NationTeam team = requireActorTeam(actor.getUUID());
+        if (!team.teamId().equals(work.facility().ftbTeamId())) {
+            throw new SecurityException(
+                    "Facility actor changed FTB Team before Baseline capture");
+        }
+        Map<TerritoryClaimPosition, UUID> currentClaims =
+                FtbChunksAdapter.live().claimsForTeam(team.teamId()).stream()
+                        .collect(Collectors.toUnmodifiableMap(
+                                claim -> new TerritoryClaimPosition(
+                                        claim.dimension().location().toString(),
+                                        claim.chunkPos().x,
+                                        claim.chunkPos().z),
+                                claim -> team.teamId()));
+        TerritoryOwnershipSource ownership =
+                (dimensionId, chunkX, chunkZ) -> Optional.ofNullable(currentClaims.get(
+                        new TerritoryClaimPosition(dimensionId, chunkX, chunkZ)));
+        FacilityAccountingBaselineSnapshot snapshot =
+                new ServerFacilityAccountingBaselineSnapshotSource(actor.getServer())
+                        .capture(work.facility(), work.accountingInterface());
+        return new FacilityBaselineServerCapture(work, snapshot, team, ownership);
+    }
+
+    private FacilityBaselineAdministration facilityBaselineAdministration(
+            CivicDatabase database,
+            NationTeam team,
+            TerritoryOwnershipSource ownership,
+            Clock operationClock) {
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        NationRegistry nations = new NationRegistry(database, teams);
+        CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                database, CITIZENSHIP_TRANSFER_COOLDOWN, operationClock);
+        CitizenshipCorrectionGraceRegistry corrections =
+                new CitizenshipCorrectionGraceRegistry(database, operationClock);
+        FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
+                nations, citizenships, corrections, teams);
+        EffectiveTerritoryFacilityAuthority territory =
+                new EffectiveTerritoryFacilityAuthority(
+                        database,
+                        new EffectiveTerritoryQuery(
+                                new TerritoryMaintenanceRegistry(database, operationClock),
+                                ownership),
+                        operationClock);
+        return new FacilityBaselineAdministration(
+                database,
+                nations,
+                provider,
+                new NationFiscalAuthorityRegistry(database, provider, operationClock),
+                new RegisteredFacilityRegistry(
+                        database,
+                        territory,
+                        operationClock,
+                        REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                new FacilityAccountingInterfaceRegistry(database, operationClock),
+                territory,
+                operationClock);
     }
 
     private FacilityInterfaceSnapshot snapshotFacilityAccountingInterface(
@@ -3978,6 +4093,15 @@ public final class CivicServerRuntime {
 
     private record FacilityInterfaceSnapshot(
             NationTeam team, FacilityAccountingInterfacePosition position) {}
+
+    private record FacilityBaselineActorSnapshot(
+            NationTeam team, FacilityAccountingInterfacePosition position) {}
+
+    private record FacilityBaselineServerCapture(
+            FacilityBaselineCaptureWork work,
+            FacilityAccountingBaselineSnapshot snapshot,
+            NationTeam team,
+            TerritoryOwnershipSource ownership) {}
 
     private record PreparedMintTake(
             PendingMintMaterialTake pending,

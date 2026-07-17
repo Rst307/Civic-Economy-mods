@@ -178,6 +178,7 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 /civic economy nation bill status <billId>
 /civic economy nation facility register <requestId> <reason>
 /civic economy nation facility interface bind <requestId> <reason>
+/civic economy nation facility baseline capture <requestId> <reason>
 /civic economy nation mint start <requestId> <mintId> <periodId> <amountMinorUnits>
 /civic economy nation mint status [batchId]
 /civic economy nation mint cancel <batchId> <requestId> <reason>
@@ -208,6 +209,8 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、设施核算、发行、财政角色、审批策略、公共政策和恢复管理。设施范围、核算接口和基线管理使用独立的 `MANAGE_FACILITY_ACCOUNTING`，不同时授予领土、国库支出或铸币权限。
 
 `nation facility register` 只接受稳定请求 ID 和审计理由。服务端从真实玩家、当前非玩家 FTB Team、正式 Citizenship/Nation、玩家当前位置、当前 FTB Claim 所有权和当前领土财政结论推导设施身份、核心位置与初始单区块范围，并要求精确的 `MANAGE_FACILITY_ACCOUNTING`；调用者不能提交 Nation、Team、设施 UUID、坐标或 Claim。`nation facility interface bind` 同样只接受请求 ID 和理由，绑定玩家五格内看向、脚所在或脚下的真实 Civic Facility Accounting Interface；服务端同时校验精确方块、方块实体、设施范围、Nation/Team 绑定和权限，普通箱子或伪造坐标不能注册。同一请求重放不会创建第二个设施或接口。
+
+`nation facility baseline capture` 只接受稳定请求 ID 和审计理由。运行时先在 SQLite 单写线程鉴权并定位当前设施和接口，再在 Minecraft 服务器线程读取已加载区块中的真实 Civic 接口库存与受支持 Create `6.0.6` 固定机器，最后回到写线程重新验证 Citizenship、FTB Team、Nation、权限、设施、接口和 Effective Territory 后持久化 `CAPTURED` 基线。它不会强制加载区块，也不接受玩家提交机器、库存或生产结论；Create 缺失/不兼容、区块未加载或事实变化均失败关闭且不写基线。同一请求重放直接返回原基线，不再读取可变世界。
 
 `nation budget create` 创建一条不移动 LC、也不创建 Reservation 或 Escrow 的 National Treasury Budget draft。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导精确来源国库，并在注册内部 Budget 服务前要求该 Citizen 具有本国 `DRAFT_BUDGET`。命令只接受稳定请求 ID、正金额、预算代码、未来到期时间和用途；调用者不能提交 Nation、Team 或来源账户。同一请求重放返回原 draft，改变任一字段会冲突。
 
