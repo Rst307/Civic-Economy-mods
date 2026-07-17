@@ -10,6 +10,7 @@ import org.civiceconomy.compat.CompatibilityReport;
 import org.civiceconomy.compat.CompatibilityProblem;
 import org.civiceconomy.compat.CompatibilityScanner;
 import org.civiceconomy.gametest.FtbIntegrationGameTests;
+import org.civiceconomy.gametest.FacilityAccountingInterfaceBlockGameTests;
 import org.civiceconomy.gametest.CreateIntegrationGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyFiscalAccountsGameTests;
 import org.civiceconomy.gametest.LightmansCurrencyMonetaryGuardGameTests;
@@ -19,6 +20,7 @@ import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyFiscalAcc
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyMonetaryGuard;
 import org.civiceconomy.platform.neoforge.NeoForgeModCatalog;
 import org.civiceconomy.platform.neoforge.CivicCommandArgumentTypes;
+import org.civiceconomy.platform.neoforge.CivicContent;
 import org.civiceconomy.platform.neoforge.CreateMillstoneObservationBridge;
 import org.civiceconomy.platform.neoforge.CivicServerRuntime;
 import org.civiceconomy.platform.neoforge.CivicServerRuntimeGameTests;
@@ -35,6 +37,7 @@ public final class CivicEconomy {
     private final CivicServerRuntime serverRuntime;
 
     public CivicEconomy(IEventBus modEventBus) {
+        CivicContent.register(modEventBus);
         CivicCommandArgumentTypes.register(modEventBus);
         CivicServerRuntime runtime = new CivicServerRuntime();
         serverRuntime = runtime;
@@ -87,6 +90,7 @@ public final class CivicEconomy {
     private static void registerGameTests(RegisterGameTestsEvent event) {
         LOGGER.info("Registering Civic Economy GameTests");
         event.register(FtbIntegrationGameTests.class);
+        event.register(FacilityAccountingInterfaceBlockGameTests.class);
         event.register(CivicServerRuntimeGameTests.class);
         event.register(MintMaterialCustodyGameTests.class);
         event.register(LightmansCurrencyFiscalAccountsGameTests.class);
