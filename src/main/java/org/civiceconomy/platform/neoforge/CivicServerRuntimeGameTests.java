@@ -560,6 +560,189 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
+    static void preparePermanentDestructionProcessRestart(
+            GameTestHelper helper) {
+        UUID playerId = UUID.randomUUID();
+        ServerPlayer player = connectMockServerPlayer(
+                helper, playerId, "civic-pd-restart");
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        String requestId = PermanentDestructionProcessRestartDrill.REQUEST_PREFIX
+                + UUID.randomUUID();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<PermanentDestructionRestartPreparation> preparation =
+                new AtomicReference<>();
+        AtomicBoolean destructionStarted = new AtomicBoolean();
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        Instant now = Instant.now();
+        Clock setupClock = Clock.fixed(now, ZoneOffset.UTC);
+
+        runtime.submitDatabase(database -> {
+                    NationRegistry nations = new NationRegistry(
+                            database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "destruction-restart-nation-" + UUID.randomUUID(),
+                            team.getId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, Duration.ofDays(7L), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "destruction-restart-citizenship-" + UUID.randomUUID(),
+                            playerId,
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                            .grant(new GrantNationFiscalPermission(
+                                    new ServiceIdentity("civiceconomy-gametest"),
+                                    "destruction-restart-authority-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    playerId,
+                                    playerId,
+                                    NationFiscalPermission.MANAGE_ISSUANCE,
+                                    "Matched Permanent Destruction process restart"));
+                    long issuanceBefore = database.cumulativeNetIssuanceMinorUnits();
+                    database.confirmMonetarySupplyChange(
+                            UUID.randomUUID(),
+                            "civiceconomy-gametest",
+                            "destruction-restart-issuance-" + UUID.randomUUID(),
+                            "ISSUANCE",
+                            500L,
+                            "mint-batch:destruction-restart:" + UUID.randomUUID(),
+                            "Seed Permanent Destruction restart capacity",
+                            now.toEpochMilli(),
+                            Math.addExact(issuanceBefore, 5_000L));
+                    return new PermanentDestructionRestartPreparation(
+                            nation.nationId(),
+                            database.cumulativeNetIssuanceMinorUnits());
+                })
+                .whenComplete((prepared, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            try {
+                                fundTreasury(
+                                        helper,
+                                        prepared.nationId(),
+                                        "Permanent Destruction restart drill Treasury",
+                                        500L);
+                                String treasury =
+                                        "nation:" + prepared.nationId().value() + ":treasury";
+                                PermanentDestructionProcessRestartDrill.expect(
+                                        requestId,
+                                        treasury,
+                                        100L,
+                                        prepared.issuanceBeforeMinorUnits());
+                                preparation.set(prepared);
+                            } catch (Throwable setupFailure) {
+                                asyncFailure.set(setupFailure);
+                            }
+                        }));
+
+        helper.succeedWhen(() -> {
+            assertNoAsyncFailure(
+                    helper, asyncFailure, "Permanent Destruction restart preparation");
+            helper.assertTrue(
+                    preparation.get() != null,
+                    "Permanent Destruction restart preparation ready");
+            if (destructionStarted.compareAndSet(false, true)) {
+                runtime.destroyNationalTreasury(
+                                player,
+                                requestId,
+                                100L,
+                                "Matched Permanent Destruction process restart")
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                asyncFailure.set(new AssertionError(
+                                        "Permanent Destruction restart preparation completed without halt"));
+                            }
+                        });
+            }
+            helper.assertTrue(
+                    false,
+                    "Permanent Destruction restart preparation expected controlled process halt");
+        });
+    }
+
+    static void verifyPermanentDestructionProcessRestart(
+            GameTestHelper helper) {
+        PermanentDestructionProcessRestartDrill.Marker marker =
+                PermanentDestructionProcessRestartDrill.readMarker(
+                        helper.getLevel().getServer());
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+
+        PermanentDestructionRow prepared = permanentDestructionByRequest(
+                databaseFile, marker.requestId());
+        helper.assertTrue(prepared != null, "restarted Permanent Destruction row exists");
+        helper.assertValueEqual(
+                marker.operationId(),
+                prepared.operationId(),
+                "restarted Permanent Destruction operation identity");
+        helper.assertValueEqual(
+                "PREPARED", prepared.state(), "restart-window destruction state");
+        helper.assertValueEqual(
+                marker.haltedAfterExternalRecord(),
+                prepared.externalAppliedAtEpochMillis() != null,
+                "restart-window external-application record state");
+        helper.assertValueEqual(
+                400L,
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                        .balance(new AccountId(marker.treasuryAccount()))
+                        .minorUnits(),
+                "restart-window Treasury debit persisted once");
+        helper.assertValueEqual(
+                marker.issuanceBeforeMinorUnits(),
+                cumulativeNetIssuance(databaseFile),
+                "restart-window Cumulative Net Issuance is unchanged");
+        helper.assertValueEqual(
+                0L,
+                permanentDestructionEventCount(databaseFile, marker.operationId()),
+                "restart-window has no Monetary Supply destruction event");
+
+        helper.succeedWhen(() -> {
+            runtime.recoverPermanentDestructionsNowForGameTest();
+            PermanentDestructionRow recovered = permanentDestructionByRequest(
+                    databaseFile, marker.requestId());
+            if (!"COMMITTED".equals(recovered.state())) {
+                helper.assertTrue(
+                        false,
+                        "waiting for matched Permanent Destruction restart recovery");
+            }
+            helper.assertValueEqual(
+                    marker.operationId(),
+                    recovered.operationId(),
+                    "recovered Permanent Destruction identity");
+            helper.assertValueEqual(
+                    400L,
+                    LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                            .balance(new AccountId(marker.treasuryAccount()))
+                            .minorUnits(),
+                    "recovered Treasury is not debited twice");
+            helper.assertValueEqual(
+                    marker.issuanceBeforeMinorUnits() - marker.amountMinorUnits(),
+                    cumulativeNetIssuance(databaseFile),
+                    "recovered Cumulative Net Issuance decreases once");
+            helper.assertValueEqual(
+                    1L,
+                    permanentDestructionEventCount(databaseFile, marker.operationId()),
+                    "one Permanent Destruction Monetary Supply event");
+        });
+    }
+
     static void prepareTreasuryWithdrawalProcessRestart(
             GameTestHelper helper) {
         UUID playerId = UUID.randomUUID();
@@ -5697,6 +5880,26 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
+    private static long permanentDestructionEventCount(
+            Path databaseFile, UUID operationId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*)
+                        FROM monetary_supply_event
+                        WHERE change_kind = 'PERMANENT_DESTRUCTION'
+                          AND external_reference = ?
+                        """)) {
+            query.setString(1, "permanent-destruction:" + operationId);
+            try (var result = query.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0L;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Permanent Destruction event count", failure);
+        }
+    }
+
     private static long playerInventoryMoney(ServerPlayer player) {
         var unit = CoinValue.fromNumber(CoinAPI.MAIN_CHAIN, 1L);
         return MoneyAPI.getApi()
@@ -5996,11 +6199,13 @@ public final class CivicServerRuntimeGameTests {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
                 var query = connection.prepareStatement("""
-                        SELECT source_account,
+                        SELECT operation_id,
+                               source_account,
                                amount_minor_units,
                                operator_identity,
                                reason,
-                               state
+                               state,
+                               external_applied_at_epoch_millis
                         FROM permanent_destruction_operation
                         WHERE service_identity = ? AND request_id = ?
                         """)) {
@@ -6011,14 +6216,19 @@ public final class CivicServerRuntimeGameTests {
                             .value());
             query.setString(2, requestId);
             try (var result = query.executeQuery()) {
-                return result.next()
-                        ? new PermanentDestructionRow(
-                                result.getString(1),
-                                result.getLong(2),
-                                result.getString(3),
-                                result.getString(4),
-                                result.getString(5))
-                        : null;
+                if (!result.next()) {
+                    return null;
+                }
+                long externalAppliedAt = result.getLong(7);
+                boolean externalAppliedAtMissing = result.wasNull();
+                return new PermanentDestructionRow(
+                        UUID.fromString(result.getString(1)),
+                        result.getString(2),
+                        result.getLong(3),
+                        result.getString(4),
+                        result.getString(5),
+                        result.getString(6),
+                        externalAppliedAtMissing ? null : externalAppliedAt);
             }
         } catch (SQLException failure) {
             throw new IllegalStateException(
@@ -6314,7 +6524,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(65, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(66, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -7393,11 +7603,17 @@ public final class CivicServerRuntimeGameTests {
             String sourceValidity) {}
 
     private record PermanentDestructionRow(
+            UUID operationId,
             String sourceAccount,
             long amountMinorUnits,
             String operatorIdentity,
             String reason,
-            String state) {}
+            String state,
+            Long externalAppliedAtEpochMillis) {}
+
+    private record PermanentDestructionRestartPreparation(
+            org.civiceconomy.nation.NationId nationId,
+            long issuanceBeforeMinorUnits) {}
 
     private record TreasuryWithdrawalRow(
             UUID withdrawalId,

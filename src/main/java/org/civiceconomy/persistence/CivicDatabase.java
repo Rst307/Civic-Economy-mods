@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 65;
+    private static final int SCHEMA_VERSION = 66;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -6116,6 +6116,47 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredPermanentDestructionOperation
+            markPermanentDestructionExternalApplied(
+                    UUID operationId,
+                    long externalAppliedAtEpochMillis) {
+        if (operationId == null || externalAppliedAtEpochMillis < 0L) {
+            throw new IllegalArgumentException(
+                    "Permanent Destruction external application values are invalid");
+        }
+        StoredPermanentDestructionOperation operation =
+                permanentDestructionOperation(operationId);
+        if (operation == null) {
+            throw new IllegalArgumentException(
+                    "Unknown Permanent Destruction " + operationId);
+        }
+        if (operation.externalAppliedAtEpochMillis() != null
+                || "COMMITTED".equals(operation.state())) {
+            return operation;
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE permanent_destruction_operation
+                SET external_applied_at_epoch_millis = ?
+                WHERE operation_id = ?
+                  AND state = 'PREPARED'
+                  AND external_applied_at_epoch_millis IS NULL
+                """)) {
+            update.setLong(1, externalAppliedAtEpochMillis);
+            update.setString(2, operationId.toString());
+            if (update.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Permanent Destruction changed before external application was recorded "
+                                + operationId);
+            }
+            return permanentDestructionOperation(operationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to record Permanent Destruction external application "
+                            + operationId,
+                    failure);
+        }
+    }
+
     public synchronized StoredMonetarySupplyEvent commitPermanentDestruction(
             UUID operationId, long committedAtEpochMillis) {
         String externalReference = "permanent-destruction:" + operationId;
@@ -6137,6 +6178,11 @@ public final class CivicDatabase implements AutoCloseable {
                 }
                 connection.commit();
                 return replay;
+            }
+            if (operation.externalAppliedAtEpochMillis() == null) {
+                throw new IllegalStateException(
+                        "Permanent Destruction external result is not recorded "
+                                + operationId);
             }
             long next = Math.subtractExact(
                     cumulativeNetIssuanceMinorUnits(), operation.amountMinorUnits());
@@ -13018,6 +13064,15 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 65");
             }
+            if (version < 66) {
+                addColumnIfMissing(
+                        statement,
+                        "permanent_destruction_operation",
+                        "external_applied_at_epoch_millis",
+                        "INTEGER CHECK (external_applied_at_epoch_millis IS NULL "
+                                + "OR external_applied_at_epoch_millis >= prepared_at_epoch_millis)");
+                statement.execute("PRAGMA user_version = 66");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -13785,7 +13840,10 @@ public final class CivicDatabase implements AutoCloseable {
 
     private static StoredPermanentDestructionOperation storedPermanentDestructionOperation(
             ResultSet result) throws SQLException {
+        long externalAppliedAt = result.getLong("external_applied_at_epoch_millis");
+        Long externalAppliedAtEpochMillis = result.wasNull() ? null : externalAppliedAt;
         long committedAt = result.getLong("committed_at_epoch_millis");
+        Long committedAtEpochMillis = result.wasNull() ? null : committedAt;
         return new StoredPermanentDestructionOperation(
                 UUID.fromString(result.getString("operation_id")),
                 result.getString("service_identity"),
@@ -13796,7 +13854,8 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getString("reason"),
                 result.getString("state"),
                 result.getLong("prepared_at_epoch_millis"),
-                result.wasNull() ? null : committedAt);
+                externalAppliedAtEpochMillis,
+                committedAtEpochMillis);
     }
 
     private StoredTreasuryWithdrawalOperation readTreasuryWithdrawalOperation(

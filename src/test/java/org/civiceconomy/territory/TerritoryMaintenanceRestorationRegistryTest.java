@@ -319,6 +319,7 @@ class TerritoryMaintenanceRestorationRegistryTest {
                 78L,
                 "Out-of-Cycle Restoration",
                 NOW.toEpochMilli());
+        database.markPermanentDestructionExternalApplied(destructionId, NOW.toEpochMilli());
         database.commitPermanentDestruction(destructionId, NOW.toEpochMilli());
         ledger.release(new ReleaseReservation(
                 SERVICE,

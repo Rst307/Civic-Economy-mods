@@ -164,6 +164,7 @@ import org.civiceconomy.mint.PrepareMintBatch;
 import org.civiceconomy.monetary.CorrectMonetaryStock;
 import org.civiceconomy.monetary.ConfirmPermanentDestruction;
 import org.civiceconomy.monetary.MonetarySupplyEvent;
+import org.civiceconomy.monetary.PermanentDestructionOperation;
 import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.monetary.MonetaryStockCorrectionRegistry;
 import org.civiceconomy.monetary.PermanentDestructionFiscalServiceProvisioner;
@@ -300,7 +301,9 @@ public final class CivicServerRuntime {
         scheduleNationApplicationExpiry(state);
         scheduleCitizenshipReconciliation(state);
         scheduleTerritoryPermitCompensation(state);
-        schedulePermanentDestructionRecovery(state);
+        if (!PermanentDestructionProcessRestartDrill.verifying()) {
+            schedulePermanentDestructionRecovery(state);
+        }
         scheduleTreasuryWithdrawalRecovery(state);
         scheduleMintBatchRecovery(state);
         scheduleTerritoryMaintenanceAssessment(state);
@@ -553,18 +556,31 @@ public final class CivicServerRuntime {
                             .ensureAuthorized(treasury);
                     var session = authorization.openSession(
                             PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY);
-                    return PermanentDestructionCoordinator.live(
+                    PermanentDestructionCoordinator coordinator =
+                            PermanentDestructionCoordinator.live(
                                     database,
                                     session,
                                     commandClock,
-                                    current.server.overworld())
-                            .confirm(new ConfirmPermanentDestruction(
+                                    current.server.overworld(),
+                                    PermanentDestructionProcessRestartDrill.observer(
+                                            current.server));
+                    return new PreparedPermanentDestruction(
+                            coordinator,
+                            coordinator.prepare(new ConfirmPermanentDestruction(
                                     PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY,
                                     requestId,
                                     treasury,
                                     MoneyAmount.ofMinorUnits(amountMinorUnits),
                                     "player:" + actorPlayerId,
-                                    reason));
+                                    reason)));
+                }))
+                .thenCompose(prepared -> onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.operation());
+                    return prepared;
+                }))
+                .thenCompose(prepared -> current.writer.submitDatabase(database -> {
+                    prepared.coordinator().recordExternalApplied(prepared.operation());
+                    return prepared.coordinator().commit(prepared.operation());
                 }));
     }
 
@@ -1611,6 +1627,13 @@ public final class CivicServerRuntime {
         RuntimeState current = state;
         if (current != null) {
             scheduleTreasuryWithdrawalRecovery(current);
+        }
+    }
+
+    void recoverPermanentDestructionsNowForGameTest() {
+        RuntimeState current = state;
+        if (current != null) {
+            schedulePermanentDestructionRecovery(current);
         }
     }
 
@@ -2747,51 +2770,97 @@ public final class CivicServerRuntime {
     }
 
     private void schedulePermanentDestructionRecovery(RuntimeState current) {
-        if (!current.permanentDestructionRecoveryQueued.compareAndSet(false, true)) {
+        if (state != current
+                || !current.permanentDestructionRecoveryQueued.compareAndSet(false, true)) {
             return;
         }
         Clock recoveryClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         current.writer.submitDatabase(database -> {
-                    return recoverPermanentDestructions(
-                                    database,
-                                    current,
-                                    recoveryClock,
-                                    TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY)
-                            + recoverPermanentDestructions(
-                                    database,
-                                    current,
-                                    recoveryClock,
-                                    PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    List<PreparedPermanentDestruction> pending = new ArrayList<>();
+                    appendPermanentDestructionRecoveries(
+                            pending,
+                            database,
+                            current,
+                            recoveryClock,
+                            TerritoryFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    appendPermanentDestructionRecoveries(
+                            pending,
+                            database,
+                            current,
+                            recoveryClock,
+                            PermanentDestructionFiscalServiceProvisioner.SERVICE_IDENTITY);
+                    return List.copyOf(pending);
                 })
-                .whenComplete((recovered, failure) -> {
-                    current.permanentDestructionRecoveryQueued.set(false);
+                .whenComplete((pending, failure) -> {
                     if (failure != null) {
-                        LOGGER.error("Automatic Permanent Destruction recovery failed closed", failure);
-                    } else if (recovered != null && recovered > 0) {
-                        LOGGER.info("Replayed {} Permanent Destruction operation(s)", recovered);
+                        current.permanentDestructionRecoveryQueued.set(false);
+                        LOGGER.error(
+                                "Automatic Permanent Destruction recovery scan failed closed",
+                                failure);
+                    } else if (pending == null || pending.isEmpty()) {
+                        current.permanentDestructionRecoveryQueued.set(false);
+                    } else {
+                        recoverPermanentDestructions(current, pending, 0, 0);
                     }
                 });
     }
 
-    private static int recoverPermanentDestructions(
+    private static void appendPermanentDestructionRecoveries(
+            List<PreparedPermanentDestruction> destination,
             CivicDatabase database,
             RuntimeState current,
             Clock recoveryClock,
             ServiceIdentity serviceIdentity) {
-        int operationCount = database
-                .pendingPermanentDestructionOperations(serviceIdentity.value())
-                .size();
-        if (operationCount == 0) {
-            return 0;
+        if (database.pendingPermanentDestructionOperations(serviceIdentity.value())
+                .isEmpty()) {
+            return;
         }
         var session = new FiscalAuthorization(database).openSession(serviceIdentity);
-        PermanentDestructionCoordinator.live(
-                        database,
-                        session,
-                        recoveryClock,
-                        current.server.overworld())
-                .recoverAll();
-        return operationCount;
+        PermanentDestructionCoordinator coordinator = PermanentDestructionCoordinator.live(
+                database,
+                session,
+                recoveryClock,
+                current.server.overworld(),
+                PermanentDestructionProcessRestartDrill.observer(current.server));
+        coordinator.pending().stream()
+                .map(operation -> new PreparedPermanentDestruction(coordinator, operation))
+                .forEach(destination::add);
+    }
+
+    private void recoverPermanentDestructions(
+            RuntimeState current,
+            List<PreparedPermanentDestruction> pending,
+            int index,
+            int recovered) {
+        if (state != current || index >= pending.size()) {
+            current.permanentDestructionRecoveryQueued.set(false);
+            if (state == current && recovered > 0) {
+                LOGGER.info("Replayed {} Permanent Destruction operation(s)", recovered);
+            }
+            return;
+        }
+        PreparedPermanentDestruction prepared = pending.get(index);
+        onServer(current, () -> {
+                    prepared.coordinator().applyExternal(prepared.operation());
+                    return prepared;
+                })
+                .thenCompose(applied -> current.writer.submitDatabase(database -> {
+                    applied.coordinator().recordExternalApplied(applied.operation());
+                    return applied.coordinator().commit(applied.operation());
+                }))
+                .whenComplete((committed, failure) -> {
+                    if (failure != null) {
+                        LOGGER.warn(
+                                "Permanent Destruction {} remains pending",
+                                prepared.operation().operationId(),
+                                failure);
+                        recoverPermanentDestructions(
+                                current, pending, index + 1, recovered);
+                    } else {
+                        recoverPermanentDestructions(
+                                current, pending, index + 1, recovered + 1);
+                    }
+                });
     }
 
     private void scheduleTreasuryWithdrawalRecovery(RuntimeState current) {
@@ -3610,6 +3679,10 @@ public final class CivicServerRuntime {
     private record PreparedTreasuryWithdrawal(
             TreasuryWithdrawalCoordinator coordinator,
             TreasuryWithdrawal withdrawal) {}
+
+    private record PreparedPermanentDestruction(
+            PermanentDestructionCoordinator coordinator,
+            PermanentDestructionOperation operation) {}
 
     private record PreparedPlayerFiscalBillPayment(
             FiscalBillPaymentCoordinator coordinator,

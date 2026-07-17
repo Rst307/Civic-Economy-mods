@@ -12,4 +12,5 @@ public record StoredPermanentDestructionOperation(
         String reason,
         String state,
         long preparedAtEpochMillis,
+        Long externalAppliedAtEpochMillis,
         Long committedAtEpochMillis) {}

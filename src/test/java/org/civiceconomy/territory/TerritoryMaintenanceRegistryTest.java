@@ -125,6 +125,8 @@ class TerritoryMaintenanceRegistryTest {
         var destruction = database.preparePermanentDestruction(
                 UUID.randomUUID(), service, "maintenance-destruction", treasury, 150L,
                 "Maintenance " + cycleId, START.toEpochMilli());
+        database.markPermanentDestructionExternalApplied(
+                destruction.operationId(), START.plusSeconds(1).toEpochMilli());
         database.commitPermanentDestruction(
                 destruction.operationId(), START.plusSeconds(1).toEpochMilli());
         database.releaseReservation(
@@ -239,6 +241,8 @@ class TerritoryMaintenanceRegistryTest {
             var destruction = database.preparePermanentDestruction(
                     UUID.randomUUID(), service, "extra-destruction", treasury, 151L,
                     "Maintenance " + cycle.cycleId(), START.toEpochMilli());
+            database.markPermanentDestructionExternalApplied(
+                    destruction.operationId(), START.plusSeconds(1).toEpochMilli());
             database.commitPermanentDestruction(
                     destruction.operationId(), START.plusSeconds(1).toEpochMilli());
             database.releaseReservation(
@@ -604,6 +608,8 @@ class TerritoryMaintenanceRegistryTest {
         var destruction = database.preparePermanentDestruction(
                 UUID.randomUUID(), service, requestPrefix + "-destruction", treasury,
                 destructionAmount, "Maintenance " + cycleId, START.toEpochMilli());
+        database.markPermanentDestructionExternalApplied(
+                destruction.operationId(), START.plusSeconds(1).toEpochMilli());
         database.commitPermanentDestruction(
                 destruction.operationId(), START.plusSeconds(1).toEpochMilli());
         database.releaseReservation(

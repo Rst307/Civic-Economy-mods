@@ -110,6 +110,106 @@ class PermanentDestructionCoordinatorTest {
     }
 
     @Test
+    void externalApplicationStatePersistsBeforeMonetarySupplyCommit() {
+        UUID operationId = UUID.randomUUID();
+        try (CivicDatabase database = database()) {
+            seedIssuance(database, "seed-external-applied-state", "mint-batch:external-state");
+            database.preparePermanentDestruction(
+                    operationId,
+                    SERVICE.value(),
+                    "destruction-external-applied-state",
+                    TREASURY.value(),
+                    600L,
+                    "player:11111111-1111-1111-1111-111111111111",
+                    "Persist external Permanent Destruction result",
+                    NOW.toEpochMilli());
+
+            var marked = database.markPermanentDestructionExternalApplied(
+                    operationId, NOW.plusSeconds(1L).toEpochMilli());
+
+            assertEquals("PREPARED", marked.state());
+            assertEquals(1_000L, database.cumulativeNetIssuanceMinorUnits());
+            assertEquals(
+                    operationId,
+                    database.pendingPermanentDestructionOperations(SERVICE.value())
+                            .getFirst()
+                            .operationId());
+        }
+
+        try (CivicDatabase reopened = database()) {
+            var persisted = reopened.permanentDestructionOperation(
+                    SERVICE.value(), "destruction-external-applied-state");
+            assertEquals("PREPARED", persisted.state());
+            assertEquals(
+                    NOW.plusSeconds(1L).toEpochMilli(),
+                    persisted.externalAppliedAtEpochMillis());
+            assertEquals(1_000L, reopened.cumulativeNetIssuanceMinorUnits());
+        }
+    }
+
+    @Test
+    void crashAfterExternalApplicationRecordRecoversWithoutSecondDestruction() {
+        AtomicLong lcBalance = new AtomicLong(1_000L);
+        Set<UUID> applied = new HashSet<>();
+        ConfirmPermanentDestruction request = new ConfirmPermanentDestruction(
+                SERVICE,
+                "destruction-recorded-before-commit",
+                TREASURY,
+                MoneyAmount.ofMinorUnits(600L),
+                "Crash after external application record");
+
+        try (CivicDatabase database = database()) {
+            authorize(database);
+            seedIssuance(database, "seed-recorded-before-commit", "mint-batch:recorded");
+            PermanentDestructionCoordinator coordinator = coordinator(
+                    database,
+                    destruction -> {
+                        if (applied.add(destruction.destructionId())) {
+                            lcBalance.addAndGet(-destruction.amount().minorUnits());
+                        }
+                    },
+                    new PermanentDestructionProgressObserver() {
+                        @Override
+                        public void afterExternalApplied(
+                                org.civiceconomy.monetary.ExternalPermanentDestruction ignored) {}
+
+                        @Override
+                        public void afterExternalRecorded(
+                                org.civiceconomy.monetary.ExternalPermanentDestruction ignored) {
+                            throw new IllegalStateException("simulated recorded-result crash");
+                        }
+                    });
+
+            assertThrows(IllegalStateException.class, () -> coordinator.confirm(request));
+            var pending = database.permanentDestructionOperation(
+                    SERVICE.value(), request.requestId());
+            assertEquals("PREPARED", pending.state());
+            assertEquals(NOW.toEpochMilli(), pending.externalAppliedAtEpochMillis());
+            assertEquals(400L, lcBalance.get());
+            assertEquals(1_000L, database.cumulativeNetIssuanceMinorUnits());
+        }
+
+        try (CivicDatabase reopened = database()) {
+            coordinator(
+                            reopened,
+                            destruction -> {
+                                if (applied.add(destruction.destructionId())) {
+                                    lcBalance.addAndGet(-destruction.amount().minorUnits());
+                                }
+                            })
+                    .recoverAll();
+
+            assertEquals(400L, lcBalance.get());
+            assertEquals(400L, reopened.cumulativeNetIssuanceMinorUnits());
+            assertEquals(
+                    "COMMITTED",
+                    reopened.permanentDestructionOperation(
+                                    SERVICE.value(), request.requestId())
+                            .state());
+        }
+    }
+
+    @Test
     void identityAuthorityAndReplayPayloadFailBeforeExternalDestruction() {
         AtomicLong externalCalls = new AtomicLong();
         try (CivicDatabase database = database()) {
@@ -221,6 +321,16 @@ class PermanentDestructionCoordinatorTest {
     private PermanentDestructionCoordinator coordinator(
             CivicDatabase database, ExternalPermanentDestructions external) {
         return coordinator(database, SERVICE, external);
+    }
+
+    private PermanentDestructionCoordinator coordinator(
+            CivicDatabase database,
+            ExternalPermanentDestructions external,
+            PermanentDestructionProgressObserver progressObserver) {
+        FiscalServiceSession session = FiscalTestSessions.open(
+                database, SERVICE, "civiceconomy-tests");
+        return PermanentDestructionCoordinator.authorized(
+                database, external, session, CLOCK, progressObserver);
     }
 
     private PermanentDestructionCoordinator coordinator(

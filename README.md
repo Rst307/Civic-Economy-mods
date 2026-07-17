@@ -115,6 +115,17 @@ Nation Activation 匹配世界进程重启演练在真实 LC National Treasury �
 .\gradlew.bat runGameTestServer -PnationActivationRestartDrill=verify --no-daemon --console=plain
 ```
 
+National Treasury Permanent Destruction 匹配世界进程重启演练为两个崩溃窗口分别使用一个干净的 `run/world`。第一组在真实 LC 国库扣减及幂等 marker 已刷盘、SQLite 尚未记录外部结果时以退出码 `93` 终止；第二组在 SQLite 已记录外部结果、累计净发行量尚未提交时以退出码 `94` 终止。每组的 `verify` 必须紧接着复用该组的同一世界；开始第二组前只删除任务自有的 `run/world`：
+
+```powershell
+.\gradlew.bat runGameTestServer -PpermanentDestructionRestartDrill=prepare-external --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PpermanentDestructionRestartDrill=verify --no-daemon --console=plain
+
+# 删除任务自有的 run/world，开始第二个独立窗口
+.\gradlew.bat runGameTestServer -PpermanentDestructionRestartDrill=prepare-external-recorded --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PpermanentDestructionRestartDrill=verify --no-daemon --console=plain
+```
+
 这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。每个演练使用独立 GameTest namespace，因此 matched-world `verify` 只重跑对应恢复测试，不会让其他测试用旧世界数据重新初始化。
 
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
