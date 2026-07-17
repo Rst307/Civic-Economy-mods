@@ -66,6 +66,10 @@ _Avoid_: FTB 等级、全局 OP、服务身份
 国家治理授予某个 Citizen 的单一、明确财政动作权限，例如批准预算、管理提现、管理审批策略或管理领土财政。
 _Avoid_: 全局财政访问、模糊官职、账户余额
 
+**设施核算管理权限（Facility Accounting Management Permission）**:
+一个 Nation 授予 Citizen 管理 Registered Facility 范围、绑定 Facility Accounting Interface 以及捕获和启用 Facility Accounting Baseline 的精确权限；它不授予领土所有权、国库支出或铸币权限。
+_Avoid_: 领土财政权限、铸币权限、全局设施管理、OP 权限
+
 **Withdrawal Approval Policy（提现审批策略）**:
 一个 Nation 对 Treasury Withdrawal 按金额门槛规定所需不同 Citizen 审批人数的未来生效版本；发起时命中的版本和人数会被固定，后续策略变化不能改写已发起请求。
 _Avoid_: 全服强制双签、即时生效配置、事后改变审批人数

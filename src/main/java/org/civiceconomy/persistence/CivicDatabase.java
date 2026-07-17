@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 71;
+    private static final int SCHEMA_VERSION = 72;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -14774,6 +14774,63 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 71");
+            }
+            if (version < 72) {
+                statement.execute("DROP INDEX nation_fiscal_permission_grant_player");
+                statement.execute("ALTER TABLE nation_fiscal_permission_revocation RENAME TO nation_fiscal_permission_revocation_v71");
+                statement.execute("ALTER TABLE nation_fiscal_permission_grant RENAME TO nation_fiscal_permission_grant_v71");
+                statement.execute("""
+                        CREATE TABLE nation_fiscal_permission_grant (
+                            grant_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            player_id TEXT NOT NULL,
+                            permission TEXT NOT NULL CHECK (permission IN (
+                                'VIEW_ACCOUNT', 'VIEW_LEDGER', 'DRAFT_BUDGET',
+                                'APPROVE_BUDGET', 'INITIATE_PAYMENT', 'APPROVE_PAYMENT',
+                                'MANAGE_WITHDRAWAL', 'MANAGE_TERRITORY_FINANCE',
+                                'MANAGE_FACILITY_ACCOUNTING', 'MANAGE_ISSUANCE',
+                                'MANAGE_FISCAL_ROLES', 'MANAGE_APPROVAL_POLICY',
+                                'MANAGE_PUBLIC_POLICY', 'MANAGE_RECOVERY'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            granted_at_epoch_millis INTEGER NOT NULL
+                                CHECK (granted_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO nation_fiscal_permission_grant
+                        SELECT * FROM nation_fiscal_permission_grant_v71
+                        """);
+                statement.execute("""
+                        CREATE INDEX nation_fiscal_permission_grant_player
+                        ON nation_fiscal_permission_grant (nation_id, player_id)
+                        """);
+                statement.execute("""
+                        CREATE TABLE nation_fiscal_permission_revocation (
+                            revocation_id TEXT PRIMARY KEY,
+                            grant_id TEXT NOT NULL UNIQUE
+                                REFERENCES nation_fiscal_permission_grant(grant_id),
+                            service_identity TEXT NOT NULL,
+                            request_id TEXT NOT NULL,
+                            nation_id TEXT NOT NULL REFERENCES nation_registry(nation_id),
+                            actor_player_id TEXT NOT NULL,
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            revoked_at_epoch_millis INTEGER NOT NULL
+                                CHECK (revoked_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO nation_fiscal_permission_revocation
+                        SELECT * FROM nation_fiscal_permission_revocation_v71
+                        """);
+                statement.execute("DROP TABLE nation_fiscal_permission_revocation_v71");
+                statement.execute("DROP TABLE nation_fiscal_permission_grant_v71");
+                statement.execute("PRAGMA user_version = 72");
             }
             connection.commit();
         } catch (SQLException failure) {

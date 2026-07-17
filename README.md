@@ -203,7 +203,7 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 
 `nation strength status` 显示同一快照中的 Effective Citizen basis points、有效人数、人口当量、当前/EFFECTIVE/SUSPENDED/未评估 Claim 数、Effective Territory basis points、30 天 Mint Compliance basis points 与 observation 分类、30 天可审计活动 basis points、接受/排除计数、总国力和新铸币暂停状态。领土只统计当前仍由精确 FTB Team 占领且最新财政结论为 EFFECTIVE 的区块。Mint Compliance 每个 Batch 最多形成一个 observation：无事故完成为 `CLEAN_COMMIT`（100%），事故解决且 Batch 最终完成为 `RECOVERED_COMMIT`（50%），仍有事故为 `OPEN_INCIDENT`（0 且暂停），事故虽解决但 Batch 尚未 `COMMITTED` 为 `QUARANTINED_RECOVERY`（0 且暂停）；无样本时合规保持 ACTIVE、0 分。生产/基础设施仍明确为 `PAUSED_ANOMALY`，直至 Registered Facility/Create 证据成为权威来源。
 
-`nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、审批策略、公共政策和恢复管理。
+`nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、设施核算、发行、财政角色、审批策略、公共政策和恢复管理。设施范围、核算接口和基线管理使用独立的 `MANAGE_FACILITY_ACCOUNTING`，不同时授予领土、国库支出或铸币权限。
 
 `nation budget create` 创建一条不移动 LC、也不创建 Reservation 或 Escrow 的 National Treasury Budget draft。服务端从真实命令玩家、当前 FTB Team、正式 Citizenship/Nation 和稳定 NationId 推导精确来源国库，并在注册内部 Budget 服务前要求该 Citizen 具有本国 `DRAFT_BUDGET`。命令只接受稳定请求 ID、正金额、预算代码、未来到期时间和用途；调用者不能提交 Nation、Team 或来源账户。同一请求重放返回原 draft，改变任一字段会冲突。
 

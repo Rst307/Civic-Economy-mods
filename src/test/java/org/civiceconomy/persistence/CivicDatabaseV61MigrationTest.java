@@ -64,7 +64,7 @@ class CivicDatabaseV61MigrationTest {
                             migrated, Clock.fixed(EFFECTIVE_AT, ZoneOffset.UTC))
                     .current(NATION, EFFECTIVE_AT);
 
-            assertEquals(71, migrated.schemaVersion());
+            assertEquals(72, migrated.schemaVersion());
             assertEquals(Duration.ofDays(7L), policy.approvalLifetime());
         }
     }
