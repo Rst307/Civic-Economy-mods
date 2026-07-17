@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -68,9 +69,14 @@ import org.civiceconomy.integration.lightmanscurrency.FiscalAccountKind;
 import org.civiceconomy.integration.lightmanscurrency.LightmansCurrencyPayments;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.RecordOnlineTime;
+import org.civiceconomy.nation.ActivateNationApplication;
+import org.civiceconomy.nation.ActivatedNation;
+import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CreateNationApplication;
+import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationApplicationId;
 import org.civiceconomy.nation.NationApplicationRegistry;
+import org.civiceconomy.nation.NationFoundingPolicy;
 import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
 import org.civiceconomy.nation.CitizenshipRegistry;
@@ -648,6 +654,201 @@ public final class CivicServerRuntimeGameTests {
             helper.assertTrue(
                     false,
                     "Treasury Withdrawal restart preparation expected controlled process halt");
+        });
+    }
+
+    static void prepareNationActivationProcessRestart(GameTestHelper helper) {
+        UUID playerId = UUID.randomUUID();
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(playerId, "civic-nation-restart"),
+                ClientInformation.createDefault());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        ChunkPos capitalChunk = new ChunkPos(player.blockPosition());
+        Capital capital = new Capital(
+                player.level().dimension().location().toString(),
+                capitalChunk.x,
+                capitalChunk.z);
+        String requestId = NationActivationProcessRestartDrill.REQUEST_PREFIX
+                + UUID.randomUUID();
+        Instant now = Instant.now();
+        Instant appliedAt = now.minus(Duration.ofHours(2L));
+        Clock applicationClock = Clock.fixed(appliedAt, ZoneOffset.UTC);
+        Clock activationClock = Clock.fixed(now, ZoneOffset.UTC);
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<NationApplicationId> applicationId = new AtomicReference<>();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean activationStarted = new AtomicBoolean();
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+
+        runtime.submitDatabase(database -> {
+                    NationApplicationRegistry applications = new NationApplicationRegistry(
+                            database, snapshot(teamSnapshot), applicationClock);
+                    var application = applications.create(new CreateNationApplication(
+                            new ServiceIdentity(
+                                    NationActivationProcessRestartDrill.SERVICE_IDENTITY),
+                            "nation-activation-restart-application-" + UUID.randomUUID(),
+                            team.getId(),
+                            playerId,
+                            now.plus(Duration.ofDays(1L))));
+                    new OnlineTimeLedger(database).record(new RecordOnlineTime(
+                            new ServiceIdentity("civiceconomy-gametest"),
+                            "nation-activation-restart-evidence-" + UUID.randomUUID(),
+                            playerId,
+                            appliedAt.toEpochMilli(),
+                            now.toEpochMilli()));
+                    return application.applicationId();
+                })
+                .whenComplete((createdApplicationId, failure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                                return;
+                            }
+                            applicationId.set(createdApplicationId);
+                            NationActivationProcessRestartDrill.expect(
+                                    createdApplicationId.value(),
+                                    requestId,
+                                    team.getId(),
+                                    playerId,
+                                    capital);
+                            setupReady.set(true);
+                        }));
+
+        helper.succeedWhen(() -> {
+            assertNoAsyncFailure(
+                    helper, asyncFailure, "Nation Activation restart preparation");
+            helper.assertTrue(setupReady.get(), "Nation Activation restart setup ready");
+            if (activationStarted.compareAndSet(false, true)) {
+                runtime.submitDatabase(database -> new NationActivationCoordinator(
+                                database,
+                                NationActivationProcessRestartDrill.provisioner(
+                                        helper.getLevel().getServer()),
+                                NationFoundingPolicy.debugWorld(
+                                        2,
+                                        Duration.ofDays(60L),
+                                        Duration.ofDays(7L)),
+                                activationClock)
+                        .activate(new ActivateNationApplication(
+                                new ServiceIdentity(
+                                        NationActivationProcessRestartDrill.SERVICE_IDENTITY),
+                                requestId,
+                                applicationId.get(),
+                                capital,
+                                NationActivationProcessRestartDrill.REASON)))
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                asyncFailure.set(new AssertionError(
+                                        "Nation Activation restart preparation completed without halt"));
+                            }
+                        });
+            }
+            helper.assertTrue(
+                    false,
+                    "Nation Activation restart preparation expected controlled process halt");
+        });
+    }
+
+    static void verifyNationActivationProcessRestart(GameTestHelper helper) {
+        NationActivationProcessRestartDrill.Marker marker =
+                NationActivationProcessRestartDrill.readMarker(
+                        helper.getLevel().getServer());
+        Path databaseFile = helper.getLevel()
+                .getServer()
+                .getWorldPath(LevelResource.ROOT)
+                .resolve("civiceconomy")
+                .resolve("civic.sqlite3");
+        NationActivationRow prepared = nationActivationByRequest(
+                databaseFile,
+                NationActivationProcessRestartDrill.SERVICE_IDENTITY,
+                marker.requestId());
+        helper.assertTrue(prepared != null, "restarted Nation Activation row exists");
+        helper.assertValueEqual(marker.applicationId(), prepared.applicationId(),
+                "restarted Nation Application identity");
+        helper.assertValueEqual(marker.nationId(), prepared.nationId(),
+                "restarted Nation identity");
+        helper.assertValueEqual(marker.ftbTeamId(), prepared.ftbTeamId(),
+                "restarted FTB Team binding");
+        helper.assertValueEqual(marker.treasuryAccount(), prepared.treasuryAccount(),
+                "restarted National Treasury identity");
+        helper.assertValueEqual("PREPARED", prepared.activationState(),
+                "restart-window Nation Activation state");
+        helper.assertValueEqual("PENDING", prepared.applicationState(),
+                "restart-window Nation Application state");
+        helper.assertValueEqual(0, prepared.nationCount(),
+                "restart-window permanent Nation count");
+        helper.assertValueEqual(
+                0L,
+                LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                        .balance(new AccountId(marker.treasuryAccount()))
+                        .minorUnits(),
+                "restart-window real National Treasury exists at zero balance");
+
+        AtomicReference<ActivatedNation> activated = new AtomicReference<>();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicBoolean recoveryStarted = new AtomicBoolean();
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        Clock recoveryClock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
+
+        helper.succeedWhen(() -> {
+            assertNoAsyncFailure(helper, asyncFailure, "Nation Activation restart recovery");
+            if (recoveryStarted.compareAndSet(false, true)) {
+                runtime.submitDatabase(database -> new NationActivationCoordinator(
+                                database,
+                                NationActivationProcessRestartDrill.provisioner(
+                                        helper.getLevel().getServer()),
+                                NationFoundingPolicy.debugWorld(
+                                        2,
+                                        Duration.ofDays(60L),
+                                        Duration.ofDays(7L)),
+                                recoveryClock)
+                        .activate(new ActivateNationApplication(
+                                new ServiceIdentity(
+                                        NationActivationProcessRestartDrill.SERVICE_IDENTITY),
+                                marker.requestId(),
+                                new NationApplicationId(marker.applicationId()),
+                                marker.capital(),
+                                NationActivationProcessRestartDrill.REASON)))
+                        .whenComplete((result, failure) -> {
+                            if (failure != null) {
+                                asyncFailure.set(failure);
+                            } else {
+                                activated.set(result);
+                            }
+                        });
+            }
+            helper.assertTrue(activated.get() != null,
+                    "waiting for Nation Activation restart recovery");
+            NationActivationRow committed = nationActivationByRequest(
+                    databaseFile,
+                    NationActivationProcessRestartDrill.SERVICE_IDENTITY,
+                    marker.requestId());
+            helper.assertValueEqual("COMMITTED", committed.activationState(),
+                    "recovered Nation Activation state");
+            helper.assertValueEqual("ACTIVATED", committed.applicationState(),
+                    "recovered Nation Application state");
+            helper.assertValueEqual(1, committed.nationCount(),
+                    "one permanent Nation after recovery");
+            helper.assertValueEqual(1, committed.citizenshipCount(),
+                    "one founder Citizenship after recovery");
+            helper.assertValueEqual(1, committed.capitalCount(),
+                    "one Capital after recovery");
+            helper.assertValueEqual(marker.nationId(), activated.get().nation().nationId().value(),
+                    "recovered Nation identity retained");
+            helper.assertValueEqual(marker.treasuryAccount(),
+                    activated.get().treasuryAccountId().value(),
+                    "recovered Treasury identity retained");
+            helper.assertValueEqual(
+                    0L,
+                    LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
+                            .balance(new AccountId(marker.treasuryAccount()))
+                            .minorUnits(),
+                    "recovered National Treasury is not duplicated or changed");
         });
     }
 
@@ -5548,6 +5749,64 @@ public final class CivicServerRuntimeGameTests {
         return count;
     }
 
+    private static NationActivationRow nationActivationByRequest(
+            Path databaseFile,
+            String serviceIdentity,
+            String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT activation.application_id,
+                               activation.nation_id,
+                               activation.ftb_team_id,
+                               activation.treasury_account_id,
+                               activation.capital_dimension_id,
+                               activation.capital_chunk_x,
+                               activation.capital_chunk_z,
+                               activation.state,
+                               application.state,
+                               (SELECT COUNT(*)
+                                  FROM nation_registry nation
+                                 WHERE nation.nation_id = activation.nation_id),
+                               (SELECT COUNT(*)
+                                  FROM citizenship_period citizenship
+                                 WHERE citizenship.nation_id = activation.nation_id
+                                   AND citizenship.ended_at_epoch_millis IS NULL),
+                               (SELECT COUNT(*)
+                                  FROM nation_capital capital
+                                 WHERE capital.nation_id = activation.nation_id)
+                        FROM nation_application_activation activation
+                        JOIN nation_application application
+                          ON application.application_id = activation.application_id
+                        WHERE activation.service_identity = ?
+                          AND activation.request_id = ?
+                        """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (var result = query.executeQuery()) {
+                return result.next()
+                        ? new NationActivationRow(
+                                UUID.fromString(result.getString(1)),
+                                UUID.fromString(result.getString(2)),
+                                UUID.fromString(result.getString(3)),
+                                result.getString(4),
+                                new Capital(
+                                        result.getString(5),
+                                        result.getInt(6),
+                                        result.getInt(7)),
+                                result.getString(8),
+                                result.getString(9),
+                                result.getInt(10),
+                                result.getInt(11),
+                                result.getInt(12))
+                        : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Nation Activation restart state", failure);
+        }
+    }
+
     private static TreasuryWithdrawalRow treasuryWithdrawalByRequest(
             Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection(
@@ -7103,6 +7362,18 @@ public final class CivicServerRuntimeGameTests {
     }
 
     private record PendingApplicationRow(UUID applicationId, long createdAtEpochMillis) {}
+
+    private record NationActivationRow(
+            UUID applicationId,
+            UUID nationId,
+            UUID ftbTeamId,
+            String treasuryAccount,
+            Capital capital,
+            String activationState,
+            String applicationState,
+            int nationCount,
+            int citizenshipCount,
+            int capitalCount) {}
 
     private record TerritoryPermitRow(UUID permitId, TerritoryClaimPermitState state) {}
 

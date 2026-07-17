@@ -108,7 +108,14 @@ National Treasury Withdrawal 匹配世界进程重启演练同样为两个崩溃
 .\gradlew.bat runGameTestServer -PtreasuryWithdrawalRestartDrill=verify --no-daemon --console=plain
 ```
 
-这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。Budget Disbursement 与 Treasury Withdrawal 演练各使用独立 GameTest namespace，因此 matched-world `verify` 只重跑对应恢复测试，不会让其他测试用旧世界数据重新初始化。
+Nation Activation 匹配世界进程重启演练在真实 LC National Treasury 已创建并刷盘、Civic SQLite 仍为 `PREPARED` 时以退出码 `92` 终止；`verify` 必须紧接着复用同一个世界：
+
+```powershell
+.\gradlew.bat runGameTestServer -PnationActivationRestartDrill=prepare-treasury --no-daemon --console=plain
+.\gradlew.bat runGameTestServer -PnationActivationRestartDrill=verify --no-daemon --console=plain
+```
+
+这些故障开关同时要求显式 Gradle 属性和真实 `GameTestServer` 类，普通客户端或专用服务器不会触发。每个演练使用独立 GameTest namespace，因此 matched-world `verify` 只重跑对应恢复测试，不会让其他测试用旧世界数据重新初始化。
 
 `runServer` 默认验证不安装 Create 的财政核心；传入 `-PincludeCreate=true` 才加载可选 Create 适配环境。真实验证结果与证据类型持续记录在 `docs/IMPLEMENTATION_STATUS.md`。
 

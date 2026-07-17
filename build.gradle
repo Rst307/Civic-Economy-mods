@@ -51,8 +51,11 @@ neoForge {
                     providers.gradleProperty('budgetDisbursementRestartDrill').orNull
             def treasuryWithdrawalRestartDrill =
                     providers.gradleProperty('treasuryWithdrawalRestartDrill').orNull
-            if (budgetDisbursementRestartDrill != null
-                    && treasuryWithdrawalRestartDrill != null) {
+            def nationActivationRestartDrill =
+                    providers.gradleProperty('nationActivationRestartDrill').orNull
+            if ([budgetDisbursementRestartDrill,
+                    treasuryWithdrawalRestartDrill,
+                    nationActivationRestartDrill].count { it != null } > 1) {
                 throw new GradleException('Only one process restart drill may run at a time')
             }
             systemProperty 'neoforge.enabledGameTestNamespaces',
@@ -60,6 +63,8 @@ neoForge {
                             ? "${project.mod_id}_budget_disbursement_restart"
                             : treasuryWithdrawalRestartDrill != null
                                     ? "${project.mod_id}_treasury_withdrawal_restart"
+                                    : nationActivationRestartDrill != null
+                                            ? "${project.mod_id}_nation_activation_restart"
                                     : project.mod_id
             providers.gradleProperty('mintRestartDrill').orNull?.with { mode ->
                 systemProperty 'civiceconomy.mintRestartDrill', mode
@@ -69,6 +74,9 @@ neoForge {
             }
             treasuryWithdrawalRestartDrill?.with { mode ->
                 systemProperty 'civiceconomy.treasuryWithdrawalRestartDrill', mode
+            }
+            nationActivationRestartDrill?.with { mode ->
+                systemProperty 'civiceconomy.nationActivationRestartDrill', mode
             }
         }
 
@@ -162,12 +170,18 @@ var generateGameTestStructures = tasks.register('generateGameTestStructures') {
             'generated/gametestResources/data/civiceconomy_budget_disbursement_restart/structure/empty.nbt')
     def withdrawalRestartEmpty = layout.buildDirectory.file(
             'generated/gametestResources/data/civiceconomy_treasury_withdrawal_restart/structure/empty.nbt')
-    outputs.files standardEmpty, budgetRestartEmpty, withdrawalRestartEmpty
+    def nationActivationRestartEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_nation_activation_restart/structure/empty.nbt')
+    outputs.files standardEmpty,
+            budgetRestartEmpty,
+            withdrawalRestartEmpty,
+            nationActivationRestartEmpty
     doLast {
         def decoded = Base64.decoder.decode(inputs.files.singleFile.text.trim())
         [standardEmpty.get().asFile,
                 budgetRestartEmpty.get().asFile,
-                withdrawalRestartEmpty.get().asFile].each { outputFile ->
+                withdrawalRestartEmpty.get().asFile,
+                nationActivationRestartEmpty.get().asFile].each { outputFile ->
             outputFile.parentFile.mkdirs()
             outputFile.bytes = decoded
         }
