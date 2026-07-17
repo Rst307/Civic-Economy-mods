@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 72;
+    private static final int SCHEMA_VERSION = 73;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2013,6 +2013,119 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredRegisteredFacility> registeredFacilities() {
+        List<StoredRegisteredFacility> facilities = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_facility ORDER BY facility_id
+                """)) {
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    facilities.add(readRegisteredFacility(result));
+                }
+            }
+            return List.copyOf(facilities);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to list Registered Facilities", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredFacility transitionRegisteredFacilityState(
+            UUID transitionId,
+            UUID facilityId,
+            String serviceIdentity,
+            String expectedState,
+            String nextState,
+            String reason,
+            long transitionedAtEpochMillis) {
+        if (transitionId == null || facilityId == null
+                || serviceIdentity == null || serviceIdentity.isBlank()
+                || expectedState == null || nextState == null
+                || reason == null || reason.isBlank() || transitionedAtEpochMillis < 0L
+                || !("ACTIVE".equals(expectedState)
+                        && "PAUSED_TERRITORY".equals(nextState))
+                        && !("PAUSED_TERRITORY".equals(expectedState)
+                                && "ACTIVE".equals(nextState))) {
+            throw new IllegalArgumentException(
+                    "Registered Facility state transition values are invalid");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE registered_facility SET state = ?
+                    WHERE facility_id = ? AND service_identity = ? AND state = ?
+                    """)) {
+                update.setString(1, nextState);
+                update.setString(2, facilityId.toString());
+                update.setString(3, serviceIdentity);
+                update.setString(4, expectedState);
+                if (update.executeUpdate() == 0) {
+                    connection.rollback();
+                    return null;
+                }
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO registered_facility_state_transition (
+                        transition_id, facility_id, service_identity,
+                        from_state, to_state, reason, transitioned_at_epoch_millis
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, transitionId.toString());
+                insert.setString(2, facilityId.toString());
+                insert.setString(3, serviceIdentity);
+                insert.setString(4, expectedState);
+                insert.setString(5, nextState);
+                insert.setString(6, reason);
+                insert.setLong(7, transitionedAtEpochMillis);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return registeredFacility(facilityId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to transition Registered Facility " + facilityId, failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Facility state transition mode", failure);
+            }
+        }
+    }
+
+    public synchronized List<StoredRegisteredFacilityStateTransition>
+            registeredFacilityStateTransitions(UUID facilityId) {
+        List<StoredRegisteredFacilityStateTransition> transitions = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_facility_state_transition
+                WHERE facility_id = ?
+                ORDER BY transitioned_at_epoch_millis, rowid
+                """)) {
+            query.setString(1, facilityId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    transitions.add(new StoredRegisteredFacilityStateTransition(
+                            UUID.fromString(result.getString("transition_id")),
+                            UUID.fromString(result.getString("facility_id")),
+                            result.getString("service_identity"),
+                            result.getString("from_state"),
+                            result.getString("to_state"),
+                            result.getString("reason"),
+                            result.getLong("transitioned_at_epoch_millis")));
+                }
+            }
+            return List.copyOf(transitions);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Registered Facility state transitions", failure);
+        }
+    }
+
     public synchronized StoredRegisteredFacility registeredFacilityAt(
             String dimensionId, int blockX, int blockZ) {
         if (dimensionId == null || dimensionId.isBlank()) {
@@ -2063,21 +2176,26 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            return new StoredRegisteredFacility(
-                    UUID.fromString(result.getString("facility_id")),
-                    result.getString("service_identity"),
-                    result.getString("request_id"),
-                    UUID.fromString(result.getString("nation_id")),
-                    UUID.fromString(result.getString("ftb_team_id")),
-                    result.getString("dimension_id"),
-                    result.getInt("core_block_x"),
-                    result.getInt("core_block_y"),
-                    result.getInt("core_block_z"),
-                    UUID.fromString(result.getString("actor_player_id")),
-                    result.getString("state"),
-                    result.getString("reason"),
-                    result.getLong("registered_at_epoch_millis"));
+            return readRegisteredFacility(result);
         }
+    }
+
+    private static StoredRegisteredFacility readRegisteredFacility(ResultSet result)
+            throws SQLException {
+        return new StoredRegisteredFacility(
+                UUID.fromString(result.getString("facility_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("nation_id")),
+                UUID.fromString(result.getString("ftb_team_id")),
+                result.getString("dimension_id"),
+                result.getInt("core_block_x"),
+                result.getInt("core_block_y"),
+                result.getInt("core_block_z"),
+                UUID.fromString(result.getString("actor_player_id")),
+                result.getString("state"),
+                result.getString("reason"),
+                result.getLong("registered_at_epoch_millis"));
     }
 
     public synchronized StoredFacilityAccountingInterface registerFacilityAccountingInterface(
@@ -14831,6 +14949,34 @@ public final class CivicDatabase implements AutoCloseable {
                 statement.execute("DROP TABLE nation_fiscal_permission_revocation_v71");
                 statement.execute("DROP TABLE nation_fiscal_permission_grant_v71");
                 statement.execute("PRAGMA user_version = 72");
+            }
+            if (version < 73) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS registered_facility_state_transition (
+                            transition_id TEXT PRIMARY KEY,
+                            facility_id TEXT NOT NULL
+                                REFERENCES registered_facility(facility_id),
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            from_state TEXT NOT NULL CHECK (from_state IN (
+                                'ACTIVE', 'PAUSED_TERRITORY'
+                            )),
+                            to_state TEXT NOT NULL CHECK (to_state IN (
+                                'ACTIVE', 'PAUSED_TERRITORY'
+                            )),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            transitioned_at_epoch_millis INTEGER NOT NULL
+                                CHECK (transitioned_at_epoch_millis >= 0),
+                            CHECK (from_state != to_state)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS registered_facility_transition_history
+                        ON registered_facility_state_transition (
+                            facility_id, transitioned_at_epoch_millis, transition_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 73");
             }
             connection.commit();
         } catch (SQLException failure) {

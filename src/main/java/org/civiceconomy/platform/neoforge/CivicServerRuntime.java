@@ -136,6 +136,7 @@ import org.civiceconomy.production.FacilityProductionObservation;
 import org.civiceconomy.production.FacilityProductionObservationRegistry;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
+import org.civiceconomy.production.RegisteredFacilityTerritoryReconciler;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
 import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
 import org.civiceconomy.territory.ConsumeTerritoryClaimPermit;
@@ -221,6 +222,7 @@ public final class CivicServerRuntime {
     private static final int TREASURY_WITHDRAWAL_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int MINT_BATCH_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
+    private static final int REGISTERED_FACILITY_TERRITORY_INTERVAL_TICKS = 20 * 60;
     private static final int NATIONAL_STRENGTH_RECALCULATION_INTERVAL_TICKS = 20 * 60;
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
     private static final int DATABASE_BACKUP_RETENTION = 8;
@@ -366,6 +368,7 @@ public final class CivicServerRuntime {
         scheduleTreasuryWithdrawalRecovery(state);
         scheduleMintBatchRecovery(state);
         scheduleTerritoryMaintenanceAssessment(state);
+        scheduleRegisteredFacilityTerritoryReconciliation(state);
         scheduleNationalStrengthRecalculation(state);
         scheduleTerritoryForceLoadEnforcementRecovery(state);
         LOGGER.info("Civic server runtime opened world-bound SQLite and enabled buffered online-time observation");
@@ -461,6 +464,12 @@ public final class CivicServerRuntime {
             scheduleTerritoryMaintenanceAssessment(current);
             scheduleTerritoryForceLoadEnforcementRecovery(current);
             scheduleTerritoryForceLoadRestrictionRefresh(current);
+        }
+        current.ticksSinceRegisteredFacilityTerritory++;
+        if (current.ticksSinceRegisteredFacilityTerritory
+                >= REGISTERED_FACILITY_TERRITORY_INTERVAL_TICKS) {
+            current.ticksSinceRegisteredFacilityTerritory = 0;
+            scheduleRegisteredFacilityTerritoryReconciliation(current);
         }
         current.ticksSinceDatabaseBackup++;
         if (current.ticksSinceDatabaseBackup >= DATABASE_BACKUP_INTERVAL_TICKS) {
@@ -4040,6 +4049,102 @@ public final class CivicServerRuntime {
                 });
     }
 
+    void scheduleRegisteredFacilityTerritoryReconciliation() {
+        RuntimeState current = state;
+        if (current != null) {
+            scheduleRegisteredFacilityTerritoryReconciliation(current);
+        }
+    }
+
+    CompletableFuture<List<RegisteredFacility>>
+            reconcileRegisteredFacilityTerritoryForGameTest() {
+        RuntimeState current = requireState();
+        return reconcileRegisteredFacilityTerritory(
+                current, Clock.fixed(clock.instant(), ZoneOffset.UTC));
+    }
+
+    private void scheduleRegisteredFacilityTerritoryReconciliation(
+            RuntimeState current) {
+        if (state != current
+                || !current.registeredFacilityTerritoryReconciliationQueued
+                        .compareAndSet(false, true)) {
+            return;
+        }
+        Clock reconciliationClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        reconcileRegisteredFacilityTerritory(current, reconciliationClock)
+                .whenComplete((changed, failure) -> {
+                    current.registeredFacilityTerritoryReconciliationQueued.set(false);
+                    if (failure != null) {
+                        LOGGER.error(
+                                "Automatic Registered Facility Territory reconciliation failed closed",
+                                failure);
+                    } else if (!changed.isEmpty()) {
+                        LOGGER.info(
+                                "Reconciled Territory state for {} Registered Facility(s)",
+                                changed.size());
+                        scheduleNationalStrengthRecalculation(current);
+                    }
+                });
+    }
+
+    private CompletableFuture<List<RegisteredFacility>>
+            reconcileRegisteredFacilityTerritory(
+                    RuntimeState current, Clock reconciliationClock) {
+        return current.writer
+                .submitDatabase(database -> database.registeredFacilities().stream()
+                        .filter(facility -> "ACTIVE".equals(facility.state())
+                                || "PAUSED_TERRITORY".equals(facility.state()))
+                        .map(org.civiceconomy.persistence.StoredRegisteredFacility::ftbTeamId)
+                        .distinct()
+                        .toList())
+                .thenCompose(teamIds -> onServer(
+                        current, () -> snapshotRegisteredFacilityClaims(teamIds)))
+                .thenCompose(claims -> current.writer.submitDatabase(database -> {
+                    TerritoryOwnershipSource ownership =
+                            (dimensionId, chunkX, chunkZ) -> Optional.ofNullable(claims.get(
+                                    new TerritoryClaimPosition(
+                                            dimensionId, chunkX, chunkZ)));
+                    EffectiveTerritoryFacilityAuthority territory =
+                            new EffectiveTerritoryFacilityAuthority(
+                                    database,
+                                    new EffectiveTerritoryQuery(
+                                            new TerritoryMaintenanceRegistry(
+                                                    database, reconciliationClock),
+                                            ownership),
+                                    reconciliationClock);
+                    return new RegisteredFacilityTerritoryReconciler(
+                                    database,
+                                    territory,
+                                    FacilityAdministration.SERVICE_IDENTITY,
+                                    reconciliationClock)
+                            .reconcile();
+                }));
+    }
+
+    private static Map<TerritoryClaimPosition, UUID> snapshotRegisteredFacilityClaims(
+            List<UUID> teamIds) {
+        FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+        FtbChunksAdapter chunks = FtbChunksAdapter.live();
+        Map<TerritoryClaimPosition, UUID> ownership = new HashMap<>();
+        for (UUID teamId : teamIds) {
+            if (teams.find(teamId).isEmpty()) {
+                continue;
+            }
+            for (var claim : chunks.claimsForTeam(teamId)) {
+                TerritoryClaimPosition position = new TerritoryClaimPosition(
+                        claim.dimension().location().toString(),
+                        claim.chunkPos().x,
+                        claim.chunkPos().z);
+                UUID existing = ownership.put(position, teamId);
+                if (existing != null && !existing.equals(teamId)) {
+                    throw new IllegalStateException(
+                            "FTB Claim snapshot contains conflicting Team ownership");
+                }
+            }
+        }
+        return Map.copyOf(ownership);
+    }
+
     private static NationalStrengthSnapshotConfiguration nationalStrengthConfiguration() {
         return new NationalStrengthSnapshotConfiguration(
                 CITIZENSHIP_TRANSFER_COOLDOWN,
@@ -4251,6 +4356,8 @@ public final class CivicServerRuntime {
         private final AtomicBoolean mintBatchRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceAssessmentQueued = new AtomicBoolean();
         private final AtomicBoolean territoryMaintenanceSettlementQueued = new AtomicBoolean();
+        private final AtomicBoolean registeredFacilityTerritoryReconciliationQueued =
+                new AtomicBoolean();
         private final AtomicBoolean territoryForceLoadEnforcementQueued = new AtomicBoolean();
         private final AtomicBoolean territoryForceLoadRestrictionRefreshQueued =
                 new AtomicBoolean();
@@ -4266,6 +4373,7 @@ public final class CivicServerRuntime {
         private int ticksSinceTreasuryWithdrawalRecovery;
         private int ticksSinceMintBatchRecovery;
         private int ticksSinceTerritoryMaintenanceAssessment;
+        private int ticksSinceRegisteredFacilityTerritory;
         private int ticksSinceNationalStrengthRecalculation;
         private int ticksSinceDatabaseBackup;
         private boolean failureLogged;

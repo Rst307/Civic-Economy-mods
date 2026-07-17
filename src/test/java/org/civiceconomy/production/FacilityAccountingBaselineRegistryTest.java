@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.NationId;
@@ -221,6 +222,119 @@ class FacilityAccountingBaselineRegistryTest {
                                     4)
                             .facility(FACILITY)
                             .state());
+        }
+    }
+
+    @Test
+    void territoryLossPausesAnActiveFacilityOnceAndPreservesItsBaseline() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("facility-territory-pause.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            AtomicBoolean effective = new AtomicBoolean(true);
+            FacilityAccountingBaselineRegistry baselineRegistry =
+                    new FacilityAccountingBaselineRegistry(
+                            database,
+                            (nation, team, claim) -> effective.get(),
+                            (facility, accountingInterface) -> snapshot(12),
+                            CLOCK);
+            baselineRegistry.capture(new CaptureFacilityAccountingBaseline(
+                    SERVICE,
+                    "capture-before-territory-pause",
+                    BASELINE,
+                    FACILITY,
+                    ACTOR,
+                    "Capture before territory reconciliation"));
+            baselineRegistry.activate(new ActivateFacilityAccountingBaseline(
+                    SERVICE,
+                    "activate-before-territory-pause",
+                    FACILITY,
+                    ACTOR,
+                    "Activate before territory reconciliation"));
+            effective.set(false);
+            RegisteredFacilityTerritoryReconciler reconciler =
+                    new RegisteredFacilityTerritoryReconciler(
+                            database,
+                            (nation, team, claim) -> effective.get(),
+                            SERVICE,
+                            Clock.offset(CLOCK, Duration.ofMinutes(2)));
+
+            List<RegisteredFacility> changed = reconciler.reconcile();
+
+            assertEquals(1, changed.size());
+            assertEquals(RegisteredFacilityState.PAUSED_TERRITORY,
+                    changed.getFirst().state());
+            assertEquals(FacilityAccountingBaselineState.ACTIVE,
+                    baselineRegistry.baseline(FACILITY).state());
+            assertEquals(1,
+                    database.registeredFacilityStateTransitions(FACILITY).size());
+            assertEquals("ACTIVE",
+                    database.registeredFacilityStateTransitions(FACILITY)
+                            .getFirst()
+                            .fromState());
+            assertEquals("PAUSED_TERRITORY",
+                    database.registeredFacilityStateTransitions(FACILITY)
+                            .getFirst()
+                            .toState());
+            assertEquals(List.of(), reconciler.reconcile());
+            assertEquals(1,
+                    database.registeredFacilityStateTransitions(FACILITY).size());
+        }
+    }
+
+    @Test
+    void restoredTerritoryReactivatesAPausedFacilityOnceWhenItsBaselineRemainsActive() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("facility-territory-restoration.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            AtomicBoolean effective = new AtomicBoolean(true);
+            FacilityAccountingBaselineRegistry baselineRegistry =
+                    new FacilityAccountingBaselineRegistry(
+                            database,
+                            (nation, team, claim) -> effective.get(),
+                            (facility, accountingInterface) -> snapshot(12),
+                            CLOCK);
+            baselineRegistry.capture(new CaptureFacilityAccountingBaseline(
+                    SERVICE,
+                    "capture-before-territory-restoration",
+                    BASELINE,
+                    FACILITY,
+                    ACTOR,
+                    "Capture before territory restoration"));
+            baselineRegistry.activate(new ActivateFacilityAccountingBaseline(
+                    SERVICE,
+                    "activate-before-territory-restoration",
+                    FACILITY,
+                    ACTOR,
+                    "Activate before territory restoration"));
+            RegisteredFacilityTerritoryReconciler reconciler =
+                    new RegisteredFacilityTerritoryReconciler(
+                            database,
+                            (nation, team, claim) -> effective.get(),
+                            SERVICE,
+                            Clock.offset(CLOCK, Duration.ofMinutes(2)));
+            effective.set(false);
+            reconciler.reconcile();
+            effective.set(true);
+
+            List<RegisteredFacility> changed = reconciler.reconcile();
+
+            assertEquals(1, changed.size());
+            assertEquals(RegisteredFacilityState.ACTIVE, changed.getFirst().state());
+            assertEquals(FacilityAccountingBaselineState.ACTIVE,
+                    baselineRegistry.baseline(FACILITY).state());
+            assertEquals(2,
+                    database.registeredFacilityStateTransitions(FACILITY).size());
+            assertEquals("PAUSED_TERRITORY",
+                    database.registeredFacilityStateTransitions(FACILITY)
+                            .get(1)
+                            .fromState());
+            assertEquals("ACTIVE",
+                    database.registeredFacilityStateTransitions(FACILITY)
+                            .get(1)
+                            .toState());
+            assertEquals(List.of(), reconciler.reconcile());
+            assertEquals(2,
+                    database.registeredFacilityStateTransitions(FACILITY).size());
         }
     }
 

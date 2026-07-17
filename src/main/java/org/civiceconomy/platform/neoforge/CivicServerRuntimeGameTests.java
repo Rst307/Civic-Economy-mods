@@ -116,9 +116,11 @@ import org.civiceconomy.persistence.StoredFacilityAccountingReceipt;
 import org.civiceconomy.persistence.StoredFacilityProductionDecision;
 import org.civiceconomy.persistence.StoredProductionInventoryChange;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
+import org.civiceconomy.persistence.StoredRegisteredFacilityStateTransition;
 import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.production.FacilityAccountingBaseline;
 import org.civiceconomy.production.FacilityAccountingStatus;
+import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.mint.MintBatch;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
@@ -1675,6 +1677,18 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<List<StoredProductionInventoryChange>> persistedReceiptChanges =
                 new AtomicReference<>(List.of());
         AtomicReference<UUID> productionObservationId = new AtomicReference<>();
+        AtomicBoolean territoryPauseFinished = new AtomicBoolean();
+        AtomicReference<Throwable> territoryPauseFailure = new AtomicReference<>();
+        AtomicReference<List<RegisteredFacility>> territoryPaused =
+                new AtomicReference<>(List.of());
+        AtomicReference<List<StoredRegisteredFacilityStateTransition>> pauseTransitions =
+                new AtomicReference<>(List.of());
+        AtomicBoolean territoryRestorationFinished = new AtomicBoolean();
+        AtomicReference<Throwable> territoryRestorationFailure = new AtomicReference<>();
+        AtomicReference<List<RegisteredFacility>> territoryRestored =
+                new AtomicReference<>(List.of());
+        AtomicReference<List<StoredRegisteredFacilityStateTransition>>
+                restorationTransitions = new AtomicReference<>(List.of());
         String baselineRequestId = requestId + "-baseline";
         String baselineReason = "Capture trusted Facility Accounting Baseline";
         String activationRequestId = requestId + "-activation";
@@ -2254,6 +2268,125 @@ public final class CivicServerRuntimeGameTests {
                                 inspectedStatus.get().baseline().state(),
                                 "Facility status active Baseline");
                     }
+                })
+                .thenExecute(() -> {
+                    ClaimedChunk claimed = manager.getChunk(position);
+                    if (claimed != null) {
+                        claimed.unclaim(player.createCommandSourceStack(), true);
+                    }
+                })
+                .thenExecute(() -> {
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        territoryPauseFinished.set(true);
+                        return;
+                    }
+                    runtime.reconcileRegisteredFacilityTerritoryForGameTest()
+                            .thenCompose(changed -> {
+                                territoryPaused.set(changed);
+                                return runtime.submitDatabase(database ->
+                                        database.registeredFacilityStateTransitions(
+                                                persisted.get().facilityId()));
+                            })
+                            .whenComplete((transitions, failure) -> {
+                                pauseTransitions.set(
+                                        transitions == null ? List.of() : transitions);
+                                territoryPauseFailure.set(failure);
+                                territoryPauseFinished.set(true);
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(
+                            territoryPauseFinished.get(),
+                            "Registered Facility Territory pause completed");
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        helper.assertValueEqual(
+                                List.of(),
+                                territoryPaused.get(),
+                                "Create-disabled Facility remains conservatively unscored");
+                        return;
+                    }
+                    Throwable failure = territoryPauseFailure.get();
+                    helper.assertTrue(
+                            failure == null,
+                            failure == null
+                                    ? "Registered Facility Territory pause state"
+                                    : "Registered Facility Territory pause failure: "
+                                            + rootCause(failure).getMessage());
+                    helper.assertValueEqual(
+                            1,
+                            territoryPaused.get().size(),
+                            "one Territory-paused Registered Facility");
+                    helper.assertValueEqual(
+                            org.civiceconomy.production.RegisteredFacilityState
+                                    .PAUSED_TERRITORY,
+                            territoryPaused.get().getFirst().state(),
+                            "real FTB Claim loss pauses Facility");
+                    helper.assertValueEqual(
+                            1,
+                            pauseTransitions.get().size(),
+                            "one persisted Territory pause audit");
+                })
+                .thenExecute(() -> {
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        territoryRestorationFinished.set(true);
+                        return;
+                    }
+                    helper.assertTrue(
+                            teamData.claim(
+                                            player.createCommandSourceStack()
+                                                    .withSuppressedOutput(),
+                                            position,
+                                            false)
+                                    .isSuccess(),
+                            "restore Registered Facility FTB Claim fixture");
+                    runtime.reconcileRegisteredFacilityTerritoryForGameTest()
+                            .thenCompose(changed -> {
+                                territoryRestored.set(changed);
+                                return runtime.submitDatabase(database ->
+                                        database.registeredFacilityStateTransitions(
+                                                persisted.get().facilityId()));
+                            })
+                            .whenComplete((transitions, failure) -> {
+                                restorationTransitions.set(
+                                        transitions == null ? List.of() : transitions);
+                                territoryRestorationFailure.set(failure);
+                                territoryRestorationFinished.set(true);
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(
+                            territoryRestorationFinished.get(),
+                            "Registered Facility Territory restoration completed");
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        helper.assertValueEqual(
+                                List.of(),
+                                territoryRestored.get(),
+                                "Create-disabled Facility has no false Territory restoration");
+                        return;
+                    }
+                    Throwable failure = territoryRestorationFailure.get();
+                    helper.assertTrue(
+                            failure == null,
+                            failure == null
+                                    ? "Registered Facility Territory restoration state"
+                                    : "Registered Facility Territory restoration failure: "
+                                            + rootCause(failure).getMessage());
+                    helper.assertValueEqual(
+                            1,
+                            territoryRestored.get().size(),
+                            "one Territory-restored Registered Facility");
+                    helper.assertValueEqual(
+                            org.civiceconomy.production.RegisteredFacilityState.ACTIVE,
+                            territoryRestored.get().getFirst().state(),
+                            "real FTB Claim restoration reactivates Facility");
+                    helper.assertValueEqual(
+                            2,
+                            restorationTransitions.get().size(),
+                            "persisted pause and restoration audits");
+                    helper.assertValueEqual(
+                            "ACTIVE",
+                            restorationTransitions.get().get(1).toState(),
+                            "restoration audit target state");
                 })
                 .thenExecute(() -> {
                     ClaimedChunk claimed = manager.getChunk(position);
@@ -7459,7 +7592,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(72, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(73, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
