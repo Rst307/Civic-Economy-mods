@@ -10361,27 +10361,61 @@ public final class CivicDatabase implements AutoCloseable {
             query.setString(1, serviceIdentity);
             query.setString(2, requestId);
             try (ResultSet result = query.executeQuery()) {
-                return result.next()
-                        ? new StoredAuditableEconomicActivityEvidence(
-                                UUID.fromString(result.getString("evidence_id")),
-                                result.getString("service_identity"),
-                                result.getString("request_id"),
-                                UUID.fromString(result.getString("payment_transaction_id")),
-                                UUID.fromString(result.getString("nation_id")),
-                                result.getString("subject"),
-                                result.getString("subject_reference"),
-                                result.getString("payer_controller"),
-                                result.getString("recipient_controller"),
-                                result.getLong("reference_value_minor_units"),
-                                result.getString("decision"),
-                                result.getLong("included_value_minor_units"),
-                                result.getString("evidence_reference"),
-                                result.getLong("recorded_at_epoch_millis"))
-                        : null;
+                return result.next() ? readAuditableEconomicActivityEvidence(result) : null;
             }
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Auditable Economic Activity Evidence", failure);
+        }
+    }
+
+    private static StoredAuditableEconomicActivityEvidence
+            readAuditableEconomicActivityEvidence(ResultSet result) throws SQLException {
+        return new StoredAuditableEconomicActivityEvidence(
+                UUID.fromString(result.getString("evidence_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("payment_transaction_id")),
+                UUID.fromString(result.getString("nation_id")),
+                result.getString("subject"),
+                result.getString("subject_reference"),
+                result.getString("payer_controller"),
+                result.getString("recipient_controller"),
+                result.getLong("reference_value_minor_units"),
+                result.getString("decision"),
+                result.getLong("included_value_minor_units"),
+                result.getString("evidence_reference"),
+                result.getLong("recorded_at_epoch_millis"));
+    }
+
+    public synchronized java.util.List<StoredAuditableEconomicActivityEvidence>
+            auditableEconomicActivityEvidence(
+                    UUID nationId, long windowStartEpochMillis, long windowEndEpochMillis) {
+        if (nationId == null || windowStartEpochMillis < 0L
+                || windowEndEpochMillis <= windowStartEpochMillis) {
+            throw new IllegalArgumentException("Auditable Economic Activity window is invalid");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM auditable_economic_activity_evidence
+                WHERE nation_id = ?
+                  AND recorded_at_epoch_millis >= ?
+                  AND recorded_at_epoch_millis < ?
+                ORDER BY recorded_at_epoch_millis, evidence_id
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setLong(2, windowStartEpochMillis);
+            query.setLong(3, windowEndEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                java.util.List<StoredAuditableEconomicActivityEvidence> evidence =
+                        new java.util.ArrayList<>();
+                while (result.next()) {
+                    evidence.add(readAuditableEconomicActivityEvidence(result));
+                }
+                return java.util.List.copyOf(evidence);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Auditable Economic Activity window", failure);
         }
     }
 
