@@ -47,6 +47,8 @@ neoForge {
 
         gameTestServer {
             type = 'gameTestServer'
+            gameDirectory = project.file(
+                    providers.gradleProperty('gameTestDirectory').getOrElse('run'))
             def budgetDisbursementRestartDrill =
                     providers.gradleProperty('budgetDisbursementRestartDrill').orNull
             def treasuryWithdrawalRestartDrill =

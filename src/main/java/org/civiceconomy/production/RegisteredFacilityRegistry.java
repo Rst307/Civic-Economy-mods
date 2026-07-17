@@ -83,6 +83,15 @@ public final class RegisteredFacilityRegistry {
         return stored == null ? null : toFacility(stored);
     }
 
+    public RegisteredFacility facilityAt(FacilityAccountingInterfacePosition position) {
+        if (position == null) {
+            return null;
+        }
+        StoredRegisteredFacility stored = database.registeredFacilityAt(
+                position.dimensionId(), position.blockX(), position.blockZ());
+        return stored == null ? null : toFacility(stored);
+    }
+
     private List<TerritoryClaimPosition> validateScope(RegisterFacility request) {
         Set<TerritoryClaimPosition> unique = new HashSet<>(request.scope());
         if (unique.isEmpty() || unique.size() != request.scope().size()

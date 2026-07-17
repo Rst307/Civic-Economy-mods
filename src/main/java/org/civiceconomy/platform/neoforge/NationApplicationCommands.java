@@ -101,6 +101,7 @@ final class NationApplicationCommands {
                 .then(roleCommand())
                 .then(budgetCommand())
                 .then(billCommand())
+                .then(facilityCommand())
                 .then(mintCommand())
                 .then(territoryCommand())
                 .then(treasuryCommand())
@@ -1382,6 +1383,102 @@ final class NationApplicationCommands {
                                                                 context, "requestId"),
                                                         StringArgumentType.getString(
                                                                 context, "reason")))))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> facilityCommand() {
+        return Commands.literal("facility")
+                .then(Commands.literal("interface")
+                        .then(Commands.literal("bind")
+                                .then(Commands.argument(
+                                                "requestId",
+                                                StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        bindFacilityAccountingInterface(
+                                                                context.getSource(),
+                                                                StringArgumentType.getString(
+                                                                        context,
+                                                                        "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context,
+                                                                        "reason")))))))
+                .then(Commands.literal("register")
+                        .then(Commands.argument("requestId", StringArgumentType.word())
+                                .then(Commands.argument(
+                                                "reason",
+                                                StringArgumentType.greedyString())
+                                        .executes(context -> registerFacility(
+                                                context.getSource(),
+                                                StringArgumentType.getString(
+                                                        context, "requestId"),
+                                                StringArgumentType.getString(
+                                                        context, "reason"))))));
+    }
+
+    private static int bindFacilityAccountingInterface(
+            CommandSourceStack source, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .bindFacilityAccountingInterface(player, requestId, reason)
+                .whenComplete((accountingInterface, failure) ->
+                        source.getServer().execute(() -> {
+                            if (failure != null) {
+                                reportFailure(
+                                        source,
+                                        "Facility Accounting Interface",
+                                        failure);
+                            } else {
+                                source.sendSuccess(
+                                        () -> Component.literal(
+                                                "Bound Facility Accounting Interface "
+                                                        + accountingInterface.interfaceId()
+                                                        + " to Facility "
+                                                        + accountingInterface.facilityId()
+                                                        + " at "
+                                                        + accountingInterface.position()
+                                                                .dimensionId()
+                                                        + "@"
+                                                        + accountingInterface.position().blockX()
+                                                        + ","
+                                                        + accountingInterface.position().blockY()
+                                                        + ","
+                                                        + accountingInterface.position().blockZ()),
+                                        true);
+                            }
+                        }));
+        source.sendSuccess(
+                () -> Component.literal("Facility Accounting Interface request queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int registerFacility(
+            CommandSourceStack source, String requestId, String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .registerFacility(player, requestId, reason)
+                .whenComplete((facility, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Registered Facility", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Registered Facility " + facility.facilityId()
+                                                + " state=" + facility.state()
+                                                + " core=" + facility.core().dimensionId()
+                                                + "@" + facility.core().blockX()
+                                                + "," + facility.core().blockY()
+                                                + "," + facility.core().blockZ()
+                                                + " scopeChunks=" + facility.scope().size()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Registered Facility request queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int startMintBatch(

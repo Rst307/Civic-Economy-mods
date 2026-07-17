@@ -101,6 +101,10 @@ import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.persistence.StoredMintRecipeIngredient;
 import org.civiceconomy.persistence.StoredMintMaterialStack;
 import org.civiceconomy.persistence.StoredNationalIssuanceQuotaAllocation;
+import org.civiceconomy.persistence.StoredFacilityClaim;
+import org.civiceconomy.persistence.StoredFacilityAccountingInterface;
+import org.civiceconomy.persistence.StoredRegisteredFacility;
+import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.mint.MintBatch;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
@@ -1353,6 +1357,13 @@ public final class CivicServerRuntimeGameTests {
                 .getChild("economy")
                 .getChild("admin")
                 .getChild("backup");
+        var facility = economy.getChild("nation").getChild("facility");
+        helper.assertValueEqual(
+                Set.of("interface", "register"),
+                facility.getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "server-authoritative Registered Facility actions");
         helper.assertValueEqual(
                 Set.of("list", "show", "register", "grant", "revoke", "disable", "enable"),
                 service.getChildren().stream()
@@ -1424,6 +1435,7 @@ public final class CivicServerRuntimeGameTests {
                         "role",
                         "bill",
                         "budget",
+                        "facility",
                         "mint",
                         "territory",
                         "treasury"),
@@ -1558,6 +1570,275 @@ public final class CivicServerRuntimeGameTests {
         helper.succeedWhen(() -> helper.assertTrue(
                 CivicServerRuntime.current().nationalStrengthSnapshotForGameTest().isPresent(),
                 "startup National Strength snapshot"));
+    }
+
+    @GameTest(
+            template = "empty",
+            timeoutTicks = 600,
+            batch = "facility-player-registration")
+    public static void authorizedPlayerRegistersCurrentClaimFacilityExactlyOnce(
+            GameTestHelper helper) {
+        ServerPlayer player = new ServerPlayer(
+                helper.getLevel().getServer(),
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "civic-facility-register"),
+                ClientInformation.createDefault());
+        player.setPos(helper.absolutePos(new BlockPos(120, 0, 120)).getCenter());
+        BlockPos expectedCore = player.blockPosition();
+        BlockPos expectedInterfaceBlock = expectedCore.below();
+        helper.getLevel().setBlockAndUpdate(
+                expectedInterfaceBlock,
+                CivicContent.FACILITY_ACCOUNTING_INTERFACE.get().defaultBlockState());
+        Team team = createHeadOwnedFtbTeamFixture(player);
+        NationTeam teamSnapshot = new NationTeam(
+                team.getId(), team.getOwner(), team.getMembers());
+        ChunkDimPos position = new ChunkDimPos(
+                player.level().dimension(), new ChunkPos(expectedCore));
+        TerritoryClaimPosition civicPosition = new TerritoryClaimPosition(
+                position.dimension().location().toString(), position.x(), position.z());
+        var manager = FTBChunksAPI.api().getManager();
+        ClaimedChunk existing = manager.getChunk(position);
+        if (existing != null) {
+            existing.unclaim(player.createCommandSourceStack(), true);
+        }
+        var teamData = manager.getOrCreateData(team);
+        teamData.setExtraClaimChunks(Math.max(100, teamData.getExtraClaimChunks()));
+        ((ChunkTeamDataImpl) teamData).updateLimits();
+        helper.assertTrue(
+                teamData.claim(
+                                player.createCommandSourceStack().withSuppressedOutput(),
+                                position,
+                                false)
+                        .isSuccess(),
+                "Registered Facility FTB Claim fixture");
+
+        String requestId = "player-facility-register-" + UUID.randomUUID();
+        String reason = "Register current Facility from authoritative player facts";
+        Instant now = Instant.now();
+        Clock setupClock = Clock.fixed(now, ZoneOffset.UTC);
+        CivicServerRuntime runtime = CivicServerRuntime.current();
+        AtomicBoolean setupReady = new AtomicBoolean();
+        AtomicBoolean commandStarted = new AtomicBoolean();
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AtomicReference<StoredRegisteredFacility> persisted = new AtomicReference<>();
+        AtomicReference<List<StoredFacilityClaim>> persistedClaims = new AtomicReference<>();
+        AtomicReference<StoredFacilityAccountingInterface> persistedInterface =
+                new AtomicReference<>();
+
+        runtime.submitDatabase(database -> {
+                    ServiceIdentity setupService =
+                            new ServiceIdentity("civiceconomy-gametest");
+                    NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
+                    var nation = nations.register(new RegisterNation(
+                            setupService,
+                            "facility-command-nation-" + UUID.randomUUID(),
+                            team.getId()));
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, Duration.ofDays(7L), setupClock);
+                    citizenships.join(new JoinCitizenship(
+                            setupService,
+                            "facility-command-citizenship-" + UUID.randomUUID(),
+                            player.getUUID(),
+                            nation.nationId()));
+                    var provider = new FtbTeamsNationProvider(
+                            nations,
+                            citizenships,
+                            new CitizenshipCorrectionGraceRegistry(database, setupClock),
+                            snapshot(teamSnapshot));
+                    new NationFiscalAuthorityRegistry(database, provider, setupClock)
+                            .grant(new GrantNationFiscalPermission(
+                                    setupService,
+                                    "facility-command-authority-" + UUID.randomUUID(),
+                                    nation.nationId(),
+                                    player.getUUID(),
+                                    player.getUUID(),
+                                    NationFiscalPermission.MANAGE_FACILITY_ACCOUNTING,
+                                    "Real player Registered Facility GameTest"));
+
+                    TerritoryMaintenanceRegistry maintenance =
+                            new TerritoryMaintenanceRegistry(database, setupClock);
+                    var existingCycle = database.territoryMaintenanceCycleAt(
+                            now.toEpochMilli());
+                    UUID cycleId = existingCycle == null
+                            ? maintenance.openCycle(new OpenTerritoryMaintenanceCycle(
+                                            setupService,
+                                            "facility-command-cycle-" + UUID.randomUUID(),
+                                            now.minusSeconds(1L),
+                                            now.plus(Duration.ofMinutes(10L))))
+                                    .cycleId()
+                            : existingCycle.cycleId();
+                    maintenance.assess(new AssessTerritoryFiscalValidity(
+                            setupService,
+                            "facility-command-assessment-" + UUID.randomUUID(),
+                            cycleId,
+                            nation.nationId(),
+                            team.getId(),
+                            civicPosition.dimensionId(),
+                            civicPosition.chunkX(),
+                            civicPosition.chunkZ(),
+                            0L,
+                            "Effective current Claim for Facility registration"));
+                    database.settleZeroCostTerritoryMaintenance(
+                            UUID.randomUUID(),
+                            setupService.value(),
+                            "facility-command-settlement-" + UUID.randomUUID(),
+                            cycleId,
+                            nation.nationId().value(),
+                            "Payment-free Facility registration fixture",
+                            now.toEpochMilli());
+                    return nation.nationId();
+                })
+                .whenComplete((ignored, setupFailure) ->
+                        helper.getLevel().getServer().execute(() -> {
+                            if (setupFailure != null) {
+                                asyncFailure.set(setupFailure);
+                            } else {
+                                setupReady.set(true);
+                            }
+                        }));
+
+        helper.startSequence()
+                .thenWaitUntil(() -> {
+                    Throwable failure = asyncFailure.get();
+                    helper.assertTrue(
+                            failure == null,
+                            failure == null
+                                    ? "Registered Facility setup state"
+                                    : "Registered Facility setup failure: "
+                                            + failure.getMessage());
+                    helper.assertTrue(setupReady.get(), "Registered Facility setup complete");
+                })
+                .thenExecute(() -> {
+                    try {
+                        String command = "civic economy nation facility register "
+                                + requestId + " " + reason;
+                        var dispatcher = helper.getLevel()
+                                .getServer()
+                                .getCommands()
+                                .getDispatcher();
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        player.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Registered Facility command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        command,
+                                        player.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Registered Facility replay command result");
+                        String interfaceCommand =
+                                "civic economy nation facility interface bind "
+                                        + requestId + "-interface " + reason;
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        interfaceCommand,
+                                        player.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Facility Accounting Interface command result");
+                        helper.assertValueEqual(
+                                1,
+                                dispatcher.execute(
+                                        interfaceCommand,
+                                        player.createCommandSourceStack()
+                                                .withSuppressedOutput()),
+                                "Facility Accounting Interface replay command result");
+                        commandStarted.set(true);
+                        helper.runAfterDelay(20L, () -> runtime
+                                .submitDatabase(database -> {
+                                    StoredRegisteredFacility stored =
+                                            database.registeredFacility(
+                                                    FacilityAdministration
+                                                            .SERVICE_IDENTITY
+                                                            .value(),
+                                                    requestId);
+                                    persisted.set(stored);
+                                    persistedClaims.set(stored == null
+                                            ? List.of()
+                                            : database.registeredFacilityClaims(
+                                                    stored.facilityId()));
+                                    persistedInterface.set(stored == null
+                                            ? null
+                                            : database.facilityAccountingInterface(
+                                                    stored.facilityId()));
+                                    return null;
+                                })
+                                .whenComplete((ignored, inspectionFailure) -> {
+                                    if (inspectionFailure != null) {
+                                        asyncFailure.set(inspectionFailure);
+                                    }
+                                }));
+                    } catch (Throwable commandFailure) {
+                        asyncFailure.set(commandFailure);
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    Throwable failure = asyncFailure.get();
+                    helper.assertTrue(
+                            failure == null,
+                            failure == null
+                                    ? "Registered Facility command state"
+                                    : "Registered Facility command failure: "
+                                            + failure.getMessage());
+                    helper.assertTrue(commandStarted.get(), "Registered Facility command started");
+                    StoredRegisteredFacility stored = persisted.get();
+                    helper.assertTrue(stored != null, "persisted Registered Facility");
+                    helper.assertValueEqual(
+                            team.getId(), stored.ftbTeamId(), "exact FTB Team binding");
+                    helper.assertValueEqual(
+                            player.getUUID(), stored.actorPlayerId(), "exact player actor");
+                    helper.assertValueEqual(
+                            "BASELINING", stored.state(), "safe initial Facility state");
+                    helper.assertValueEqual(
+                            civicPosition.dimensionId(),
+                            stored.dimensionId(),
+                            "server-derived Facility dimension");
+                    helper.assertValueEqual(
+                            expectedCore.getX(), stored.coreBlockX(), "server-derived core X");
+                    helper.assertValueEqual(
+                            expectedCore.getY(), stored.coreBlockY(), "server-derived core Y");
+                    helper.assertValueEqual(
+                            expectedCore.getZ(), stored.coreBlockZ(), "server-derived core Z");
+                    helper.assertValueEqual(
+                            List.of(new StoredFacilityClaim(
+                                    civicPosition.dimensionId(),
+                                    civicPosition.chunkX(),
+                                    civicPosition.chunkZ())),
+                            persistedClaims.get(),
+                            "single current-Claim Facility scope");
+                    StoredFacilityAccountingInterface accountingInterface =
+                            persistedInterface.get();
+                    helper.assertTrue(
+                            accountingInterface != null,
+                            "persisted Facility Accounting Interface");
+                    helper.assertValueEqual(
+                            stored.facilityId(),
+                            accountingInterface.facilityId(),
+                            "exact Facility Interface binding");
+                    helper.assertValueEqual(
+                            expectedInterfaceBlock.getX(),
+                            accountingInterface.blockX(),
+                            "server-targeted interface X");
+                    helper.assertValueEqual(
+                            expectedInterfaceBlock.getY(),
+                            accountingInterface.blockY(),
+                            "server-targeted interface Y");
+                    helper.assertValueEqual(
+                            expectedInterfaceBlock.getZ(),
+                            accountingInterface.blockZ(),
+                            "server-targeted interface Z");
+                })
+                .thenExecute(() -> {
+                    ClaimedChunk claimed = manager.getChunk(position);
+                    if (claimed != null) {
+                        claimed.unclaim(player.createCommandSourceStack(), true);
+                    }
+                })
+                .thenSucceed();
     }
 
     @GameTest(template = "empty", timeoutTicks = 200)

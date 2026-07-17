@@ -18,10 +18,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
@@ -107,6 +111,14 @@ import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
+import org.civiceconomy.production.EffectiveTerritoryFacilityAuthority;
+import org.civiceconomy.production.FacilityAdministration;
+import org.civiceconomy.production.FacilityAccountingInterfaceRegistry;
+import org.civiceconomy.production.FacilityAccountingInterface;
+import org.civiceconomy.production.FacilityAccountingInterfacePosition;
+import org.civiceconomy.production.FacilityCorePosition;
+import org.civiceconomy.production.RegisteredFacility;
+import org.civiceconomy.production.RegisteredFacilityRegistry;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
 import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
 import org.civiceconomy.territory.ConsumeTerritoryClaimPermit;
@@ -204,6 +216,7 @@ public final class CivicServerRuntime {
     private static final int NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE = 10;
     private static final int NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE = 100;
     private static final long NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE = 10_000L;
+    private static final int REGISTERED_FACILITY_MAX_SCOPE_CHUNKS = 16;
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
         @Override
         public Optional<NationTeam> find(UUID teamId) {
@@ -1565,6 +1578,155 @@ public final class CivicServerRuntime {
                     }
                 });
         return result;
+    }
+
+    CompletableFuture<RegisteredFacility> registerFacility(
+            ServerPlayer actor, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityRegistration(actor))
+                .thenCompose(snapshot -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(
+                            Map.of(snapshot.team().teamId(), snapshot.team()));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                    CitizenshipCorrectionGraceRegistry corrections =
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock);
+                    FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
+                            nations, citizenships, corrections, teams);
+                    EffectiveTerritoryFacilityAuthority territory =
+                            new EffectiveTerritoryFacilityAuthority(
+                                    database,
+                                    new EffectiveTerritoryQuery(
+                                            new TerritoryMaintenanceRegistry(
+                                                    database, commandClock),
+                                            snapshot.ownership()),
+                                    commandClock);
+                    return new FacilityAdministration(
+                                    nations,
+                                    provider,
+                                    new NationFiscalAuthorityRegistry(
+                                            database, provider, commandClock),
+                                    new RegisteredFacilityRegistry(
+                                            database,
+                                            territory,
+                                            commandClock,
+                                            REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                                    new FacilityAccountingInterfaceRegistry(
+                                            database, commandClock))
+                            .register(
+                                    actorPlayerId,
+                                    snapshot.team().teamId(),
+                                    requestId,
+                                    snapshot.core(),
+                                    List.of(snapshot.claim()),
+                                    reason);
+                }));
+    }
+
+    CompletableFuture<FacilityAccountingInterface> bindFacilityAccountingInterface(
+            ServerPlayer actor, String requestId, String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityAccountingInterface(actor))
+                .thenCompose(snapshot -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(
+                            Map.of(snapshot.team().teamId(), snapshot.team()));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                    CitizenshipCorrectionGraceRegistry corrections =
+                            new CitizenshipCorrectionGraceRegistry(database, commandClock);
+                    FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
+                            nations, citizenships, corrections, teams);
+                    return new FacilityAdministration(
+                                    nations,
+                                    provider,
+                                    new NationFiscalAuthorityRegistry(
+                                            database, provider, commandClock),
+                                    new RegisteredFacilityRegistry(
+                                            database,
+                                            (nationId, teamId, claim) -> false,
+                                            commandClock,
+                                            REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                                    new FacilityAccountingInterfaceRegistry(
+                                            database, commandClock))
+                            .bindInterface(
+                                    actorPlayerId,
+                                    snapshot.team().teamId(),
+                                    requestId,
+                                    snapshot.position(),
+                                    reason);
+                }));
+    }
+
+    private FacilityInterfaceSnapshot snapshotFacilityAccountingInterface(
+            ServerPlayer actor) {
+        NationTeam team = requireActorTeam(actor.getUUID());
+        HitResult hit = actor.pick(5.0D, 0.0F, false);
+        List<BlockPos> candidates = new ArrayList<>();
+        if (hit instanceof BlockHitResult blockHit
+                && hit.getType() == HitResult.Type.BLOCK) {
+            candidates.add(blockHit.getBlockPos());
+        }
+        candidates.add(actor.blockPosition());
+        candidates.add(actor.blockPosition().below());
+        for (BlockPos candidate : candidates.stream().distinct().toList()) {
+            BlockEntity blockEntity = actor.level().getBlockEntity(candidate);
+            if (blockEntity instanceof FacilityAccountingInterfaceBlockEntity
+                    && blockEntity.getType()
+                            == CivicContent.FACILITY_ACCOUNTING_INTERFACE_BLOCK_ENTITY.get()
+                    && actor.level().getBlockState(candidate).getBlock()
+                            == CivicContent.FACILITY_ACCOUNTING_INTERFACE.get()) {
+                return new FacilityInterfaceSnapshot(
+                        team,
+                        new FacilityAccountingInterfacePosition(
+                                actor.level().dimension().location().toString(),
+                                candidate.getX(),
+                                candidate.getY(),
+                                candidate.getZ()));
+            }
+        }
+        throw new SecurityException(
+                "Look at or stand on a real Civic Facility Accounting Interface");
+    }
+
+    private FacilityRegistrationSnapshot snapshotFacilityRegistration(ServerPlayer actor) {
+        NationTeam team = requireActorTeam(actor.getUUID());
+        BlockPos position = actor.blockPosition();
+        String dimensionId = actor.level().dimension().location().toString();
+        TerritoryClaimPosition claim = new TerritoryClaimPosition(
+                dimensionId,
+                position.getX() >> 4,
+                position.getZ() >> 4);
+        boolean owned = FtbChunksAdapter.live().claimsForTeam(team.teamId()).stream()
+                .anyMatch(candidate -> candidate.dimension().location().toString()
+                                .equals(dimensionId)
+                        && candidate.chunkPos().x == claim.chunkX()
+                        && candidate.chunkPos().z == claim.chunkZ());
+        if (!owned) {
+            throw new SecurityException(
+                    "Your FTB Team does not own the current Facility Claim");
+        }
+        TerritoryOwnershipSource ownership =
+                (requestedDimension, requestedX, requestedZ) ->
+                        requestedDimension.equals(claim.dimensionId())
+                                        && requestedX == claim.chunkX()
+                                        && requestedZ == claim.chunkZ()
+                                ? Optional.of(team.teamId())
+                                : Optional.empty();
+        return new FacilityRegistrationSnapshot(
+                team,
+                new FacilityCorePosition(
+                        dimensionId,
+                        position.getX(),
+                        position.getY(),
+                        position.getZ()),
+                claim,
+                ownership);
     }
 
     CompletableFuture<MintBatchStatus> mintBatchStatusForActor(
@@ -3807,6 +3969,15 @@ public final class CivicServerRuntime {
     private record NationalStrengthCommandContext(
             NationTeam team,
             Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam) {}
+
+    private record FacilityRegistrationSnapshot(
+            NationTeam team,
+            FacilityCorePosition core,
+            TerritoryClaimPosition claim,
+            TerritoryOwnershipSource ownership) {}
+
+    private record FacilityInterfaceSnapshot(
+            NationTeam team, FacilityAccountingInterfacePosition position) {}
 
     private record PreparedMintTake(
             PendingMintMaterialTake pending,
