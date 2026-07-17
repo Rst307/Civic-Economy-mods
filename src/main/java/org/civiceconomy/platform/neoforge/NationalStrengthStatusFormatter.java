@@ -10,6 +10,7 @@ final class NationalStrengthStatusFormatter {
     static String format(NationalStrengthRecalculation recalculation) {
         var window = recalculation.activityWindow();
         var population = recalculation.effectiveCitizenPopulation();
+        var territory = recalculation.effectiveTerritory();
         return "Nation " + recalculation.nationId().value()
                 + " strength=" + recalculation.assessment().totalBasisPoints()
                 + " effectiveCitizenBasisPoints="
@@ -19,6 +20,15 @@ final class NationalStrengthStatusFormatter {
                 + " effectiveCitizens=" + population.effectiveCitizenCount()
                 + " populationEquivalent="
                 + String.format(Locale.ROOT, "%.3f", population.populationEquivalent())
+                + " effectiveTerritoryBasisPoints="
+                + recalculation.assessment()
+                        .component(NationalStrengthComponent.EFFECTIVE_TERRITORY)
+                        .normalizedInputBasisPoints()
+                + " currentClaims=" + territory.currentClaimCount()
+                + " effectiveClaims=" + territory.effectiveClaimCount()
+                + " suspendedClaims=" + territory.suspendedClaimCount()
+                + " unassessedClaims=" + territory.unassessedClaimCount()
+                + " territoryAvailable=" + territory.ownershipAvailable()
                 + " activityBasisPoints=" + window.normalizedBasisPoints()
                 + " acceptedValue=" + window.acceptedValueMinorUnits()
                 + " accepted=" + window.acceptedCount()

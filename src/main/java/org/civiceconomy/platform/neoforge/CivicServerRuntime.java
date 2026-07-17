@@ -149,6 +149,7 @@ import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
 import org.civiceconomy.strength.NationalStrengthRecalculation;
 import org.civiceconomy.strength.NationalStrengthSnapshot;
 import org.civiceconomy.strength.NationalStrengthSnapshotBuilder;
+import org.civiceconomy.strength.NationalStrengthSnapshotConfiguration;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.MoneyAmount;
@@ -200,6 +201,7 @@ public final class CivicServerRuntime {
     private static final Duration NATIONAL_STRENGTH_ACTIVITY_WINDOW = Duration.ofDays(30);
     private static final Duration NATIONAL_STRENGTH_FULL_CITIZEN_TIME = Duration.ofHours(8);
     private static final int NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE = 10;
+    private static final int NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE = 100;
     private static final long NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE = 10_000L;
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
         @Override
@@ -554,8 +556,13 @@ public final class CivicServerRuntime {
         RuntimeState current = requireState();
         UUID actorPlayerId = actor.getUUID();
         Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
-        return onServer(current, () -> requireActorTeam(actorPlayerId))
-                .thenCompose(team -> current.writer.submitDatabase(database -> {
+        return onServer(current, () -> {
+                    NationTeam team = requireActorTeam(actorPlayerId);
+                    return new NationalStrengthCommandContext(
+                            team, snapshotNationalStrengthClaims(List.of(team.teamId())));
+                })
+                .thenCompose(context -> current.writer.submitDatabase(database -> {
+                    NationTeam team = context.team();
                     NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
                     NationRegistry nations = new NationRegistry(database, teams);
                     var nation = nations.findByFtbTeam(team.teamId())
@@ -609,8 +616,13 @@ public final class CivicServerRuntime {
     CompletableFuture<NationalStrengthRecalculation> nationalStrengthStatus(ServerPlayer actor) {
         RuntimeState current = requireState();
         UUID actorPlayerId = actor.getUUID();
-        return onServer(current, () -> requireActorTeam(actorPlayerId))
-                .thenCompose(team -> current.writer.submitDatabase(database -> {
+        return onServer(current, () -> {
+                    NationTeam team = requireActorTeam(actorPlayerId);
+                    return new NationalStrengthCommandContext(
+                            team, snapshotNationalStrengthClaims(List.of(team.teamId())));
+                })
+                .thenCompose(context -> current.writer.submitDatabase(database -> {
+                    NationTeam team = context.team();
                     NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
                     NationRegistry nations = new NationRegistry(database, teams);
                     var nation = nations.findByFtbTeam(team.teamId())
@@ -625,12 +637,8 @@ public final class CivicServerRuntime {
                     }
                     NationalStrengthSnapshot refreshed = new NationalStrengthSnapshotBuilder(
                                     database,
-                                    CITIZENSHIP_TRANSFER_COOLDOWN,
-                                    NATION_APPLICATION_EVIDENCE_WINDOW,
-                                    NATIONAL_STRENGTH_FULL_CITIZEN_TIME,
-                                    NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE,
-                                    NATIONAL_STRENGTH_ACTIVITY_WINDOW.toMillis(),
-                                    NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE)
+                                    nationalStrengthConfiguration(),
+                                    context.currentClaimsByTeam())
                             .recalculateAll(clock.millis());
                     current.nationalStrengthSnapshot = refreshed;
                     NationalStrengthRecalculation recalculation =
@@ -3506,15 +3514,19 @@ public final class CivicServerRuntime {
             return;
         }
         long recalculatedAt = clock.millis();
-        current.writer.submitDatabase(database -> new NationalStrengthSnapshotBuilder(
-                        database,
-                        CITIZENSHIP_TRANSFER_COOLDOWN,
-                        NATION_APPLICATION_EVIDENCE_WINDOW,
-                        NATIONAL_STRENGTH_FULL_CITIZEN_TIME,
-                        NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE,
-                        NATIONAL_STRENGTH_ACTIVITY_WINDOW.toMillis(),
-                        NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE)
-                .recalculateAll(recalculatedAt))
+        current.writer
+                .submitDatabase(database -> database.registeredNations().stream()
+                        .map(org.civiceconomy.persistence.StoredNation::ftbTeamId)
+                        .distinct()
+                        .toList())
+                .thenCompose(teamIds -> onServer(
+                        current, () -> snapshotNationalStrengthClaims(teamIds)))
+                .thenCompose(currentClaims -> current.writer.submitDatabase(database ->
+                        new NationalStrengthSnapshotBuilder(
+                                        database,
+                                        nationalStrengthConfiguration(),
+                                        currentClaims)
+                                .recalculateAll(recalculatedAt)))
                 .whenComplete((snapshot, failure) -> {
                     current.nationalStrengthRecalculationQueued.set(false);
                     if (failure != null) {
@@ -3523,6 +3535,38 @@ public final class CivicServerRuntime {
                         current.nationalStrengthSnapshot = snapshot;
                     }
                 });
+    }
+
+    private static NationalStrengthSnapshotConfiguration nationalStrengthConfiguration() {
+        return new NationalStrengthSnapshotConfiguration(
+                CITIZENSHIP_TRANSFER_COOLDOWN,
+                NATION_APPLICATION_EVIDENCE_WINDOW,
+                NATIONAL_STRENGTH_FULL_CITIZEN_TIME,
+                NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE,
+                NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE,
+                NATIONAL_STRENGTH_ACTIVITY_WINDOW,
+                NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE);
+    }
+
+    private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(
+            List<UUID> teamIds) {
+        FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
+        FtbChunksAdapter chunks = FtbChunksAdapter.live();
+        Map<UUID, List<TerritoryClaimPosition>> claimsByTeam = new HashMap<>();
+        for (UUID teamId : teamIds) {
+            if (teams.find(teamId).isEmpty()) {
+                continue;
+            }
+            claimsByTeam.put(
+                    teamId,
+                    chunks.claimsForTeam(teamId).stream()
+                            .map(claim -> new TerritoryClaimPosition(
+                                    claim.dimension().location().toString(),
+                                    claim.chunkPos().x,
+                                    claim.chunkPos().z))
+                            .toList());
+        }
+        return Map.copyOf(claimsByTeam);
     }
 
     private void scheduleTerritoryForceLoadEnforcementRecovery(RuntimeState current) {
@@ -3757,6 +3801,10 @@ public final class CivicServerRuntime {
             NationTeam team,
             TerritoryOwnershipSource ownership,
             List<org.civiceconomy.mint.MintMaterialStack> materials) {}
+
+    private record NationalStrengthCommandContext(
+            NationTeam team,
+            Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam) {}
 
     private record PreparedMintTake(
             PendingMintMaterialTake pending,

@@ -8,14 +8,17 @@ public record NationalStrengthRecalculation(
         long recalculatedAtEpochMillis,
         NationalStrengthAssessment assessment,
         NationEffectiveCitizenPopulation effectiveCitizenPopulation,
+        EffectiveTerritoryStrengthAssessment effectiveTerritory,
         AuditableEconomicActivityWindowAssessment activityWindow) {
     public NationalStrengthRecalculation {
         if (nationId == null || recalculatedAtEpochMillis < 0L
                 || assessment == null || effectiveCitizenPopulation == null
+                || effectiveTerritory == null
                 || activityWindow == null
                 || !nationId.equals(effectiveCitizenPopulation.nationId())
                 || effectiveCitizenPopulation.asOf().toEpochMilli()
                         != recalculatedAtEpochMillis
+                || !nationId.equals(effectiveTerritory.nationId())
                 || !nationId.equals(activityWindow.nationId())) {
             throw new IllegalArgumentException("National Strength recalculation is invalid");
         }

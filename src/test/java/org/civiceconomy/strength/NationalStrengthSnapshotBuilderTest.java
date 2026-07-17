@@ -9,6 +9,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.CitizenshipRegistry;
@@ -18,6 +20,11 @@ import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
+import org.civiceconomy.territory.AssessTerritoryFiscalValidity;
+import org.civiceconomy.territory.OpenTerritoryMaintenanceCycle;
+import org.civiceconomy.territory.SuspendTerritoryMaintenance;
+import org.civiceconomy.territory.TerritoryClaimPosition;
+import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -127,6 +134,102 @@ class NationalStrengthSnapshotBuilderTest {
                     NationalStrengthComponentState.PAUSED_ANOMALY,
                     recalculation.assessment().componentState(
                             NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE));
+            assertTrue(recalculation.assessment().newMintAllocationPaused());
+        }
+    }
+
+    @Test
+    void scoresOnlyCurrentClaimsWithLatestEffectiveFiscalConclusion() {
+        NationId nationId = new NationId(
+                UUID.fromString("55555555-5555-5555-5555-555555555555"));
+        UUID teamId = UUID.fromString("66666666-6666-6666-6666-666666666666");
+        TerritoryClaimPosition effective =
+                new TerritoryClaimPosition("minecraft:overworld", 3, 4);
+        TerritoryClaimPosition suspended =
+                new TerritoryClaimPosition("minecraft:overworld", 8, 9);
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    nationId.value(),
+                    "civiceconomy-tests",
+                    "territory-strength-nation",
+                    teamId,
+                    RECALCULATED_AT.minus(Duration.ofDays(10)).toEpochMilli());
+            TerritoryMaintenanceRegistry maintenance = new TerritoryMaintenanceRegistry(
+                    database, Clock.fixed(RECALCULATED_AT, ZoneOffset.UTC));
+            var fundedCycle = maintenance.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "territory-strength-funded-cycle",
+                    RECALCULATED_AT.minus(Duration.ofDays(4)),
+                    RECALCULATED_AT.minus(Duration.ofDays(3))));
+            maintenance.assess(new AssessTerritoryFiscalValidity(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "territory-strength-effective-assessment",
+                    fundedCycle.cycleId(),
+                    nationId,
+                    teamId,
+                    effective.dimensionId(),
+                    effective.chunkX(),
+                    effective.chunkZ(),
+                    0L,
+                    "Zero-cost effective Claim"));
+            maintenance.settleZeroCostAssessments(new SuspendTerritoryMaintenance(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "territory-strength-funded-settlement",
+                    fundedCycle.cycleId(),
+                    nationId,
+                    "Zero-cost maintenance"));
+            var unfundedCycle = maintenance.openCycle(new OpenTerritoryMaintenanceCycle(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "territory-strength-unfunded-cycle",
+                    RECALCULATED_AT.minus(Duration.ofDays(2)),
+                    RECALCULATED_AT.minus(Duration.ofDays(1))));
+            maintenance.assess(new AssessTerritoryFiscalValidity(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "territory-strength-suspended-assessment",
+                    unfundedCycle.cycleId(),
+                    nationId,
+                    teamId,
+                    suspended.dimensionId(),
+                    suspended.chunkX(),
+                    suspended.chunkZ(),
+                    100L,
+                    "Unfunded Claim"));
+            maintenance.suspend(new SuspendTerritoryMaintenance(
+                    new ServiceIdentity("civiceconomy-territory"),
+                    "territory-strength-unfunded-settlement",
+                    unfundedCycle.cycleId(),
+                    nationId,
+                    "No maintenance funds"));
+
+            NationalStrengthRecalculation recalculation =
+                    new NationalStrengthSnapshotBuilder(
+                                    database,
+                                    new NationalStrengthSnapshotConfiguration(
+                                            Duration.ofDays(7),
+                                            Duration.ofDays(60),
+                                            Duration.ofHours(8),
+                                            4,
+                                            4,
+                                            Duration.ofDays(30),
+                                            10_000L),
+                                    Map.of(teamId, List.of(effective, suspended)))
+                            .recalculateAll(RECALCULATED_AT.toEpochMilli())
+                            .nations()
+                            .get(nationId);
+
+            assertEquals(2, recalculation.effectiveTerritory().currentClaimCount());
+            assertEquals(1, recalculation.effectiveTerritory().effectiveClaimCount());
+            assertEquals(1, recalculation.effectiveTerritory().suspendedClaimCount());
+            assertEquals(0, recalculation.effectiveTerritory().unassessedClaimCount());
+            assertEquals(
+                    5_000,
+                    recalculation.assessment()
+                            .component(NationalStrengthComponent.EFFECTIVE_TERRITORY)
+                            .normalizedInputBasisPoints());
+            assertEquals(
+                    NationalStrengthComponentState.ACTIVE,
+                    recalculation.assessment().componentState(
+                            NationalStrengthComponent.EFFECTIVE_TERRITORY));
             assertTrue(recalculation.assessment().newMintAllocationPaused());
         }
     }

@@ -11,6 +11,7 @@ import org.civiceconomy.nation.EffectiveCitizenContribution;
 import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.strength.AuditableEconomicActivityWindowAssessment;
+import org.civiceconomy.strength.EffectiveTerritoryStrengthAssessment;
 import org.civiceconomy.strength.NationalStrengthCalculator;
 import org.civiceconomy.strength.NationalStrengthComponent;
 import org.civiceconomy.strength.NationalStrengthComponents;
@@ -46,13 +47,20 @@ class NationalStrengthStatusFormattingTest {
                 recalculatedAt,
                 assessment,
                 population,
+                new EffectiveTerritoryStrengthAssessment(
+                        nationId,
+                        UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                        false,
+                        List.of()),
                 new AuditableEconomicActivityWindowAssessment(
                         nationId, 1_000L, recalculatedAt, 625L, 2_500, 2, 1, Map.of()));
 
         assertEquals(
                 "Nation 11111111-2222-3333-4444-555555555555 strength=2250"
                         + " effectiveCitizenBasisPoints=5000 effectiveCitizens=1"
-                        + " populationEquivalent=0.500 activityBasisPoints=2500"
+                        + " populationEquivalent=0.500 effectiveTerritoryBasisPoints=0"
+                        + " currentClaims=0 effectiveClaims=0 suspendedClaims=0"
+                        + " unassessedClaims=0 territoryAvailable=false activityBasisPoints=2500"
                         + " acceptedValue=625 accepted=2 excluded=1 paused=true",
                 NationalStrengthStatusFormatter.format(recalculation));
     }
