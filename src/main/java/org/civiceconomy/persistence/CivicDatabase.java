@@ -5073,6 +5073,54 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredMintComplianceObservation> mintComplianceObservations(
+            UUID nationId, long windowStartEpochMillis, long windowEndEpochMillis) {
+        if (nationId == null || windowStartEpochMillis < 0L
+                || windowEndEpochMillis <= windowStartEpochMillis) {
+            throw new IllegalArgumentException("Mint Compliance Observation window is invalid");
+        }
+        List<StoredMintComplianceObservation> observations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT batch.batch_id, operation.state,
+                       EXISTS (
+                           SELECT 1 FROM mint_recovery_incident incident
+                           WHERE incident.batch_id = batch.batch_id
+                       ) AS had_incident,
+                       EXISTS (
+                           SELECT 1 FROM mint_recovery_incident incident
+                           WHERE incident.batch_id = batch.batch_id
+                             AND incident.state = 'OPEN'
+                       ) AS open_incident
+                FROM mint_batch batch
+                JOIN mint_issuance_operation operation
+                  ON operation.batch_id = batch.batch_id
+                WHERE batch.nation_id = ?
+                  AND operation.prepared_at_epoch_millis >= ?
+                  AND operation.prepared_at_epoch_millis < ?
+                  AND (operation.state = 'COMMITTED' OR EXISTS (
+                      SELECT 1 FROM mint_recovery_incident incident
+                      WHERE incident.batch_id = batch.batch_id
+                  ))
+                ORDER BY operation.prepared_at_epoch_millis, batch.batch_id
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setLong(2, windowStartEpochMillis);
+            query.setLong(3, windowEndEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    observations.add(new StoredMintComplianceObservation(
+                            UUID.fromString(result.getString("batch_id")),
+                            result.getString("state"),
+                            result.getInt("had_incident") != 0,
+                            result.getInt("open_incident") != 0));
+                }
+            }
+            return List.copyOf(observations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Compliance Observations", failure);
+        }
+    }
+
     public synchronized StoredMintRecoveryIncident mintRecoveryIncident(UUID incidentId) {
         if (incidentId == null) {
             throw new IllegalArgumentException("Mint Recovery Incident ID cannot be null");

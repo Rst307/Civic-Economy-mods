@@ -211,6 +211,7 @@ class NationalStrengthSnapshotBuilderTest {
                                             4,
                                             4,
                                             Duration.ofDays(30),
+                                            Duration.ofDays(30),
                                             10_000L),
                                     Map.of(teamId, List.of(effective, suspended)))
                             .recalculateAll(RECALCULATED_AT.toEpochMilli())

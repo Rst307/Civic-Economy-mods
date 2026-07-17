@@ -16,6 +16,7 @@ import org.civiceconomy.strength.NationalStrengthCalculator;
 import org.civiceconomy.strength.NationalStrengthComponent;
 import org.civiceconomy.strength.NationalStrengthComponents;
 import org.civiceconomy.strength.NationalStrengthRecalculation;
+import org.civiceconomy.strength.MintComplianceCalculator;
 import org.junit.jupiter.api.Test;
 
 class NationalStrengthStatusFormattingTest {
@@ -52,6 +53,8 @@ class NationalStrengthStatusFormattingTest {
                         UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
                         false,
                         List.of()),
+                new MintComplianceCalculator().assess(
+                        nationId, 1_000L, recalculatedAt, List.of()),
                 new AuditableEconomicActivityWindowAssessment(
                         nationId, 1_000L, recalculatedAt, 625L, 2_500, 2, 1, Map.of()));
 
@@ -60,7 +63,9 @@ class NationalStrengthStatusFormattingTest {
                         + " effectiveCitizenBasisPoints=5000 effectiveCitizens=1"
                         + " populationEquivalent=0.500 effectiveTerritoryBasisPoints=0"
                         + " currentClaims=0 effectiveClaims=0 suspendedClaims=0"
-                        + " unassessedClaims=0 territoryAvailable=false activityBasisPoints=2500"
+                        + " unassessedClaims=0 territoryAvailable=false complianceBasisPoints=0"
+                        + " complianceObservations=0 cleanCommits=0 recoveredCommits=0"
+                        + " quarantinedRecoveries=0 openIncidents=0 activityBasisPoints=2500"
                         + " acceptedValue=625 accepted=2 excluded=1 paused=true",
                 NationalStrengthStatusFormatter.format(recalculation));
     }

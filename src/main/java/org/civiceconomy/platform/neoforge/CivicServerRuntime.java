@@ -199,6 +199,7 @@ public final class CivicServerRuntime {
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final Duration NATIONAL_STRENGTH_ACTIVITY_WINDOW = Duration.ofDays(30);
+    private static final Duration NATIONAL_STRENGTH_COMPLIANCE_WINDOW = Duration.ofDays(30);
     private static final Duration NATIONAL_STRENGTH_FULL_CITIZEN_TIME = Duration.ofHours(8);
     private static final int NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE = 10;
     private static final int NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE = 100;
@@ -3544,6 +3545,7 @@ public final class CivicServerRuntime {
                 NATIONAL_STRENGTH_FULL_CITIZEN_TIME,
                 NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE,
                 NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE,
+                NATIONAL_STRENGTH_COMPLIANCE_WINDOW,
                 NATIONAL_STRENGTH_ACTIVITY_WINDOW,
                 NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE);
     }

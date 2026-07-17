@@ -85,6 +85,8 @@ class NationalStrengthRecalculatorTest {
                                     UUID.fromString("22222222-2222-2222-2222-222222222222"),
                                     false,
                                     List.of()),
+                            new MintComplianceCalculator().assess(
+                                    NATION, 0L, 100L, List.of()),
                             new NationalStrengthComponents(
                                     1_000,
                                     2_000,

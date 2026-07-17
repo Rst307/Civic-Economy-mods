@@ -25,14 +25,17 @@ public final class NationalStrengthRecalculator {
             long recalculatedAtEpochMillis,
             NationEffectiveCitizenPopulation effectiveCitizenPopulation,
             EffectiveTerritoryStrengthAssessment effectiveTerritory,
+            MintComplianceAssessment mintCompliance,
             NationalStrengthComponents serverDerivedComponents) {
         if (nationId == null || recalculatedAtEpochMillis <= 0L
                 || effectiveCitizenPopulation == null || effectiveTerritory == null
+                || mintCompliance == null
                 || serverDerivedComponents == null
                 || !nationId.equals(effectiveCitizenPopulation.nationId())
                 || effectiveCitizenPopulation.asOf().toEpochMilli()
                         != recalculatedAtEpochMillis
-                || !nationId.equals(effectiveTerritory.nationId())) {
+                || !nationId.equals(effectiveTerritory.nationId())
+                || !nationId.equals(mintCompliance.nationId())) {
             throw new IllegalArgumentException("National Strength recalculation request is invalid");
         }
         long windowStart = recalculatedAtEpochMillis <= activityWindowMillis
@@ -53,6 +56,7 @@ public final class NationalStrengthRecalculator {
                 calculator.assess(authoritative),
                 effectiveCitizenPopulation,
                 effectiveTerritory,
+                mintCompliance,
                 activity);
     }
 }

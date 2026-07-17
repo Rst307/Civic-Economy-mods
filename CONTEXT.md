@@ -170,6 +170,14 @@ _Avoid_: 转入国库、封存、未知现金丢失
 关联一个铸币批次持久化发行步骤、表明其外部结果尚未被 Civic 可靠确认的不可删除证据记录；事件被解决后仍保留同一历史身份。
 _Avoid_: 重试日志、已取消批次、已释放额度
 
+**Mint Compliance Observation（铸币合规观察）**:
+一个 Nation 在合规滚动窗口内由单个 Mint Batch 形成的一次履约结果；同一批次的重试和多个恢复步骤不能重复形成合规样本。
+_Avoid_: 恢复日志条目、每次重试、管理员处罚分
+
+**Quarantined Mint Compliance Observation（隔离铸币合规观察）**:
+恢复事故虽已解决但对应 Mint Batch 尚未完成最终提交的一次合规观察；它不能被视为成功恢复或从合规证据中消失。
+_Avoid_: Recovered Commit、已清除事故、无样本
+
 **货币存量校正（Monetary Stock Correction）**:
 在独立证据确认真实 LC 货币与 Civic 累计净发行记录存在偏差后，由服务器级权限执行的审计调整。
 _Avoid_: 普通支付、退款、额度授予、铸币批次重试

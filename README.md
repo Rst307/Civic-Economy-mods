@@ -201,7 +201,7 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 
 `nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。National Strength 快照复用同一权威人口计算，以平方根边际递减将人口当量归一化；当前 10 个满额 Effective Citizen 当量达到该组件满量程，后续将移入服务器政策配置。
 
-`nation strength status` 显示同一快照中的 Effective Citizen basis points、有效人数、人口当量、当前/EFFECTIVE/SUSPENDED/未评估 Claim 数、Effective Territory basis points、30 天可审计活动 basis points、接受/排除计数、总国力和新铸币暂停状态。领土只统计当前仍由精确 FTB Team 占领且最新财政结论为 EFFECTIVE 的区块；生产/基础设施和合规仍明确为 `PAUSED_ANOMALY`。
+`nation strength status` 显示同一快照中的 Effective Citizen basis points、有效人数、人口当量、当前/EFFECTIVE/SUSPENDED/未评估 Claim 数、Effective Territory basis points、30 天 Mint Compliance basis points 与 observation 分类、30 天可审计活动 basis points、接受/排除计数、总国力和新铸币暂停状态。领土只统计当前仍由精确 FTB Team 占领且最新财政结论为 EFFECTIVE 的区块。Mint Compliance 每个 Batch 最多形成一个 observation：无事故完成为 `CLEAN_COMMIT`（100%），事故解决且 Batch 最终完成为 `RECOVERED_COMMIT`（50%），仍有事故为 `OPEN_INCIDENT`（0 且暂停），事故虽解决但 Batch 尚未 `COMMITTED` 为 `QUARANTINED_RECOVERY`（0 且暂停）；无样本时合规保持 ACTIVE、0 分。生产/基础设施仍明确为 `PAUSED_ANOMALY`，直至 Registered Facility/Create 证据成为权威来源。
 
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、发行、财政角色、审批策略、公共政策和恢复管理。
 

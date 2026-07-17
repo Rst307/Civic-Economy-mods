@@ -4302,9 +4302,14 @@ public final class CivicServerRuntimeGameTests {
                 .thenWaitUntil(() -> {
                     assertNoAsyncFailure(helper, asyncFailure, "Withdrawal policy command");
                     helper.assertTrue(policyCommandStarted.get(), "policy command started");
+                    Long policyLifetime = withdrawalApprovalPolicyLifetime(
+                            databaseFile, policyRequestId);
+                    helper.assertTrue(
+                            policyLifetime != null,
+                            "future-effective Withdrawal policy is persisted");
                     helper.assertValueEqual(
                             259_200_000L,
-                            withdrawalApprovalPolicyLifetime(databaseFile, policyRequestId),
+                            policyLifetime.longValue(),
                             "future-effective Withdrawal policy pins three-day lifetime");
                     helper.assertValueEqual(
                             "0:1,500:2,2000:3",
@@ -6289,7 +6294,7 @@ public final class CivicServerRuntimeGameTests {
         }
     }
 
-    private static long withdrawalApprovalPolicyLifetime(
+    private static Long withdrawalApprovalPolicyLifetime(
             Path databaseFile, String requestId) {
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
@@ -6301,8 +6306,7 @@ public final class CivicServerRuntimeGameTests {
             query.setString(2, requestId);
             try (var result = query.executeQuery()) {
                 if (!result.next()) {
-                    throw new IllegalStateException(
-                            "Unknown Withdrawal Approval Policy request " + requestId);
+                    return null;
                 }
                 return result.getLong(1);
             }

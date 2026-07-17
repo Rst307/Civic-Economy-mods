@@ -8,18 +8,20 @@ public record NationalStrengthSnapshotConfiguration(
         Duration fullCitizenContributionTime,
         int effectiveCitizenFullStrengthScale,
         int effectiveTerritoryFullStrengthScale,
+        Duration complianceWindow,
         Duration activityWindow,
         long activityFullStrengthScale) {
     public NationalStrengthSnapshotConfiguration {
         if (citizenshipTransferCooldown == null
                 || effectiveCitizenObservationWindow == null
                 || fullCitizenContributionTime == null
-                || activityWindow == null
+                || complianceWindow == null || activityWindow == null
                 || citizenshipTransferCooldown.isNegative()
                 || effectiveCitizenObservationWindow.isNegative()
                 || effectiveCitizenObservationWindow.isZero()
                 || fullCitizenContributionTime.isNegative()
                 || fullCitizenContributionTime.isZero()
+                || complianceWindow.isNegative() || complianceWindow.isZero()
                 || activityWindow.isNegative()
                 || activityWindow.isZero()
                 || effectiveCitizenFullStrengthScale <= 0

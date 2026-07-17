@@ -11,6 +11,7 @@ final class NationalStrengthStatusFormatter {
         var window = recalculation.activityWindow();
         var population = recalculation.effectiveCitizenPopulation();
         var territory = recalculation.effectiveTerritory();
+        var compliance = recalculation.mintCompliance();
         return "Nation " + recalculation.nationId().value()
                 + " strength=" + recalculation.assessment().totalBasisPoints()
                 + " effectiveCitizenBasisPoints="
@@ -29,6 +30,15 @@ final class NationalStrengthStatusFormatter {
                 + " suspendedClaims=" + territory.suspendedClaimCount()
                 + " unassessedClaims=" + territory.unassessedClaimCount()
                 + " territoryAvailable=" + territory.ownershipAvailable()
+                + " complianceBasisPoints="
+                + recalculation.assessment()
+                        .component(NationalStrengthComponent.COMPLIANCE)
+                        .normalizedInputBasisPoints()
+                + " complianceObservations=" + compliance.observationCount()
+                + " cleanCommits=" + compliance.cleanCommitCount()
+                + " recoveredCommits=" + compliance.recoveredCommitCount()
+                + " quarantinedRecoveries=" + compliance.quarantinedRecoveryCount()
+                + " openIncidents=" + compliance.openIncidentCount()
                 + " activityBasisPoints=" + window.normalizedBasisPoints()
                 + " acceptedValue=" + window.acceptedValueMinorUnits()
                 + " accepted=" + window.acceptedCount()
