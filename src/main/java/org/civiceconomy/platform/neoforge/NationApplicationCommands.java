@@ -59,6 +59,7 @@ import org.civiceconomy.nation.NationPopulationCalculator;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.RevokeNationFiscalPermission;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.strength.NationalStrengthRecalculation;
 import org.civiceconomy.territory.TerritoryFreeAllocation;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyVersion;
@@ -94,6 +95,9 @@ final class NationApplicationCommands {
                                         StringArgumentType.getString(context, "reason")))))
                 .then(Commands.literal("population")
                         .executes(context -> population(context.getSource())))
+                .then(Commands.literal("strength")
+                        .then(Commands.literal("status")
+                                .executes(context -> strengthStatus(context.getSource()))))
                 .then(roleCommand())
                 .then(budgetCommand())
                 .then(billCommand())
@@ -1829,6 +1833,35 @@ final class NationApplicationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Nation population query queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int strengthStatus(CommandSourceStack source)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        CivicServerRuntime.current()
+                .nationalStrengthStatus(player)
+                .whenComplete((recalculation, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "National Strength status", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatStrengthStatus(recalculation)),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("National Strength status queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    static String formatStrengthStatus(NationalStrengthRecalculation recalculation) {
+        var window = recalculation.activityWindow();
+        return "Nation " + recalculation.nationId().value()
+                + " strength=" + recalculation.assessment().totalBasisPoints()
+                + " activityBasisPoints=" + window.normalizedBasisPoints()
+                + " acceptedValue=" + window.acceptedValueMinorUnits()
+                + " accepted=" + window.acceptedCount()
+                + " excluded=" + window.excludedCount()
+                + " paused=" + recalculation.assessment().newMintAllocationPaused();
     }
 
     private static NationEffectiveCitizenPopulation calculatePopulation(

@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -146,6 +147,10 @@ import org.civiceconomy.territory.TerritoryMaintenanceRestorationHistory;
 import org.civiceconomy.territory.SettleAvailableTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryFiscalValidity;
 import org.civiceconomy.territory.TerritoryMaintenanceSettlementOutcome;
+import org.civiceconomy.strength.NationalStrengthComponent;
+import org.civiceconomy.strength.NationalStrengthComponents;
+import org.civiceconomy.strength.NationalStrengthRecalculation;
+import org.civiceconomy.strength.NationalStrengthRecalculator;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.FiscalLedger;
 import org.civiceconomy.fiscal.MoneyAmount;
@@ -581,6 +586,38 @@ public final class CivicServerRuntime {
                 .thenCompose(prepared -> current.writer.submitDatabase(database -> {
                     prepared.coordinator().recordExternalApplied(prepared.operation());
                     return prepared.coordinator().commit(prepared.operation());
+                }));
+    }
+
+    CompletableFuture<NationalStrengthRecalculation> nationalStrengthStatus(ServerPlayer actor) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> requireActorTeam(actorPlayerId))
+                .thenCompose(team -> current.writer.submitDatabase(database -> {
+                    NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+                    NationRegistry nations = new NationRegistry(database, teams);
+                    var nation = nations.findByFtbTeam(team.teamId())
+                            .orElseThrow(() -> new SecurityException(
+                                    "Your FTB Team is not bound to a formal Nation"));
+                    return new NationalStrengthRecalculator(
+                                    database,
+                                    Duration.ofDays(30).toMillis(),
+                                    10_000L)
+                            .recalculate(
+                                    nation.nationId(),
+                                    commandClock.millis(),
+                                    new NationalStrengthComponents(
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                            EnumSet.of(
+                                                    NationalStrengthComponent.EFFECTIVE_CITIZENS,
+                                                    NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE,
+                                                    NationalStrengthComponent.EFFECTIVE_TERRITORY,
+                                                    NationalStrengthComponent.COMPLIANCE)));
                 }));
     }
 

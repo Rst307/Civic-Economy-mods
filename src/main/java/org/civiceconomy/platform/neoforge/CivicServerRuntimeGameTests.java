@@ -1420,6 +1420,7 @@ public final class CivicServerRuntimeGameTests {
                         "cancel",
                         "activate",
                         "population",
+                        "strength",
                         "role",
                         "bill",
                         "budget",
