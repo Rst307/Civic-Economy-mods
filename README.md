@@ -305,6 +305,8 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin territory maintenance schedule <cycleDurationMillis> <baseMaintenancePerClaim> <enclaveMultiplierBasisPoints> <forceLoadSurcharge> <restorationFee> <restorationCooldownMillis> <destructionBasisPoints> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin reference-price show <itemId> "<componentFingerprint>"
 /civic economy admin reference-price schedule <itemId> "<componentFingerprint>" <unitPriceMinorUnits> <effectiveAtEpochMillis> <requestId> <reason>
+/civic economy admin production marginal-return show
+/civic economy admin production marginal-return schedule <facilitySoftCapMinorUnits> <facilityExcessWeightBasisPoints> <industrySoftCapMinorUnits> <industryExcessWeightBasisPoints> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
 数据库备份和恢复命令只允许 OP/控制台使用。服务器启动时会恢复未完成的备份操作并创建在线快照，此后每 30 分钟以及正常关服前各排队一次；所有在线 SQLite 和文件工作都在 `Civic-Economy-SQLite` 执行。快照写入 `<world>/civiceconomy/backups`，验证世界/依赖身份和当前 schema 后才原子发布，保留最新 8 份；操作状态、失败、SHA-256、大小和轮换均持久化审计。`trigger` 的管理员身份来自真实命令源，同一管理员的 `requestId` 可安全重放，不能更改理由。

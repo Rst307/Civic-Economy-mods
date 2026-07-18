@@ -35,7 +35,7 @@ class CivicDatabaseV49MigrationTest {
                     mintId, "mint", "register", nationId, "minecraft:overworld",
                     1, 64, 2, UUID.randomUUID(), UUID.randomUUID(), false,
                     recipeId, UUID.randomUUID(), "Mint", now);
-            assertEquals(77, database.schemaVersion());
+            assertEquals(78, database.schemaVersion());
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
@@ -47,7 +47,7 @@ class CivicDatabaseV49MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(77, migrated.schemaVersion());
+            assertEquals(78, migrated.schemaVersion());
             assertNotNull(migrated.registeredMint(mintId));
             try (var connection = DriverManager.getConnection(
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());

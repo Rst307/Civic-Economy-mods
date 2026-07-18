@@ -2623,6 +2623,9 @@ public final class CivicServerRuntimeGameTests {
         String maintenanceRequestId = "territory-maintenance-command-" + UUID.randomUUID();
         String referencePriceRequestId = "reference-price-command-" + UUID.randomUUID();
         String unauthorizedPriceRequestId = "reference-price-unauthorized-" + UUID.randomUUID();
+        String marginalReturnRequestId = "marginal-return-command-" + UUID.randomUUID();
+        String unauthorizedMarginalReturnRequestId =
+                "marginal-return-unauthorized-" + UUID.randomUUID();
         long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
         var server = helper.getLevel().getServer();
         Path databaseFile = server.getWorldPath(LevelResource.ROOT)
@@ -2648,6 +2651,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin reference-price schedule minecraft:iron_ingot \"components:{}\" 25 "
                         + effectiveAt + " " + referencePriceRequestId
                         + " GameTest initial Global Reference Price");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin production marginal-return schedule 100000 5000 500000 2500 "
+                        + effectiveAt + " " + marginalReturnRequestId
+                        + " GameTest Production Marginal Return policy");
         ServerPlayer nonOperator = new ServerPlayer(
                 server,
                 helper.getLevel(),
@@ -2658,6 +2666,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin reference-price schedule minecraft:gold_ingot \"components:{}\" 99 "
                         + effectiveAt + " " + unauthorizedPriceRequestId
                         + " Untrusted reference price");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin production marginal-return schedule 1 1 1 1 "
+                        + effectiveAt + " " + unauthorizedMarginalReturnRequestId
+                        + " Untrusted Production Marginal Return policy");
 
         helper.succeedWhen(() -> {
             assertTerritoryPolicyScheduled(helper, databaseFile, requestId, effectiveAt);
@@ -2669,6 +2682,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, referencePriceRequestId, effectiveAt);
             assertGlobalReferencePriceAbsent(
                     helper, databaseFile, unauthorizedPriceRequestId);
+            assertProductionMarginalReturnPolicyScheduled(
+                    helper, databaseFile, marginalReturnRequestId, effectiveAt);
+            assertProductionMarginalReturnPolicyAbsent(
+                    helper, databaseFile, unauthorizedMarginalReturnRequestId);
         });
     }
 
@@ -7681,7 +7698,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(77, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(78, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -7895,6 +7912,80 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Global Reference Price", failure);
+        }
+    }
+
+    private static void assertProductionMarginalReturnPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity,
+                               facility_soft_cap_minor_units,
+                               facility_excess_weight_basis_points,
+                               industry_soft_cap_minor_units,
+                               industry_excess_weight_basis_points,
+                               effective_at_epoch_millis, reason
+                        FROM production_marginal_return_policy
+                        WHERE service_identity = 'civiceconomy-production-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(
+                        result.next(), "persistent Production Marginal Return policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Production Marginal Return administrator");
+                helper.assertValueEqual(
+                        100_000L, result.getLong(2), "facility marginal-return soft cap");
+                helper.assertValueEqual(
+                        5_000, result.getInt(3), "facility marginal-return excess weight");
+                helper.assertValueEqual(
+                        500_000L, result.getLong(4), "industry marginal-return soft cap");
+                helper.assertValueEqual(
+                        2_500, result.getInt(5), "industry marginal-return excess weight");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(6),
+                        "Production Marginal Return policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Production Marginal Return policy",
+                        result.getString(7),
+                        "Production Marginal Return policy reason");
+                helper.assertFalse(
+                        result.next(), "duplicate Production Marginal Return policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Production Marginal Return policy command result",
+                    failure);
+        }
+    }
+
+    private static void assertProductionMarginalReturnPolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM production_marginal_return_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized marginal-return policy count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Production Marginal Return policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Production Marginal Return policy",
+                    failure);
         }
     }
 

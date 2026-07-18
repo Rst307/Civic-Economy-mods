@@ -38,7 +38,11 @@ import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
 import org.civiceconomy.production.GlobalReferencePriceVersion;
+import org.civiceconomy.production.ProductionMarginalReturnPolicy;
+import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
+import org.civiceconomy.production.ProductionMarginalReturnPolicyVersion;
 import org.civiceconomy.production.ScheduleGlobalReferencePrice;
+import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -58,6 +62,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-territory-maintenance-policy");
     private static final ServiceIdentity GLOBAL_REFERENCE_PRICE_SERVICE =
             new ServiceIdentity("civiceconomy-reference-price");
+    private static final ServiceIdentity PRODUCTION_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-production-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -98,7 +104,8 @@ public final class FiscalAdministrationCommands {
                 .then(budgetDisbursement)
                 .then(databaseBackupCommand())
                 .then(territoryPolicyCommand())
-                .then(globalReferencePriceCommand());
+                .then(globalReferencePriceCommand())
+                .then(productionPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
                         .then(FiscalBillCommands.command())
@@ -619,6 +626,134 @@ public final class FiscalAdministrationCommands {
                 + " unitPriceMinorUnits=" + price.unitPriceMinorUnits()
                 + " effectiveAt=" + price.effectiveAt()
                 + " actor=" + price.actorIdentity();
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            productionPolicyCommand() {
+        var reason = Commands.argument("reason", StringArgumentType.greedyString())
+                .executes(context -> scheduleProductionMarginalReturnPolicy(
+                        context.getSource(),
+                        LongArgumentType.getLong(context, "facilitySoftCapMinorUnits"),
+                        IntegerArgumentType.getInteger(
+                                context, "facilityExcessWeightBasisPoints"),
+                        LongArgumentType.getLong(context, "industrySoftCapMinorUnits"),
+                        IntegerArgumentType.getInteger(
+                                context, "industryExcessWeightBasisPoints"),
+                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                        StringArgumentType.getString(context, "requestId"),
+                        StringArgumentType.getString(context, "reason")));
+        var requestId = Commands.argument("requestId", StringArgumentType.word())
+                .then(reason);
+        var effectiveAt = Commands.argument(
+                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                .then(requestId);
+        var industryWeight = Commands.argument(
+                        "industryExcessWeightBasisPoints",
+                        IntegerArgumentType.integer(0, 10_000))
+                .then(effectiveAt);
+        var industryCap = Commands.argument(
+                        "industrySoftCapMinorUnits", LongArgumentType.longArg(1L))
+                .then(industryWeight);
+        var facilityWeight = Commands.argument(
+                        "facilityExcessWeightBasisPoints",
+                        IntegerArgumentType.integer(0, 10_000))
+                .then(industryCap);
+        var facilityCap = Commands.argument(
+                        "facilitySoftCapMinorUnits", LongArgumentType.longArg(1L))
+                .then(facilityWeight);
+        return Commands.literal("production")
+                .then(Commands.literal("marginal-return")
+                        .then(Commands.literal("show")
+                                .executes(context -> showProductionMarginalReturnPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(facilityCap)));
+    }
+
+    private static int showProductionMarginalReturnPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new ProductionMarginalReturnPolicyRegistry(
+                                database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Production Marginal Return policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Production Marginal Return policy is not configured; "
+                                                + "production scoring remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        formatProductionMarginalReturnPolicy(
+                                                policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production Marginal Return policy query queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleProductionMarginalReturnPolicy(
+            CommandSourceStack source,
+            long facilitySoftCapMinorUnits,
+            int facilityExcessWeightBasisPoints,
+            long industrySoftCapMinorUnits,
+            int industryExcessWeightBasisPoints,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new ProductionMarginalReturnPolicyRegistry(
+                                database, clock)
+                        .schedule(new ScheduleProductionMarginalReturnPolicy(
+                                PRODUCTION_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new ProductionMarginalReturnPolicy(
+                                        facilitySoftCapMinorUnits,
+                                        facilityExcessWeightBasisPoints,
+                                        industrySoftCapMinorUnits,
+                                        industryExcessWeightBasisPoints),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled "
+                                                + formatProductionMarginalReturnPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Production Marginal Return policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production Marginal Return policy schedule queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatProductionMarginalReturnPolicy(
+            ProductionMarginalReturnPolicyVersion version) {
+        ProductionMarginalReturnPolicy policy = version.policy();
+        return "Production Marginal Return policy " + version.policyId()
+                + " facilitySoftCapMinorUnits=" + policy.facilitySoftCapMinorUnits()
+                + " facilityExcessWeightBasisPoints="
+                + policy.facilityExcessWeightBasisPoints()
+                + " industrySoftCapMinorUnits=" + policy.industrySoftCapMinorUnits()
+                + " industryExcessWeightBasisPoints="
+                + policy.industryExcessWeightBasisPoints()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
     }
 
     private static int showTerritoryMaintenancePolicy(CommandSourceStack source) {

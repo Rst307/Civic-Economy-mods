@@ -31,7 +31,7 @@ class CivicDatabaseV76MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(77, migrated.schemaVersion());
+            assertEquals(78, migrated.schemaVersion());
             assertNull(migrated.productionInventoryExport(
                     "civiceconomy-production-export", "missing"));
             assertNull(migrated.productionInventoryExportHandoff(

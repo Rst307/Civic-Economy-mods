@@ -31,7 +31,7 @@ class CivicDatabaseV75MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(77, migrated.schemaVersion());
+            assertEquals(78, migrated.schemaVersion());
             assertNotNull(migrated.productionInventoryAgeBatches(
                     UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")));
         }

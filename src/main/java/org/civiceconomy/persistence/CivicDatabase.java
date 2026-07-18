@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 77;
+    private static final int SCHEMA_VERSION = 78;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4468,6 +4468,21 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryExpansionPricingPolicy(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Expansion pricing policy", failure);
+        }
+    }
+
+    public synchronized StoredProductionMarginalReturnPolicy productionMarginalReturnPolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_marginal_return_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readProductionMarginalReturnPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Marginal Return policy request", failure);
         }
     }
 
@@ -9226,6 +9241,24 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredProductionMarginalReturnPolicy
+            currentProductionMarginalReturnPolicy(long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_marginal_return_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readProductionMarginalReturnPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Production Marginal Return policy", failure);
+        }
+    }
+
     public synchronized StoredGlobalReferencePrice currentGlobalReferencePrice(
             String itemId, String componentFingerprint, long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -9343,6 +9376,48 @@ public final class CivicDatabase implements AutoCloseable {
             return territoryExpansionPricingPolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to schedule Territory Expansion pricing", failure);
+        }
+    }
+
+    public synchronized StoredProductionMarginalReturnPolicy
+            scheduleProductionMarginalReturnPolicy(
+                    UUID policyId,
+                    String serviceIdentity,
+                    String requestId,
+                    String actorIdentity,
+                    long facilitySoftCapMinorUnits,
+                    int facilityExcessWeightBasisPoints,
+                    long industrySoftCapMinorUnits,
+                    int industryExcessWeightBasisPoints,
+                    long effectiveAtEpochMillis,
+                    String reason,
+                    long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO production_marginal_return_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    facility_soft_cap_minor_units,
+                    facility_excess_weight_basis_points,
+                    industry_soft_cap_minor_units,
+                    industry_excess_weight_basis_points,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setLong(5, facilitySoftCapMinorUnits);
+            insert.setInt(6, facilityExcessWeightBasisPoints);
+            insert.setLong(7, industrySoftCapMinorUnits);
+            insert.setInt(8, industryExcessWeightBasisPoints);
+            insert.setLong(9, effectiveAtEpochMillis);
+            insert.setString(10, reason);
+            insert.setLong(11, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return productionMarginalReturnPolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to schedule Production Marginal Return policy", failure);
         }
     }
 
@@ -16107,6 +16182,49 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 77");
             }
+            if (version < 78) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS production_marginal_return_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            facility_soft_cap_minor_units INTEGER NOT NULL
+                                CHECK (facility_soft_cap_minor_units > 0),
+                            facility_excess_weight_basis_points INTEGER NOT NULL
+                                CHECK (
+                                    facility_excess_weight_basis_points
+                                        BETWEEN 0 AND 10000
+                                ),
+                            industry_soft_cap_minor_units INTEGER NOT NULL
+                                CHECK (industry_soft_cap_minor_units > 0),
+                            industry_excess_weight_basis_points INTEGER NOT NULL
+                                CHECK (
+                                    industry_excess_weight_basis_points
+                                        BETWEEN 0 AND 10000
+                                ),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                            production_marginal_return_policy_current
+                        ON production_marginal_return_policy (
+                            effective_at_epoch_millis,
+                            recorded_at_epoch_millis,
+                            policy_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 78");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -16664,6 +16782,27 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("actor_identity"),
                     result.getLong("first_overage_chunk_cost"),
                     result.getLong("additional_marginal_cost"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredProductionMarginalReturnPolicy readProductionMarginalReturnPolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredProductionMarginalReturnPolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getLong("facility_soft_cap_minor_units"),
+                    result.getInt("facility_excess_weight_basis_points"),
+                    result.getLong("industry_soft_cap_minor_units"),
+                    result.getInt("industry_excess_weight_basis_points"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
