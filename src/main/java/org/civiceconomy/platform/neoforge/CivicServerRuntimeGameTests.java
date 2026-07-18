@@ -116,6 +116,7 @@ import org.civiceconomy.persistence.StoredFacilityAccountingReceipt;
 import org.civiceconomy.persistence.StoredFacilityProductionDecision;
 import org.civiceconomy.persistence.StoredProductionInventoryChange;
 import org.civiceconomy.persistence.StoredProductionInventoryExport;
+import org.civiceconomy.persistence.StoredProductionMarginalReturnContribution;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
 import org.civiceconomy.persistence.StoredRegisteredFacilityStateTransition;
 import org.civiceconomy.production.FacilityAdministration;
@@ -123,6 +124,14 @@ import org.civiceconomy.production.FacilityAccountingBaseline;
 import org.civiceconomy.production.FacilityAccountingStatus;
 import org.civiceconomy.production.ProductionInventoryExport;
 import org.civiceconomy.production.ProductionInventoryExportKind;
+import org.civiceconomy.production.GlobalReferencePriceRegistry;
+import org.civiceconomy.production.ProductionIndustryAssignmentRegistry;
+import org.civiceconomy.production.ProductionIndustryId;
+import org.civiceconomy.production.ProductionMarginalReturnPolicy;
+import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
+import org.civiceconomy.production.ScheduleGlobalReferencePrice;
+import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
+import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.mint.MintBatch;
 
@@ -1641,6 +1650,17 @@ public final class CivicServerRuntimeGameTests {
         String reason = "Register current Facility from authoritative player facts";
         Instant now = Instant.now();
         Clock setupClock = Clock.fixed(now, ZoneOffset.UTC);
+        Instant productionPolicyEffectiveAt = now.plusMillis(1L);
+        String wheatComponents = new ItemStack(Items.WHEAT)
+                .saveOptional(helper.getLevel().registryAccess())
+                .toString();
+        String flourComponents = new ItemStack(BuiltInRegistries.ITEM.get(
+                        ResourceLocation.parse("create:wheat_flour")))
+                .saveOptional(helper.getLevel().registryAccess())
+                .toString();
+        String seedComponents = new ItemStack(Items.WHEAT_SEEDS)
+                .saveOptional(helper.getLevel().registryAccess())
+                .toString();
         CivicServerRuntime runtime = CivicServerRuntime.current();
         AtomicBoolean setupReady = new AtomicBoolean();
         AtomicBoolean commandStarted = new AtomicBoolean();
@@ -1683,6 +1703,8 @@ public final class CivicServerRuntimeGameTests {
         AtomicReference<Throwable> exportFailure = new AtomicReference<>();
         AtomicReference<ProductionInventoryExport> persistedExport = new AtomicReference<>();
         AtomicReference<StoredProductionInventoryExport> persistedExportRow =
+                new AtomicReference<>();
+        AtomicReference<StoredProductionMarginalReturnContribution> persistedContribution =
                 new AtomicReference<>();
         AtomicReference<UUID> productionObservationId = new AtomicReference<>();
         AtomicBoolean territoryPauseFinished = new AtomicBoolean();
@@ -1763,6 +1785,54 @@ public final class CivicServerRuntimeGameTests {
                             nation.nationId().value(),
                             "Payment-free Facility registration fixture",
                             now.toEpochMilli());
+                    GlobalReferencePriceRegistry prices =
+                            new GlobalReferencePriceRegistry(database, setupClock);
+                    prices.schedule(new ScheduleGlobalReferencePrice(
+                            setupService,
+                            "facility-command-wheat-price-" + UUID.randomUUID(),
+                            "civic-gametest",
+                            "minecraft:wheat",
+                            wheatComponents,
+                            10L,
+                            productionPolicyEffectiveAt,
+                            "Real Create wheat input price"));
+                    prices.schedule(new ScheduleGlobalReferencePrice(
+                            setupService,
+                            "facility-command-flour-price-" + UUID.randomUUID(),
+                            "civic-gametest",
+                            "create:wheat_flour",
+                            flourComponents,
+                            25L,
+                            productionPolicyEffectiveAt,
+                            "Real Create flour output price"));
+                    prices.schedule(new ScheduleGlobalReferencePrice(
+                            setupService,
+                            "facility-command-seed-price-" + UUID.randomUUID(),
+                            "civic-gametest",
+                            "minecraft:wheat_seeds",
+                            seedComponents,
+                            1L,
+                            productionPolicyEffectiveAt,
+                            "Real Create optional seed output price"));
+                    new ProductionIndustryAssignmentRegistry(database, setupClock)
+                            .schedule(new ScheduleProductionIndustryAssignment(
+                                    setupService,
+                                    "facility-command-industry-" + UUID.randomUUID(),
+                                    "civic-gametest",
+                                    "6.0.6",
+                                    "create:milling/wheat",
+                                    new ProductionIndustryId("food-processing"),
+                                    productionPolicyEffectiveAt,
+                                    "Real Create milling industry"));
+                    new ProductionMarginalReturnPolicyRegistry(database, setupClock)
+                            .schedule(new ScheduleProductionMarginalReturnPolicy(
+                                    setupService,
+                                    "facility-command-marginal-policy-" + UUID.randomUUID(),
+                                    "civic-gametest",
+                                    new ProductionMarginalReturnPolicy(
+                                            100_000L, 5_000, 500_000L, 2_500),
+                                    productionPolicyEffectiveAt,
+                                    "Real Create marginal-return policy"));
                     return nation.nationId();
                 })
                 .whenComplete((ignored, setupFailure) ->
@@ -2234,6 +2304,9 @@ public final class CivicServerRuntimeGameTests {
                                 persistedExportRow.set(database.productionInventoryExport(
                                         FacilityAdministration.SERVICE_IDENTITY.value(),
                                         requestId + "-export"));
+                                persistedContribution.set(
+                                        database.productionMarginalReturnContribution(
+                                                productionObservationId.get()));
                                 return exported;
                             }))
                             .whenComplete((exported, failure) -> {
@@ -2263,6 +2336,16 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertTrue(
                             persistedExportRow.get() != null,
                             "persisted production export audit row");
+                    helper.assertTrue(
+                            persistedContribution.get() != null,
+                            "real export anchored a version-bound production contribution");
+                    helper.assertValueEqual(
+                            persistedExport.get().exportId(),
+                            persistedContribution.get().anchorExportId(),
+                            "production contribution anchor Export Event");
+                    helper.assertTrue(
+                            persistedContribution.get().valueAddedMinorUnits() > 0L,
+                            "real Create production contribution is positive");
                 })
                 .thenExecute(() -> {
                     if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
@@ -7715,7 +7798,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(79, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(80, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

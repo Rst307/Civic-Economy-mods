@@ -136,6 +136,8 @@ import org.civiceconomy.production.FacilityCorePosition;
 import org.civiceconomy.production.FacilityProductionMatcher;
 import org.civiceconomy.production.FacilityProductionObservation;
 import org.civiceconomy.production.FacilityProductionObservationRegistry;
+import org.civiceconomy.production.GlobalReferencePriceRegistry;
+import org.civiceconomy.production.ProductionIndustryAssignmentRegistry;
 import org.civiceconomy.production.ProductionInventoryAgeLedger;
 import org.civiceconomy.production.ProductionInventoryExport;
 import org.civiceconomy.production.ProductionInventoryExportCoordinator;
@@ -143,6 +145,9 @@ import org.civiceconomy.production.ProductionInventoryExportKind;
 import org.civiceconomy.production.ProductionInventoryExportRequest;
 import org.civiceconomy.production.ProductionInventoryExportHandoff;
 import org.civiceconomy.production.ProductionInventoryExportHandoffRegistry;
+import org.civiceconomy.production.ProductionMarginalReturnContributionRegistry;
+import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
+import org.civiceconomy.production.ProductionValueAddedCalculator;
 import org.civiceconomy.production.RecordProductionInventoryExportHandoff;
 import org.civiceconomy.production.ProductionStack;
 import org.civiceconomy.production.RegisteredFacility;
@@ -2028,7 +2033,21 @@ public final class CivicServerRuntime {
                                                     commandClock,
                                                     ignored -> actual)
                                             .export(preparation.request())));
-                });
+                })
+                .thenCompose(export -> current.writer.submitDatabase(database -> {
+                    new ProductionMarginalReturnContributionRegistry(
+                                    database,
+                                    new ProductionValueAddedCalculator(
+                                            new GlobalReferencePriceRegistry(
+                                                    database, commandClock)),
+                                    new ProductionIndustryAssignmentRegistry(
+                                            database, commandClock),
+                                    new ProductionMarginalReturnPolicyRegistry(
+                                            database, commandClock),
+                                    commandClock)
+                            .bindExport(export.exportId());
+                    return export;
+                }));
     }
 
     /**

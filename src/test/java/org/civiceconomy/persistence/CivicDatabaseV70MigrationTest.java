@@ -57,7 +57,7 @@ class CivicDatabaseV70MigrationTest {
         downgradeToV69(file);
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(79, migrated.schemaVersion());
+            assertEquals(80, migrated.schemaVersion());
             assertEquals(interfaceId,
                     migrated.facilityAccountingInterface(facilityId).interfaceId());
 

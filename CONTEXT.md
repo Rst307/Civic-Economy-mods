@@ -288,6 +288,10 @@ _Avoid_: 硬性禁止生产、税款、货币销毁、产量清零
 由受信任服务器治理安排、在未来时刻生效的单设施与单产业软上限及超额权重规则；新版本不能改写旧生产证据或旧评估采用的策略。
 _Avoid_: 即时配置、自动税率、产量限制、玩家自定义倍率
 
+**证据时刻生产贡献绑定（Evidence-Time Production Contribution Binding）**:
+把一条出口锚定的正 Production Value Added 固定到证据发生时有效的 Registered Facility、Production Industry assignment 和 Production Marginal Return Policy；拆分出口与后续策略版本不能复制或改写这条贡献。
+_Avoid_: 当前策略重算、每次出口贡献、可变生产评分、玩家声明的策略
+
 **全服参考价（Global Reference Price）**:
 由初始配置与可信交易样本共同形成、供所有国家使用的统一核算价格。
 _Avoid_: 本地售价、管理员随意估价

@@ -55,7 +55,7 @@ class CivicDatabaseV71MigrationTest {
         downgradeToV70(file);
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(79, migrated.schemaVersion());
+            assertEquals(80, migrated.schemaVersion());
             assertEquals("FACILITY_BASELINING",
                     migrated.facilityProductionDecision(completionId).decision());
             assertNull(migrated.facilityAccountingBaseline(facilityId));

@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 79;
+    private static final int SCHEMA_VERSION = 80;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -3407,7 +3407,7 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
-    private StoredFacilityProductionDecision facilityProductionDecisionForReceipt(
+    public synchronized StoredFacilityProductionDecision facilityProductionDecisionForReceipt(
             UUID receiptId) {
         if (receiptId == null) {
             return null;
@@ -4486,6 +4486,19 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredProductionMarginalReturnPolicy productionMarginalReturnPolicy(
+            UUID policyId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_marginal_return_policy WHERE policy_id = ?
+                """)) {
+            query.setString(1, policyId.toString());
+            return readProductionMarginalReturnPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Marginal Return policy ID", failure);
+        }
+    }
+
     public synchronized StoredProductionIndustryAssignment productionIndustryAssignment(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -4498,6 +4511,33 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Production Industry assignment request", failure);
+        }
+    }
+
+    public synchronized StoredProductionIndustryAssignment productionIndustryAssignment(
+            UUID assignmentId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_industry_assignment WHERE assignment_id = ?
+                """)) {
+            query.setString(1, assignmentId.toString());
+            return readProductionIndustryAssignment(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Industry assignment ID", failure);
+        }
+    }
+
+    public synchronized StoredProductionMarginalReturnContribution
+            productionMarginalReturnContribution(UUID observationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_marginal_return_contribution
+                WHERE observation_id = ?
+                """)) {
+            query.setString(1, observationId.toString());
+            return readProductionMarginalReturnContribution(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Marginal Return contribution", failure);
         }
     }
 
@@ -9492,6 +9532,83 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to schedule Production Industry assignment", failure);
+        }
+    }
+
+    public synchronized StoredProductionMarginalReturnContribution
+            recordProductionMarginalReturnContribution(
+                    UUID observationId,
+                    UUID anchorExportId,
+                    UUID facilityId,
+                    UUID industryAssignmentId,
+                    UUID marginalReturnPolicyId,
+                    long valueAddedMinorUnits,
+                    long evidenceAtEpochMillis,
+                    long recordedAtEpochMillis) {
+        StoredProductionMarginalReturnContribution replay =
+                productionMarginalReturnContribution(observationId);
+        if (replay != null) {
+            if (!replay.facilityId().equals(facilityId)
+                    || !replay.industryAssignmentId().equals(industryAssignmentId)
+                    || !replay.marginalReturnPolicyId().equals(marginalReturnPolicyId)
+                    || replay.valueAddedMinorUnits() != valueAddedMinorUnits
+                    || replay.evidenceAtEpochMillis() != evidenceAtEpochMillis) {
+                throw new IllegalStateException(
+                        "Production Marginal Return contribution replay changed immutable facts");
+            }
+            return replay;
+        }
+        StoredCreateRecipeCompletion completion = createRecipeCompletion(observationId);
+        StoredFacilityProductionDecision decision = facilityProductionDecision(observationId);
+        StoredProductionIndustryAssignment industry =
+                productionIndustryAssignment(industryAssignmentId);
+        StoredProductionMarginalReturnPolicy policy =
+                productionMarginalReturnPolicy(marginalReturnPolicyId);
+        StoredProductionInventoryExportLineage anchorLineage =
+                productionInventoryExportLineage(anchorExportId);
+        StoredProductionIndustryAssignment currentIndustry = completion == null
+                ? null
+                : currentProductionIndustryAssignment(
+                        completion.createVersion(),
+                        completion.recipeId(),
+                        evidenceAtEpochMillis);
+        StoredProductionMarginalReturnPolicy currentPolicy =
+                currentProductionMarginalReturnPolicy(evidenceAtEpochMillis);
+        if (completion == null || decision == null || industry == null || policy == null
+                || anchorLineage == null
+                || !anchorLineage.sourceReceiptIds().contains(decision.receiptId())
+                || !"INCLUDED".equals(decision.decision())
+                || decision.facilityId() == null || !decision.facilityId().equals(facilityId)
+                || completion.observedAtEpochMillis() != evidenceAtEpochMillis
+                || currentIndustry == null
+                || !currentIndustry.assignmentId().equals(industryAssignmentId)
+                || currentPolicy == null
+                || !currentPolicy.policyId().equals(marginalReturnPolicyId)
+                || valueAddedMinorUnits <= 0L
+                || recordedAtEpochMillis < evidenceAtEpochMillis) {
+            throw new IllegalStateException(
+                    "Production Marginal Return contribution is not bound to trusted evidence-time facts");
+        }
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO production_marginal_return_contribution (
+                    observation_id, anchor_export_id, facility_id, industry_assignment_id,
+                    marginal_return_policy_id, value_added_minor_units,
+                    evidence_at_epoch_millis, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, observationId.toString());
+            insert.setString(2, anchorExportId.toString());
+            insert.setString(3, facilityId.toString());
+            insert.setString(4, industryAssignmentId.toString());
+            insert.setString(5, marginalReturnPolicyId.toString());
+            insert.setLong(6, valueAddedMinorUnits);
+            insert.setLong(7, evidenceAtEpochMillis);
+            insert.setLong(8, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return productionMarginalReturnContribution(observationId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to record Production Marginal Return contribution", failure);
         }
     }
 
@@ -16334,6 +16451,38 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 79");
             }
+            if (version < 80) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS production_marginal_return_contribution (
+                            observation_id TEXT PRIMARY KEY
+                                REFERENCES facility_production_decision(observation_id),
+                            anchor_export_id TEXT NOT NULL
+                                REFERENCES facility_production_inventory_export(export_id),
+                            facility_id TEXT NOT NULL
+                                REFERENCES registered_facility(facility_id),
+                            industry_assignment_id TEXT NOT NULL
+                                REFERENCES production_industry_assignment(assignment_id),
+                            marginal_return_policy_id TEXT NOT NULL
+                                REFERENCES production_marginal_return_policy(policy_id),
+                            value_added_minor_units INTEGER NOT NULL
+                                CHECK (value_added_minor_units > 0),
+                            evidence_at_epoch_millis INTEGER NOT NULL
+                                CHECK (evidence_at_epoch_millis >= 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (
+                                    recorded_at_epoch_millis >= evidence_at_epoch_millis
+                                )
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                            production_marginal_return_contribution_window
+                        ON production_marginal_return_contribution (
+                            evidence_at_epoch_millis, observation_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 80");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -16934,6 +17083,25 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("industry_id"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredProductionMarginalReturnContribution
+            readProductionMarginalReturnContribution(PreparedStatement query)
+                    throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredProductionMarginalReturnContribution(
+                    UUID.fromString(result.getString("observation_id")),
+                    UUID.fromString(result.getString("anchor_export_id")),
+                    UUID.fromString(result.getString("facility_id")),
+                    UUID.fromString(result.getString("industry_assignment_id")),
+                    UUID.fromString(result.getString("marginal_return_policy_id")),
+                    result.getLong("value_added_minor_units"),
+                    result.getLong("evidence_at_epoch_millis"),
                     result.getLong("recorded_at_epoch_millis"));
         }
     }
