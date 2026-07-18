@@ -13,6 +13,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.commands.arguments.UuidArgument;
 import net.minecraft.network.chat.Component;
 import net.neoforged.fml.ModList;
@@ -35,6 +36,9 @@ import org.civiceconomy.fiscal.TreasuryWithdrawalRecoveryStatus;
 import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
+import org.civiceconomy.production.GlobalReferencePriceRegistry;
+import org.civiceconomy.production.GlobalReferencePriceVersion;
+import org.civiceconomy.production.ScheduleGlobalReferencePrice;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -52,6 +56,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-territory-pricing");
     private static final ServiceIdentity TERRITORY_MAINTENANCE_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-territory-maintenance-policy");
+    private static final ServiceIdentity GLOBAL_REFERENCE_PRICE_SERVICE =
+            new ServiceIdentity("civiceconomy-reference-price");
 
     private FiscalAdministrationCommands() {}
 
@@ -91,7 +97,8 @@ public final class FiscalAdministrationCommands {
                 .then(withdrawal)
                 .then(budgetDisbursement)
                 .then(databaseBackupCommand())
-                .then(territoryPolicyCommand());
+                .then(territoryPolicyCommand())
+                .then(globalReferencePriceCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
                         .then(FiscalBillCommands.command())
@@ -494,6 +501,124 @@ public final class FiscalAdministrationCommands {
                                                                                                                         LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
                                                                                                                         StringArgumentType.getString(context, "requestId"),
                                                                                                                         StringArgumentType.getString(context, "reason"))))))))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            globalReferencePriceCommand() {
+        return Commands.literal("reference-price")
+                .then(Commands.literal("show")
+                        .then(Commands.argument("itemId", ResourceLocationArgument.id())
+                                .then(Commands.argument(
+                                                "componentFingerprint",
+                                                StringArgumentType.string())
+                                        .executes(context -> showGlobalReferencePrice(
+                                                context.getSource(),
+                                                ResourceLocationArgument.getId(
+                                                        context,
+                                                        "itemId").toString(),
+                                                StringArgumentType.getString(
+                                                        context,
+                                                        "componentFingerprint"))))))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument("itemId", ResourceLocationArgument.id())
+                                .then(Commands.argument(
+                                                "componentFingerprint",
+                                                StringArgumentType.string())
+                                        .then(Commands.argument(
+                                                        "unitPriceMinorUnits",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleGlobalReferencePrice(
+                                                                                        context.getSource(),
+                                                                                        ResourceLocationArgument.getId(context, "itemId").toString(),
+                                                                                        StringArgumentType.getString(context, "componentFingerprint"),
+                                                                                        LongArgumentType.getLong(context, "unitPriceMinorUnits"),
+                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                        StringArgumentType.getString(context, "reason"))))))))));
+    }
+
+    private static int showGlobalReferencePrice(
+            CommandSourceStack source,
+            String itemId,
+            String componentFingerprint) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new GlobalReferencePriceRegistry(database, clock)
+                        .current(itemId, componentFingerprint, Instant.now(clock)))
+                .whenComplete((price, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Global Reference Price query", failure);
+                    } else if (price.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Global Reference Price is not configured for "
+                                                + itemId + " components="
+                                                + componentFingerprint
+                                                + "; contribution remains zero"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatGlobalReferencePrice(
+                                        price.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Global Reference Price query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleGlobalReferencePrice(
+            CommandSourceStack source,
+            String itemId,
+            String componentFingerprint,
+            long unitPriceMinorUnits,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new GlobalReferencePriceRegistry(database, clock)
+                        .schedule(new ScheduleGlobalReferencePrice(
+                                GLOBAL_REFERENCE_PRICE_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                itemId,
+                                componentFingerprint,
+                                unitPriceMinorUnits,
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((price, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatGlobalReferencePrice(price)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(source, "Global Reference Price schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Global Reference Price schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatGlobalReferencePrice(GlobalReferencePriceVersion price) {
+        return "Global Reference Price " + price.priceId()
+                + " item=" + price.itemId()
+                + " components=" + price.componentFingerprint()
+                + " unitPriceMinorUnits=" + price.unitPriceMinorUnits()
+                + " effectiveAt=" + price.effectiveAt()
+                + " actor=" + price.actorIdentity();
     }
 
     private static int showTerritoryMaintenancePolicy(CommandSourceStack source) {

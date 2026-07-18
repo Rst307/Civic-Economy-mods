@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 73;
+    private static final int SCHEMA_VERSION = 74;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -3574,6 +3574,20 @@ public final class CivicDatabase implements AutoCloseable {
             return readTerritoryExpansionPricingPolicy(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read Territory Expansion pricing policy", failure);
+        }
+    }
+
+    public synchronized StoredGlobalReferencePrice globalReferencePrice(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM global_reference_price
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readGlobalReferencePrice(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Global Reference Price request", failure);
         }
     }
 
@@ -8318,6 +8332,26 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredGlobalReferencePrice currentGlobalReferencePrice(
+            String itemId, String componentFingerprint, long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM global_reference_price
+                WHERE item_id = ? AND component_fingerprint = ?
+                  AND effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         price_id DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, itemId);
+            query.setString(2, componentFingerprint);
+            query.setLong(3, asOfEpochMillis);
+            return readGlobalReferencePrice(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read current Global Reference Price", failure);
+        }
+    }
+
     public synchronized StoredTerritoryMaintenancePolicy currentTerritoryMaintenancePolicy(
             long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -8415,6 +8449,41 @@ public final class CivicDatabase implements AutoCloseable {
             return territoryExpansionPricingPolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to schedule Territory Expansion pricing", failure);
+        }
+    }
+
+    public synchronized StoredGlobalReferencePrice scheduleGlobalReferencePrice(
+            UUID priceId,
+            String serviceIdentity,
+            String requestId,
+            String actorIdentity,
+            String itemId,
+            String componentFingerprint,
+            long unitPriceMinorUnits,
+            long effectiveAtEpochMillis,
+            String reason,
+            long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO global_reference_price (
+                    price_id, service_identity, request_id, actor_identity,
+                    item_id, component_fingerprint, unit_price_minor_units,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, priceId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setString(5, itemId);
+            insert.setString(6, componentFingerprint);
+            insert.setLong(7, unitPriceMinorUnits);
+            insert.setLong(8, effectiveAtEpochMillis);
+            insert.setString(9, reason);
+            insert.setLong(10, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return globalReferencePrice(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to schedule Global Reference Price", failure);
         }
     }
 
@@ -14978,6 +15047,43 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 73");
             }
+            if (version < 74) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS global_reference_price (
+                            price_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            item_id TEXT NOT NULL
+                                CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            unit_price_minor_units INTEGER NOT NULL
+                                CHECK (unit_price_minor_units > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id),
+                            UNIQUE (
+                                item_id, component_fingerprint,
+                                effective_at_epoch_millis
+                            )
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS global_reference_price_current
+                        ON global_reference_price (
+                            item_id, component_fingerprint,
+                            effective_at_epoch_millis
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 74");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -15535,6 +15641,26 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("actor_identity"),
                     result.getLong("first_overage_chunk_cost"),
                     result.getLong("additional_marginal_cost"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredGlobalReferencePrice readGlobalReferencePrice(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredGlobalReferencePrice(
+                    UUID.fromString(result.getString("price_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getString("item_id"),
+                    result.getString("component_fingerprint"),
+                    result.getLong("unit_price_minor_units"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));

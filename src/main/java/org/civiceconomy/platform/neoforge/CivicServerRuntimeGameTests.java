@@ -2553,6 +2553,8 @@ public final class CivicServerRuntimeGameTests {
         String requestId = "territory-policy-command-" + UUID.randomUUID();
         String pricingRequestId = "territory-pricing-command-" + UUID.randomUUID();
         String maintenanceRequestId = "territory-maintenance-command-" + UUID.randomUUID();
+        String referencePriceRequestId = "reference-price-command-" + UUID.randomUUID();
+        String unauthorizedPriceRequestId = "reference-price-unauthorized-" + UUID.randomUUID();
         long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
         var server = helper.getLevel().getServer();
         Path databaseFile = server.getWorldPath(LevelResource.ROOT)
@@ -2573,6 +2575,21 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin territory maintenance schedule 604800000 75 15000 25 30 1209600000 6000 "
                         + maintenanceEffectiveAt + " " + maintenanceRequestId
                         + " GameTest territory maintenance");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin reference-price schedule minecraft:iron_ingot \"components:{}\" 25 "
+                        + effectiveAt + " " + referencePriceRequestId
+                        + " GameTest initial Global Reference Price");
+        ServerPlayer nonOperator = new ServerPlayer(
+                server,
+                helper.getLevel(),
+                new GameProfile(UUID.randomUUID(), "reference-price-non-op"),
+                ClientInformation.createDefault());
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin reference-price schedule minecraft:gold_ingot \"components:{}\" 99 "
+                        + effectiveAt + " " + unauthorizedPriceRequestId
+                        + " Untrusted reference price");
 
         helper.succeedWhen(() -> {
             assertTerritoryPolicyScheduled(helper, databaseFile, requestId, effectiveAt);
@@ -2580,6 +2597,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, pricingRequestId, effectiveAt);
             assertTerritoryMaintenancePolicyScheduled(
                     helper, databaseFile, maintenanceRequestId, maintenanceEffectiveAt);
+            assertGlobalReferencePriceScheduled(
+                    helper, databaseFile, referencePriceRequestId, effectiveAt);
+            assertGlobalReferencePriceAbsent(
+                    helper, databaseFile, unauthorizedPriceRequestId);
         });
     }
 
@@ -7592,7 +7613,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(73, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(74, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -7744,6 +7765,68 @@ public final class CivicServerRuntimeGameTests {
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to inspect territory pricing command result", failure);
+        }
+    }
+
+    private static void assertGlobalReferencePriceScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, item_id, component_fingerprint,
+                               unit_price_minor_units,
+                               effective_at_epoch_millis, reason
+                        FROM global_reference_price
+                        WHERE service_identity = 'civiceconomy-reference-price'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Global Reference Price");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Global Reference Price administrator");
+                helper.assertValueEqual(
+                        "minecraft:iron_ingot", result.getString(2), "reference-price item");
+                helper.assertValueEqual(
+                        "components:{}", result.getString(3), "reference-price components");
+                helper.assertValueEqual(25L, result.getLong(4), "reference-price minor units");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(5),
+                        "reference-price effective time");
+                helper.assertValueEqual(
+                        "GameTest initial Global Reference Price",
+                        result.getString(6),
+                        "reference-price reason");
+                helper.assertFalse(result.next(), "duplicate Global Reference Price");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Global Reference Price command result", failure);
+        }
+    }
+
+    private static void assertGlobalReferencePriceAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM global_reference_price
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized reference-price count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Global Reference Price");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Global Reference Price", failure);
         }
     }
 
