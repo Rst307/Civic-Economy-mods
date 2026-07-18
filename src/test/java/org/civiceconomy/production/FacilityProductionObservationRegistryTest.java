@@ -297,6 +297,58 @@ class FacilityProductionObservationRegistryTest {
         }
     }
 
+    @Test
+    void listsPersistedObservationsInsideAHalfOpenTimeWindow() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("observation-window-source.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            FacilityProductionObservationRegistry registry = registry(database);
+            registry.record(completion(), receipt());
+
+            assertEquals(
+                    List.of(COMPLETION),
+                    registry.observations(
+                                    completion().observedAtEpochMillis(),
+                                    receipt().observedAtEpochMillis() + 1L)
+                            .stream()
+                            .map(observation -> observation.completion().observationId())
+                            .toList());
+            assertEquals(
+                    List.of(),
+                    registry.observations(
+                                    receipt().observedAtEpochMillis(),
+                                    receipt().observedAtEpochMillis() + 1L)
+                            .stream()
+                            .map(observation -> observation.completion().observationId())
+                            .toList());
+        }
+    }
+
+    @Test
+    void windowCanReadPersistedObservationsThroughTheRegistry() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("observation-window-aggregation.sqlite3"))) {
+            registerFacilityAndInterface(database);
+            FacilityProductionObservationRegistry registry = registry(database);
+            registry.record(completion(), receipt());
+
+            ProductionValueAddedWindowAssessment assessment =
+                    new ProductionValueAddedWindow(
+                                    new ProductionValueAddedCalculator(
+                                            new GlobalReferencePriceRegistry(database, CLOCK)),
+                                    Duration.ofDays(30),
+                                    Duration.ofDays(7))
+                            .assess(registry, CLOCK.instant());
+
+            assertEquals(0, assessment.acceptedObservationCount());
+            assertEquals(1, assessment.excludedObservationCount());
+            assertEquals(
+                    1,
+                    assessment.excludedByDecision().get(
+                            ProductionValueAddedDecision.EXCLUDED_NOT_INCLUDED));
+        }
+    }
+
     private FacilityProductionObservationRegistry registry(CivicDatabase database) {
         FacilityProductionMatcher matcher = new FacilityProductionMatcher(
                 database,

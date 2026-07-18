@@ -117,6 +117,16 @@ public final class FacilityProductionObservationRegistry {
                 Instant.ofEpochMilli(decision.decidedAtEpochMillis()));
     }
 
+    public List<FacilityProductionObservation> observations(
+            long windowStartEpochMillis, long windowEndEpochMillis) {
+        return database.facilityProductionObservationIds(
+                        windowStartEpochMillis, windowEndEpochMillis)
+                .stream()
+                .map(this::observation)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+    }
+
     private static StoredCreateRecipeCompletion toStored(CreateRecipeCompletion completion) {
         return new StoredCreateRecipeCompletion(
                 completion.observationId(),

@@ -2999,6 +2999,35 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<UUID> facilityProductionObservationIds(
+            long windowStartEpochMillis, long windowEndEpochMillis) {
+        if (windowStartEpochMillis < 0L || windowEndEpochMillis <= windowStartEpochMillis) {
+            throw new IllegalArgumentException("Facility production observation window is invalid");
+        }
+        List<UUID> observations = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT c.observation_id
+                FROM create_recipe_completion c
+                JOIN facility_production_decision d
+                    ON d.observation_id = c.observation_id
+                WHERE c.observed_at_epoch_millis >= ?
+                  AND c.observed_at_epoch_millis < ?
+                ORDER BY c.observed_at_epoch_millis, c.observation_id
+                """)) {
+            query.setLong(1, windowStartEpochMillis);
+            query.setLong(2, windowEndEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    observations.add(UUID.fromString(result.getString("observation_id")));
+                }
+            }
+            return List.copyOf(observations);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to list Facility Production Observations", failure);
+        }
+    }
+
     public synchronized StoredCreateRecipeCompletion createRecipeCompletion(UUID observationId) {
         if (observationId == null) {
             return null;
