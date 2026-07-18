@@ -58,7 +58,6 @@ class NationalStrengthSnapshotBuilderTest {
                             Duration.ofDays(7),
                             Duration.ofDays(60),
                             Duration.ofHours(8),
-                            4,
                             30L * 24L * 60L * 60L * 1_000L,
                             10_000L)
                     .recalculateAll(3_000L);
@@ -102,6 +101,11 @@ class NationalStrengthSnapshotBuilderTest {
                     citizenId,
                     RECALCULATED_AT.minus(Duration.ofHours(8)).toEpochMilli(),
                     RECALCULATED_AT.toEpochMilli()));
+            scheduleEffectiveCitizenStrengthPolicy(
+                    database,
+                    "citizen-strength-policy",
+                    4,
+                    RECALCULATED_AT.minus(Duration.ofDays(1)));
 
             NationalStrengthRecalculation recalculation =
                     new NationalStrengthSnapshotBuilder(
@@ -109,7 +113,6 @@ class NationalStrengthSnapshotBuilderTest {
                                     Duration.ofDays(7),
                                     Duration.ofDays(60),
                                     Duration.ofHours(8),
-                                    4,
                                     Duration.ofDays(30).toMillis(),
                                     10_000L)
                             .recalculateAll(RECALCULATED_AT.toEpochMilli())
@@ -135,6 +138,134 @@ class NationalStrengthSnapshotBuilderTest {
                     recalculation.assessment().componentState(
                             NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE));
             assertTrue(recalculation.assessment().newMintAllocationPaused());
+        }
+    }
+
+    @Test
+    void completePopulationWithoutStrengthPolicyKeepsEffectiveCitizensPaused() {
+        NationId nationId = new NationId(
+                UUID.fromString("73333333-3333-3333-3333-333333333337"));
+        UUID citizenId = UUID.fromString("84444444-4444-4444-4444-444444444448");
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    nationId.value(),
+                    "civiceconomy-tests",
+                    "missing-citizen-strength-policy-nation",
+                    UUID.fromString("dccccccc-3333-3333-3333-33333333333d"),
+                    RECALCULATED_AT.minus(Duration.ofDays(10)).toEpochMilli());
+            Clock evidenceClock = Clock.fixed(
+                    RECALCULATED_AT.minus(Duration.ofDays(9)), ZoneOffset.UTC);
+            new CitizenshipRegistry(database, Duration.ofDays(7), evidenceClock)
+                    .join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy"),
+                            "missing-citizen-strength-policy-join",
+                            citizenId,
+                            nationId));
+            new OnlineTimeLedger(database).record(new RecordOnlineTime(
+                    new ServiceIdentity("civiceconomy-server"),
+                    "missing-citizen-strength-policy-online",
+                    citizenId,
+                    RECALCULATED_AT.minus(Duration.ofHours(8)).toEpochMilli(),
+                    RECALCULATED_AT.toEpochMilli()));
+
+            NationalStrengthRecalculation recalculation =
+                    new NationalStrengthSnapshotBuilder(
+                                    database,
+                                    Duration.ofDays(7),
+                                    Duration.ofDays(60),
+                                    Duration.ofHours(8),
+                                    Duration.ofDays(30).toMillis(),
+                                    10_000L)
+                            .recalculateAll(RECALCULATED_AT.toEpochMilli())
+                            .nations()
+                            .get(nationId);
+
+            assertEquals(
+                    0,
+                    recalculation.assessment()
+                            .component(NationalStrengthComponent.EFFECTIVE_CITIZENS)
+                            .normalizedInputBasisPoints());
+            assertEquals(
+                    NationalStrengthComponentState.PAUSED_ANOMALY,
+                    recalculation.assessment().componentState(
+                            NationalStrengthComponent.EFFECTIVE_CITIZENS));
+        }
+    }
+
+    @Test
+    void laterStrengthPolicyChangesOnlyLaterAssessmentWithoutRewritingPopulationEvidence() {
+        NationId nationId = new NationId(
+                UUID.fromString("93333333-3333-3333-3333-333333333339"));
+        UUID citizenId = UUID.fromString("a4444444-4444-4444-4444-44444444444a");
+        Instant laterPolicyAt = RECALCULATED_AT.plus(Duration.ofDays(1));
+        Instant laterAssessmentAt = RECALCULATED_AT.plus(Duration.ofDays(2));
+        try (CivicDatabase database = database()) {
+            database.registerNation(
+                    nationId.value(),
+                    "civiceconomy-tests",
+                    "versioned-citizen-strength-policy-nation",
+                    UUID.fromString("eccccccc-3333-3333-3333-33333333333e"),
+                    RECALCULATED_AT.minus(Duration.ofDays(10)).toEpochMilli());
+            Clock evidenceClock = Clock.fixed(
+                    RECALCULATED_AT.minus(Duration.ofDays(9)), ZoneOffset.UTC);
+            new CitizenshipRegistry(database, Duration.ofDays(7), evidenceClock)
+                    .join(new JoinCitizenship(
+                            new ServiceIdentity("civiceconomy"),
+                            "versioned-citizen-strength-policy-join",
+                            citizenId,
+                            nationId));
+            new OnlineTimeLedger(database).record(new RecordOnlineTime(
+                    new ServiceIdentity("civiceconomy-server"),
+                    "versioned-citizen-strength-policy-online",
+                    citizenId,
+                    RECALCULATED_AT.minus(Duration.ofHours(8)).toEpochMilli(),
+                    RECALCULATED_AT.toEpochMilli()));
+            scheduleEffectiveCitizenStrengthPolicy(
+                    database,
+                    "initial-versioned-citizen-strength-policy",
+                    4,
+                    RECALCULATED_AT.minus(Duration.ofDays(1)));
+            scheduleEffectiveCitizenStrengthPolicy(
+                    database,
+                    "later-versioned-citizen-strength-policy",
+                    16,
+                    laterPolicyAt);
+
+            NationalStrengthRecalculation first =
+                    new NationalStrengthSnapshotBuilder(
+                                    database,
+                                    Duration.ofDays(7),
+                                    Duration.ofDays(60),
+                                    Duration.ofHours(8),
+                                    Duration.ofDays(30).toMillis(),
+                                    10_000L)
+                            .recalculateAll(RECALCULATED_AT.toEpochMilli())
+                            .nations()
+                            .get(nationId);
+            NationalStrengthRecalculation second =
+                    new NationalStrengthSnapshotBuilder(
+                                    database,
+                                    Duration.ofDays(7),
+                                    Duration.ofDays(60),
+                                    Duration.ofHours(8),
+                                    Duration.ofDays(30).toMillis(),
+                                    10_000L)
+                            .recalculateAll(laterAssessmentAt.toEpochMilli())
+                            .nations()
+                            .get(nationId);
+
+            assertEquals(1D, first.effectiveCitizenPopulation().populationEquivalent());
+            assertEquals(1D, second.effectiveCitizenPopulation().populationEquivalent());
+            assertEquals(
+                    5_000,
+                    first.assessment()
+                            .component(NationalStrengthComponent.EFFECTIVE_CITIZENS)
+                            .normalizedInputBasisPoints());
+            assertEquals(
+                    2_500,
+                    second.assessment()
+                            .component(NationalStrengthComponent.EFFECTIVE_CITIZENS)
+                            .normalizedInputBasisPoints());
         }
     }
 
@@ -209,7 +340,6 @@ class NationalStrengthSnapshotBuilderTest {
                                             Duration.ofDays(60),
                                             Duration.ofHours(8),
                                             4,
-                                            4,
                                             Duration.ofDays(30),
                                             Duration.ofDays(30),
                                             10_000L),
@@ -244,5 +374,23 @@ class NationalStrengthSnapshotBuilderTest {
                         "1.21-2.3.0.5",
                         "2101.1.10",
                         "2101.1.20"));
+    }
+
+    private static void scheduleEffectiveCitizenStrengthPolicy(
+            CivicDatabase database,
+            String requestId,
+            int fullStrengthScaleCitizenEquivalents,
+            Instant effectiveAt) {
+        Clock clock = Clock.fixed(effectiveAt.minusMillis(1L), ZoneOffset.UTC);
+        new EffectiveCitizenStrengthPolicyRegistry(database, clock)
+                .schedule(new ScheduleEffectiveCitizenStrengthPolicy(
+                        new ServiceIdentity(
+                                "civiceconomy-effective-citizen-strength-policy"),
+                        requestId,
+                        "civic-admin-console:test",
+                        new EffectiveCitizenStrengthPolicy(
+                                fullStrengthScaleCitizenEquivalents),
+                        effectiveAt,
+                        "Trusted Effective Citizen Strength policy"));
     }
 }

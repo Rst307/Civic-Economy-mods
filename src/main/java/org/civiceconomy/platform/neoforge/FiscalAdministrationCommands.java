@@ -51,6 +51,10 @@ import org.civiceconomy.production.ScheduleGlobalReferencePrice;
 import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
+import org.civiceconomy.strength.EffectiveCitizenStrengthPolicy;
+import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyRegistry;
+import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyVersion;
+import org.civiceconomy.strength.ScheduleEffectiveCitizenStrengthPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -76,6 +80,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-production-strength-policy");
     private static final ServiceIdentity PRODUCTION_INDUSTRY_SERVICE =
             new ServiceIdentity("civiceconomy-production-industry");
+    private static final ServiceIdentity EFFECTIVE_CITIZEN_STRENGTH_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-effective-citizen-strength-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -117,7 +123,8 @@ public final class FiscalAdministrationCommands {
                 .then(databaseBackupCommand())
                 .then(territoryPolicyCommand())
                 .then(globalReferencePriceCommand())
-                .then(productionPolicyCommand());
+                .then(productionPolicyCommand())
+                .then(strengthPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
                         .then(FiscalBillCommands.command())
@@ -685,6 +692,43 @@ public final class FiscalAdministrationCommands {
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            strengthPolicyCommand() {
+        return Commands.literal("strength")
+                .then(Commands.literal("effective-citizen")
+                        .then(Commands.literal("show")
+                                .executes(context -> showEffectiveCitizenStrengthPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "fullStrengthScaleCitizenEquivalents",
+                                                IntegerArgumentType.integer(1))
+                                        .then(Commands.argument(
+                                                        "effectiveAtEpochMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleEffectiveCitizenStrengthPolicy(
+                                                                                context.getSource(),
+                                                                                IntegerArgumentType.getInteger(
+                                                                                        context,
+                                                                                        "fullStrengthScaleCitizenEquivalents"),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "requestId"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "reason")))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             productionStrengthPolicyCommand() {
         return Commands.literal("strength-policy")
                 .then(Commands.literal("show")
@@ -994,6 +1038,79 @@ public final class FiscalAdministrationCommands {
                 + " fullWeightWindowMillis=" + policy.fullWeightWindowMillis()
                 + " fullStrengthScaleMinorUnits="
                 + policy.fullStrengthScaleMinorUnits()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showEffectiveCitizenStrengthPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new EffectiveCitizenStrengthPolicyRegistry(
+                                database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Effective Citizen Strength policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Effective Citizen Strength policy is not configured; "
+                                                + "the population component remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatEffectiveCitizenStrengthPolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Effective Citizen Strength policy query queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleEffectiveCitizenStrengthPolicy(
+            CommandSourceStack source,
+            int fullStrengthScaleCitizenEquivalents,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new EffectiveCitizenStrengthPolicyRegistry(
+                                database, clock)
+                        .schedule(new ScheduleEffectiveCitizenStrengthPolicy(
+                                EFFECTIVE_CITIZEN_STRENGTH_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new EffectiveCitizenStrengthPolicy(
+                                        fullStrengthScaleCitizenEquivalents),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Scheduled "
+                                        + formatEffectiveCitizenStrengthPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Effective Citizen Strength policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Effective Citizen Strength policy schedule queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatEffectiveCitizenStrengthPolicy(
+            EffectiveCitizenStrengthPolicyVersion version) {
+        return "Effective Citizen Strength policy " + version.policyId()
+                + " fullStrengthScaleCitizenEquivalents="
+                + version.policy().fullStrengthScaleCitizenEquivalents()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

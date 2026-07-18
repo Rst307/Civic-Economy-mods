@@ -37,7 +37,6 @@ public final class NationalStrengthSnapshotBuilder {
     private final Duration effectiveCitizenObservationWindow;
     private final Duration fullCitizenContributionTime;
     private final Duration complianceWindow;
-    private final DiminishingStrengthNormalizer effectiveCitizenNormalizer;
     private final DiminishingStrengthNormalizer effectiveTerritoryNormalizer;
     private final boolean productionScoringAvailable;
     private final Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam;
@@ -47,7 +46,6 @@ public final class NationalStrengthSnapshotBuilder {
             Duration citizenshipTransferCooldown,
             Duration effectiveCitizenObservationWindow,
             Duration fullCitizenContributionTime,
-            int effectiveCitizenFullStrengthScale,
             long activityWindowMillis,
             long activityFullStrengthScale) {
         if (database == null || citizenshipTransferCooldown == null
@@ -65,8 +63,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.effectiveCitizenObservationWindow = effectiveCitizenObservationWindow;
         this.fullCitizenContributionTime = fullCitizenContributionTime;
         this.complianceWindow = Duration.ofMillis(activityWindowMillis);
-        this.effectiveCitizenNormalizer =
-                new DiminishingStrengthNormalizer(effectiveCitizenFullStrengthScale);
         this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(100D);
         this.productionScoringAvailable = false;
         this.currentClaimsByTeam = Map.of();
@@ -98,8 +94,6 @@ public final class NationalStrengthSnapshotBuilder {
                 configuration.effectiveCitizenObservationWindow();
         this.fullCitizenContributionTime = configuration.fullCitizenContributionTime();
         this.complianceWindow = configuration.complianceWindow();
-        this.effectiveCitizenNormalizer = new DiminishingStrengthNormalizer(
-                configuration.effectiveCitizenFullStrengthScale());
         this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(
                 configuration.effectiveTerritoryFullStrengthScale());
         this.productionScoringAvailable = productionScoringAvailable;
@@ -130,6 +124,14 @@ public final class NationalStrengthSnapshotBuilder {
         TerritoryMaintenanceRegistry maintenance =
                 new TerritoryMaintenanceRegistry(database, recalculationClock);
         MintComplianceSource complianceSource = new MintComplianceSource(database);
+        Optional<EffectiveCitizenStrengthPolicyVersion> effectiveCitizenPolicy =
+                new EffectiveCitizenStrengthPolicyRegistry(database, recalculationClock)
+                        .current(recalculatedAt);
+        DiminishingStrengthNormalizer effectiveCitizenNormalizer = effectiveCitizenPolicy
+                .map(EffectiveCitizenStrengthPolicyVersion::policy)
+                .map(policy -> new DiminishingStrengthNormalizer(
+                        policy.fullStrengthScaleCitizenEquivalents()))
+                .orElse(null);
         Optional<ProductionStrengthPolicyVersion> productionPolicy =
                 new ProductionStrengthPolicyRegistry(database, recalculationClock)
                         .current(recalculatedAt);
@@ -184,6 +186,9 @@ public final class NationalStrengthSnapshotBuilder {
                             : unavailableProductionAssessment(nationId, recalculatedAtEpochMillis);
             EnumSet<NationalStrengthComponent> anomalies =
                     EnumSet.noneOf(NationalStrengthComponent.class);
+            if (effectiveCitizenNormalizer == null) {
+                anomalies.add(NationalStrengthComponent.EFFECTIVE_CITIZENS);
+            }
             if (productionSource == null) {
                 anomalies.add(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
             }
@@ -197,7 +202,10 @@ public final class NationalStrengthSnapshotBuilder {
                 anomalies.add(NationalStrengthComponent.COMPLIANCE);
             }
             NationalStrengthComponents conservativeInputs = new NationalStrengthComponents(
-                    effectiveCitizenNormalizer.normalize(population.populationEquivalent()),
+                    effectiveCitizenNormalizer == null
+                            ? 0
+                            : effectiveCitizenNormalizer.normalize(
+                                    population.populationEquivalent()),
                     productionNormalizer == null
                             ? 0
                             : productionNormalizer.normalize(

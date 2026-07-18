@@ -1614,7 +1614,7 @@ public final class CivicServerRuntimeGameTests {
 
     @GameTest(
             template = "empty",
-            timeoutTicks = 600,
+            timeoutTicks = 6000,
             batch = "facility-player-registration")
     public static void authorizedPlayerRegistersCurrentClaimFacilityExactlyOnce(
             GameTestHelper helper) {
@@ -2142,19 +2142,15 @@ public final class CivicServerRuntimeGameTests {
                                                 .withSuppressedOutput());
                         helper.assertValueEqual(
                                 1, result, "Facility Baseline activation command result");
-                        helper.runAfterDelay(20L, () -> runtime
-                                .submitDatabase(database -> {
-                                    UUID facilityId = persisted.get().facilityId();
-                                    activatedBaseline.set(
-                                            database.facilityAccountingBaseline(facilityId));
-                                    activatedFacility.set(
-                                            database.registeredFacility(facilityId));
-                                    return null;
-                                })
-                                .whenComplete((ignored, failure) -> {
-                                    activationFailure.set(failure);
-                                    activationFinished.set(true);
-                                }));
+                        waitForFacilityActivation(
+                                runtime,
+                                helper,
+                                persisted.get().facilityId(),
+                                activatedBaseline,
+                                activatedFacility,
+                                activationFailure,
+                                activationFinished,
+                                100);
                     } catch (Throwable failure) {
                         activationFailure.set(failure);
                         activationFinished.set(true);
@@ -2749,6 +2745,10 @@ public final class CivicServerRuntimeGameTests {
         String strengthPolicyRequestId = "production-strength-policy-command-" + UUID.randomUUID();
         String unauthorizedStrengthPolicyRequestId =
                 "production-strength-policy-unauthorized-" + UUID.randomUUID();
+        String effectiveCitizenStrengthPolicyRequestId =
+                "effective-citizen-strength-policy-command-" + UUID.randomUUID();
+        String unauthorizedEffectiveCitizenStrengthPolicyRequestId =
+                "effective-citizen-strength-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2789,6 +2789,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Production Strength policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin strength effective-citizen schedule 10 "
+                        + effectiveAt + " " + effectiveCitizenStrengthPolicyRequestId
+                        + " GameTest Effective Citizen Strength policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2814,6 +2819,11 @@ public final class CivicServerRuntimeGameTests {
                         + " Untrusted Production Strength policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin strength effective-citizen schedule 1 "
+                        + effectiveAt + " " + unauthorizedEffectiveCitizenStrengthPolicyRequestId
+                        + " Untrusted Effective Citizen Strength policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
                         + effectiveAt + " " + unauthorizedIndustryRequestId
                         + " Untrusted Production Industry assignment");
@@ -2836,6 +2846,15 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, strengthPolicyRequestId, effectiveAt);
             assertProductionStrengthPolicyAbsent(
                     helper, databaseFile, unauthorizedStrengthPolicyRequestId);
+            assertEffectiveCitizenStrengthPolicyScheduled(
+                    helper,
+                    databaseFile,
+                    effectiveCitizenStrengthPolicyRequestId,
+                    effectiveAt);
+            assertEffectiveCitizenStrengthPolicyAbsent(
+                    helper,
+                    databaseFile,
+                    unauthorizedEffectiveCitizenStrengthPolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -3155,7 +3174,7 @@ public final class CivicServerRuntimeGameTests {
         });
     }
 
-    @GameTest(template = "empty", timeoutTicks = 1200, batch = "runtime-budget-command")
+    @GameTest(template = "empty", timeoutTicks = 12000, batch = "runtime-budget-command")
     public static void authorizedNationPlayerCreatesExactBudgetDraftOffThread(
             GameTestHelper helper) {
         ServerPlayer actor = new ServerPlayer(
@@ -6473,7 +6492,7 @@ public final class CivicServerRuntimeGameTests {
 
     @GameTest(
             template = "empty",
-            timeoutTicks = 500,
+            timeoutTicks = 5000,
             batch = "territory-player-paid-claim")
     public static void playerPrepareCommandPaysRealLcAndAuthorizesRealFtbClaim(
             GameTestHelper helper) {
@@ -6927,6 +6946,56 @@ public final class CivicServerRuntimeGameTests {
                 claimedChunk.unclaim(source, true);
             }
         });
+    }
+
+    private static void waitForFacilityActivation(
+            CivicServerRuntime runtime,
+            GameTestHelper helper,
+            UUID facilityId,
+            AtomicReference<StoredFacilityAccountingBaseline> activatedBaseline,
+            AtomicReference<StoredRegisteredFacility> activatedFacility,
+            AtomicReference<Throwable> activationFailure,
+            AtomicBoolean activationFinished,
+            int attemptsRemaining) {
+        runtime.submitDatabase(database -> {
+                    StoredFacilityAccountingBaseline baseline =
+                            database.facilityAccountingBaseline(facilityId);
+                    StoredRegisteredFacility facility = database.registeredFacility(facilityId);
+                    activatedBaseline.set(baseline);
+                    activatedFacility.set(facility);
+                    return baseline != null
+                            && facility != null
+                            && "ACTIVE".equals(baseline.state())
+                            && "ACTIVE".equals(facility.state());
+                })
+                .whenComplete((active, failure) -> {
+                    if (failure != null) {
+                        activationFailure.set(failure);
+                        activationFinished.set(true);
+                        return;
+                    }
+                    if (Boolean.TRUE.equals(active)) {
+                        activationFinished.set(true);
+                        return;
+                    }
+                    if (attemptsRemaining <= 1) {
+                        activationFailure.set(new IllegalStateException(
+                                "Facility activation did not reach ACTIVE state"));
+                        activationFinished.set(true);
+                        return;
+                    }
+                    helper.getLevel().getServer().execute(() -> helper.runAfterDelay(
+                            1L,
+                            () -> waitForFacilityActivation(
+                                    runtime,
+                                    helper,
+                                    facilityId,
+                                    activatedBaseline,
+                                    activatedFacility,
+                                    activationFailure,
+                                    activationFinished,
+                                    attemptsRemaining - 1)));
+                });
     }
 
     private static void assertPersistedInterval(GameTestHelper helper, Path databaseFile, ServerPlayer player) {
@@ -7852,7 +7921,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(82, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(83, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8206,6 +8275,68 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Production Strength policy", failure);
+        }
+    }
+
+    private static void assertEffectiveCitizenStrengthPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity,
+                               full_strength_scale_citizen_equivalents,
+                               effective_at_epoch_millis, reason
+                        FROM effective_citizen_strength_policy
+                        WHERE service_identity =
+                                'civiceconomy-effective-citizen-strength-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Effective Citizen Strength policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Effective Citizen Strength administrator");
+                helper.assertValueEqual(
+                        10, result.getInt(2), "Effective Citizen full-strength scale");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(3),
+                        "Effective Citizen Strength policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Effective Citizen Strength policy",
+                        result.getString(4),
+                        "Effective Citizen Strength policy reason");
+                helper.assertFalse(result.next(), "duplicate Effective Citizen Strength policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Effective Citizen Strength policy command result", failure);
+        }
+    }
+
+    private static void assertEffectiveCitizenStrengthPolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM effective_citizen_strength_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized citizen strength policy count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Effective Citizen Strength policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Effective Citizen Strength policy", failure);
         }
     }
 

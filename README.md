@@ -198,13 +198,15 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 /civic economy nation territory prepare <requestId>
 /civic economy nation territory restore <requestId>
 /civic economy nation territory cancel <permitUuid> <requestId> <reason>
+/civic economy admin strength effective-citizen show
+/civic economy admin strength effective-citizen schedule <fullStrengthScaleCitizenEquivalents> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
 激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。
 
 `nation status` 会领取并显示当前申请可归属的 Candidate Online Evidence，报告有效候选人数、当前门槛、FORMAL/DEBUG WORLD 模式和到期时间。到期申请由后台 SQLite 处理器自动转换为 `EXPIRED`；常规服务器 tick 不执行数据库查询。
 
-`nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。National Strength 快照复用同一权威人口计算，以平方根边际递减将人口当量归一化；当前 10 个满额 Effective Citizen 当量达到该组件满量程，后续将移入服务器政策配置。
+`nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。National Strength 快照复用同一权威人口计算，以平方根边际递减将人口当量归一化；满量程所需人口当量由延迟生效、不可变且可审计的 Effective Citizen Strength Policy 决定。新世界在首个政策生效前失败关闭该组件，不采用隐藏默认值，也不改写已有 Citizenship 或在线证据。
 
 `nation strength status` 显示同一快照中的 Effective Citizen basis points、有效人数、人口当量、当前/EFFECTIVE/SUSPENDED/未评估 Claim 数、Effective Territory basis points、30 天 Mint Compliance basis points 与 observation 分类、30 天可审计活动 basis points、30 天滚动 Production Marginal Return、接受/排除计数、总国力和新铸币暂停状态。领土只统计当前仍由精确 FTB Team 占领且最新财政结论为 EFFECTIVE 的区块。Mint Compliance 每个 Batch 最多形成一个 observation：无事故完成为 `CLEAN_COMMIT`（100%），事故解决且 Batch 最终完成为 `RECOVERED_COMMIT`（50%），仍有事故为 `OPEN_INCIDENT`（0 且暂停），事故虽解决但 Batch 尚未 `COMMITTED` 为 `QUARANTINED_RECOVERY`（0 且暂停）；无样本时合规保持 ACTIVE、0 分。生产贡献按证据时刻排序，最近 7 天满权重，之后衰减到 30 天窗口边界，并连续累计单设施和单产业软上限；Create 缺失/不兼容，或窗口内存在已出口但没有完整价格、产业和边际策略绑定的真实 `INCLUDED` 观察时，生产/基础设施保持 `PAUSED_ANOMALY`。
 

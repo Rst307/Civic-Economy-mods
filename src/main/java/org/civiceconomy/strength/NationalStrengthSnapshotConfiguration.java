@@ -6,7 +6,6 @@ public record NationalStrengthSnapshotConfiguration(
         Duration citizenshipTransferCooldown,
         Duration effectiveCitizenObservationWindow,
         Duration fullCitizenContributionTime,
-        int effectiveCitizenFullStrengthScale,
         int effectiveTerritoryFullStrengthScale,
         Duration complianceWindow,
         Duration activityWindow,
@@ -24,7 +23,6 @@ public record NationalStrengthSnapshotConfiguration(
                 || complianceWindow.isNegative() || complianceWindow.isZero()
                 || activityWindow.isNegative()
                 || activityWindow.isZero()
-                || effectiveCitizenFullStrengthScale <= 0
                 || effectiveTerritoryFullStrengthScale <= 0
                 || activityFullStrengthScale <= 0L) {
             throw new IllegalArgumentException("National Strength snapshot configuration is invalid");
