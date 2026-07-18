@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 76;
+    private static final int SCHEMA_VERSION = 77;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2295,6 +2295,22 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredFacilityAccountingInterface facilityAccountingInterfaceById(
+            UUID interfaceId) {
+        if (interfaceId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_accounting_interface WHERE interface_id = ?
+                """)) {
+            query.setString(1, interfaceId.toString());
+            return readFacilityAccountingInterface(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Accounting Interface by ID", failure);
+        }
+    }
+
     public synchronized StoredFacilityAccountingInterface facilityAccountingInterface(
             String serviceIdentity, String requestId) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -3126,6 +3142,168 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredProductionInventoryExport productionInventoryExport(UUID exportId) {
+        if (exportId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_inventory_export
+                WHERE export_id = ?
+                """)) {
+            query.setString(1, exportId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? readProductionInventoryExport(result) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Production Inventory Export by ID", failure);
+        }
+    }
+
+    public synchronized StoredProductionInventoryExportHandoff
+            recordProductionInventoryExportHandoff(
+                    UUID handoffId,
+                    String serviceIdentity,
+                    String requestId,
+                    UUID exportId,
+                    UUID sourceInterfaceId,
+                    UUID destinationInterfaceId,
+                    UUID destinationReceiptId,
+                    UUID actorPlayerId,
+                    long recordedAtEpochMillis,
+                    String reason) {
+        validateProductionInventoryExportHandoff(
+                handoffId,
+                serviceIdentity,
+                requestId,
+                exportId,
+                sourceInterfaceId,
+                destinationInterfaceId,
+                destinationReceiptId,
+                actorPlayerId,
+                recordedAtEpochMillis,
+                reason);
+        StoredProductionInventoryExportHandoff expected =
+                new StoredProductionInventoryExportHandoff(
+                        handoffId,
+                        serviceIdentity,
+                        requestId,
+                        exportId,
+                        sourceInterfaceId,
+                        destinationInterfaceId,
+                        destinationReceiptId,
+                        actorPlayerId,
+                        recordedAtEpochMillis,
+                        reason);
+        StoredProductionInventoryExportHandoff replay =
+                productionInventoryExportHandoff(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.equals(expected)) {
+                throw new IllegalStateException(
+                        "Production export handoff replay changed its immutable payload");
+            }
+            return replay;
+        }
+
+        StoredProductionInventoryExport export = productionInventoryExport(exportId);
+        StoredFacilityAccountingInterface sourceInterface =
+                facilityAccountingInterfaceById(sourceInterfaceId);
+        StoredFacilityAccountingInterface destinationInterface =
+                facilityAccountingInterfaceById(destinationInterfaceId);
+        StoredFacilityAccountingReceipt destinationReceipt =
+                facilityAccountingReceipt(destinationReceiptId);
+        long matchingDestinationCount = 0L;
+        if (export != null && destinationReceipt != null) {
+            matchingDestinationCount = facilityAccountingReceiptChanges(destinationReceiptId)
+                    .stream()
+                    .filter(change -> change.itemId().equals(export.itemId())
+                            && change.componentFingerprint().equals(
+                                    export.componentFingerprint()))
+                    .mapToLong(StoredProductionInventoryChange::count)
+                    .sum();
+        }
+        if (export == null || !serviceIdentity.equals(export.serviceIdentity())
+                || !"EXPORT".equals(export.kind())
+                || !sourceInterfaceId.equals(export.interfaceId())
+                || sourceInterface == null || destinationInterface == null
+                || destinationReceipt == null
+                || !destinationReceipt.interfaceId().equals(destinationInterfaceId)
+                || sourceInterface.facilityId().equals(destinationInterface.facilityId())
+                || destinationReceipt.observedAtEpochMillis() < export.exportedAtEpochMillis()
+                || matchingDestinationCount < export.exportedCount()) {
+            throw new IllegalStateException(
+                    "Production export handoff facts do not describe one exact cross-facility delivery");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO facility_production_inventory_export_handoff (
+                        handoff_id, service_identity, request_id, export_id,
+                        source_interface_id, destination_interface_id, destination_receipt_id,
+                        actor_player_id, recorded_at_epoch_millis, reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, handoffId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, exportId.toString());
+                insert.setString(5, sourceInterfaceId.toString());
+                insert.setString(6, destinationInterfaceId.toString());
+                insert.setString(7, destinationReceiptId.toString());
+                insert.setString(8, actorPlayerId.toString());
+                insert.setLong(9, recordedAtEpochMillis);
+                insert.setString(10, reason);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return productionInventoryExportHandoff(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to record Production Inventory Export Handoff " + handoffId,
+                    failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Production Inventory Export Handoff transaction mode",
+                        failure);
+            }
+        }
+    }
+
+    public synchronized StoredProductionInventoryExportHandoff
+            productionInventoryExportHandoff(String serviceIdentity, String requestId) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_inventory_export_handoff
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? readProductionInventoryExportHandoff(result) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Export Handoff", failure);
+        }
+    }
+
     public synchronized StoredProductionInventoryExportLineage productionInventoryExportLineage(
             UUID exportId) {
         if (exportId == null) {
@@ -3318,6 +3496,27 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    private static void validateProductionInventoryExportHandoff(
+            UUID handoffId,
+            String serviceIdentity,
+            String requestId,
+            UUID exportId,
+            UUID sourceInterfaceId,
+            UUID destinationInterfaceId,
+            UUID destinationReceiptId,
+            UUID actorPlayerId,
+            long recordedAtEpochMillis,
+            String reason) {
+        if (handoffId == null || serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank() || exportId == null
+                || sourceInterfaceId == null || destinationInterfaceId == null
+                || sourceInterfaceId.equals(destinationInterfaceId)
+                || destinationReceiptId == null || actorPlayerId == null
+                || recordedAtEpochMillis < 0L || reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("Production Inventory Export Handoff values are invalid");
+        }
+    }
+
     private void insertProductionInventoryAgeBatches(
             StoredFacilityAccountingReceipt receipt,
             List<StoredProductionInventoryChange> receiptChanges) throws SQLException {
@@ -3395,6 +3594,21 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getLong("exported_at_epoch_millis"),
                 result.getString("reason"),
                 UUID.fromString(result.getString("consumption_id")));
+    }
+
+    private static StoredProductionInventoryExportHandoff readProductionInventoryExportHandoff(
+            ResultSet result) throws SQLException {
+        return new StoredProductionInventoryExportHandoff(
+                UUID.fromString(result.getString("handoff_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("export_id")),
+                UUID.fromString(result.getString("source_interface_id")),
+                UUID.fromString(result.getString("destination_interface_id")),
+                UUID.fromString(result.getString("destination_receipt_id")),
+                UUID.fromString(result.getString("actor_player_id")),
+                result.getLong("recorded_at_epoch_millis"),
+                result.getString("reason"));
     }
 
     public synchronized StoredFacilityProductionDecision recordFacilityProductionObservation(
@@ -15860,6 +16074,38 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 76");
+            }
+            if (version < 77) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_production_inventory_export_handoff (
+                            handoff_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            export_id TEXT NOT NULL UNIQUE
+                                REFERENCES facility_production_inventory_export(export_id),
+                            source_interface_id TEXT NOT NULL
+                                REFERENCES facility_accounting_interface(interface_id),
+                            destination_interface_id TEXT NOT NULL
+                                REFERENCES facility_accounting_interface(interface_id),
+                            destination_receipt_id TEXT NOT NULL
+                                REFERENCES facility_accounting_receipt_event(receipt_id),
+                            actor_player_id TEXT NOT NULL,
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                            facility_production_inventory_export_handoff_destination
+                        ON facility_production_inventory_export_handoff (
+                            destination_receipt_id, destination_interface_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 77");
             }
             connection.commit();
         } catch (SQLException failure) {

@@ -25,13 +25,17 @@ class CivicDatabaseV76MigrationTest {
                 var statement = connection.createStatement()) {
             statement.execute("DROP INDEX facility_production_inventory_export_interface_time");
             statement.execute("DROP TABLE facility_production_inventory_export");
+            statement.execute("DROP INDEX facility_production_inventory_export_handoff_destination");
+            statement.execute("DROP TABLE facility_production_inventory_export_handoff");
             statement.execute("PRAGMA user_version = 75");
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(76, migrated.schemaVersion());
+            assertEquals(77, migrated.schemaVersion());
             assertNull(migrated.productionInventoryExport(
                     "civiceconomy-production-export", "missing"));
+            assertNull(migrated.productionInventoryExportHandoff(
+                    "civiceconomy-production-handoff", "missing"));
         }
     }
 }

@@ -295,3 +295,7 @@ _Avoid_: 玩家收据、库存估值、自动付款
 **出口锚定生产链证据（Export-Anchored Production Chain Evidence）**:
 以可信生产库存出口记录的实际消费来源 Receipt 作为生产链证据来源；同一个来源 Receipt 被拆成多次出口时只形成一次生产贡献，缺少来源 Receipt 时不形成贡献。
 _Avoid_: 出口次数、机器次数、未绑定库存快照、自动推测跨设施运输
+
+**跨设施出口交接（Cross-Facility Export Handoff）**:
+由服务器明确确认的一次 `EXPORT` 与另一座 Registered Facility 的 Facility Accounting Receipt 之间的运输事实；交接必须指向真实目标核算接口和能覆盖该批货物的真实后续 Receipt，不能由物品身份或时间邻近自动推断。
+_Avoid_: 同设施搬运、SALE 交接、客户端提交的目标字符串、相似物品猜测

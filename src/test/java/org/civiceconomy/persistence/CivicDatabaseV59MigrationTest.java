@@ -47,7 +47,7 @@ class CivicDatabaseV59MigrationTest {
                             migrated, Clock.fixed(NOW, ZoneOffset.UTC))
                     .expireDue();
 
-            assertEquals(76, migrated.schemaVersion());
+            assertEquals(77, migrated.schemaVersion());
             assertEquals(1, expired.size());
             assertEquals(BudgetState.EXPIRED, expired.getFirst().state());
             assertEquals(

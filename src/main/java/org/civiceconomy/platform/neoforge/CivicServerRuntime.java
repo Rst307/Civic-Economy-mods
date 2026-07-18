@@ -141,6 +141,9 @@ import org.civiceconomy.production.ProductionInventoryExport;
 import org.civiceconomy.production.ProductionInventoryExportCoordinator;
 import org.civiceconomy.production.ProductionInventoryExportKind;
 import org.civiceconomy.production.ProductionInventoryExportRequest;
+import org.civiceconomy.production.ProductionInventoryExportHandoff;
+import org.civiceconomy.production.ProductionInventoryExportHandoffRegistry;
+import org.civiceconomy.production.RecordProductionInventoryExportHandoff;
 import org.civiceconomy.production.ProductionStack;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
@@ -2026,6 +2029,59 @@ public final class CivicServerRuntime {
                                                     ignored -> actual)
                                             .export(preparation.request())));
                 });
+    }
+
+    /**
+     * Trusted server-side seam for an adapter that has just observed a real destination Receipt.
+     * The destination interface is derived from the actor's real targeted Civic block; only the
+     * already-persisted Receipt ID crosses into the writer, and no item or timestamp matching is
+     * attempted.
+     */
+    CompletableFuture<ProductionInventoryExportHandoff> recordProductionInventoryExportHandoff(
+            ServerPlayer actor,
+            String requestId,
+            UUID exportId,
+            UUID destinationReceiptId,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityAccountingInterface(actor))
+                .thenCompose(snapshot -> current.writer.submitDatabase(database -> {
+                    FacilityAdministration administration = facilityAdministrationForExport(
+                            database, snapshot.team(), commandClock);
+                    administration.requireAuthority(
+                            actorPlayerId, snapshot.team().teamId());
+                    var facility = database.registeredFacilityAt(
+                            snapshot.position().dimensionId(),
+                            snapshot.position().blockX(),
+                            snapshot.position().blockZ());
+                    if (facility == null || !facility.ftbTeamId().equals(snapshot.team().teamId())) {
+                        throw new SecurityException(
+                                "Handoff target is not inside the actor's exact Facility");
+                    }
+                    var accountingInterface = database.facilityAccountingInterface(
+                            facility.facilityId());
+                    if (accountingInterface == null
+                            || accountingInterface.blockX() != snapshot.position().blockX()
+                            || accountingInterface.blockY() != snapshot.position().blockY()
+                            || accountingInterface.blockZ() != snapshot.position().blockZ()
+                            || !accountingInterface.dimensionId().equals(
+                                    snapshot.position().dimensionId())) {
+                        throw new SecurityException(
+                                "Handoff target is not the exact registered Facility Accounting Interface");
+                    }
+                    return new ProductionInventoryExportHandoffRegistry(
+                            database, commandClock)
+                            .record(new RecordProductionInventoryExportHandoff(
+                                    FacilityAdministration.SERVICE_IDENTITY,
+                                    requestId,
+                                    exportId,
+                                    accountingInterface.interfaceId(),
+                                    destinationReceiptId,
+                                    actorPlayerId,
+                                    reason));
+                }));
     }
 
     private static ProductionStack extractProductionExportStack(
