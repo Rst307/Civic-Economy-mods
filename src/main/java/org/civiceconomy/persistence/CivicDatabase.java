@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 75;
+    private static final int SCHEMA_VERSION = 76;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2846,6 +2846,30 @@ public final class CivicDatabase implements AutoCloseable {
             int consumedCount,
             long consumedAtEpochMillis,
             String reason) {
+        return recordProductionInventoryConsumptionInternal(
+                consumptionId,
+                serviceIdentity,
+                requestId,
+                interfaceId,
+                itemId,
+                componentFingerprint,
+                consumedCount,
+                consumedAtEpochMillis,
+                reason,
+                null);
+    }
+
+    private StoredProductionInventoryConsumption recordProductionInventoryConsumptionInternal(
+            UUID consumptionId,
+            String serviceIdentity,
+            String requestId,
+            UUID interfaceId,
+            String itemId,
+            String componentFingerprint,
+            int consumedCount,
+            long consumedAtEpochMillis,
+            String reason,
+            StoredProductionInventoryExport export) {
         validateProductionInventoryConsumption(
                 consumptionId,
                 serviceIdentity,
@@ -2868,6 +2892,14 @@ public final class CivicDatabase implements AutoCloseable {
                     || !replay.reason().equals(reason)) {
                 throw new IllegalStateException(
                         "Production inventory consumption replay changed its immutable payload");
+            }
+            if (export != null) {
+                StoredProductionInventoryExport existingExport = productionInventoryExport(
+                        serviceIdentity, requestId);
+                if (existingExport == null || !existingExport.equals(export)) {
+                    throw new IllegalStateException(
+                            "Production inventory export replay changed its immutable payload");
+                }
             }
             return replay;
         }
@@ -2927,6 +2959,32 @@ public final class CivicDatabase implements AutoCloseable {
                     remainingToConsume -= allocated;
                 }
             }
+            if (export != null) {
+                try (PreparedStatement insertExport = connection.prepareStatement("""
+                        INSERT INTO facility_production_inventory_export (
+                            export_id, service_identity, request_id, interface_id,
+                            actor_player_id, slot, item_id, component_fingerprint,
+                            exported_count, kind, destination_reference,
+                            exported_at_epoch_millis, reason, consumption_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """)) {
+                    insertExport.setString(1, export.exportId().toString());
+                    insertExport.setString(2, export.serviceIdentity());
+                    insertExport.setString(3, export.requestId());
+                    insertExport.setString(4, export.interfaceId().toString());
+                    insertExport.setString(5, export.actorPlayerId().toString());
+                    insertExport.setInt(6, export.slot());
+                    insertExport.setString(7, export.itemId());
+                    insertExport.setString(8, export.componentFingerprint());
+                    insertExport.setInt(9, export.exportedCount());
+                    insertExport.setString(10, export.kind());
+                    insertExport.setString(11, export.destinationReference());
+                    insertExport.setLong(12, export.exportedAtEpochMillis());
+                    insertExport.setString(13, export.reason());
+                    insertExport.setString(14, export.consumptionId().toString());
+                    insertExport.executeUpdate();
+                }
+            }
             connection.commit();
             return productionInventoryConsumption(serviceIdentity, requestId);
         } catch (SQLException failure) {
@@ -2975,6 +3033,96 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Production Inventory Consumption", failure);
+        }
+    }
+
+    public synchronized StoredProductionInventoryExport recordProductionInventoryExport(
+            UUID exportId,
+            String serviceIdentity,
+            String requestId,
+            UUID interfaceId,
+            UUID actorPlayerId,
+            int slot,
+            String itemId,
+            String componentFingerprint,
+            int exportedCount,
+            String kind,
+            String destinationReference,
+            long exportedAtEpochMillis,
+            String reason,
+            UUID consumptionId) {
+        validateProductionInventoryExport(
+                exportId,
+                serviceIdentity,
+                requestId,
+                interfaceId,
+                actorPlayerId,
+                slot,
+                itemId,
+                componentFingerprint,
+                exportedCount,
+                kind,
+                destinationReference,
+                exportedAtEpochMillis,
+                reason,
+                consumptionId);
+        StoredProductionInventoryExport expected = new StoredProductionInventoryExport(
+                exportId,
+                serviceIdentity,
+                requestId,
+                interfaceId,
+                actorPlayerId,
+                slot,
+                itemId,
+                componentFingerprint,
+                exportedCount,
+                kind,
+                destinationReference,
+                exportedAtEpochMillis,
+                reason,
+                consumptionId);
+        StoredProductionInventoryExport replay = productionInventoryExport(
+                serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.equals(expected)) {
+                throw new IllegalStateException(
+                        "Production inventory export replay changed its immutable payload");
+            }
+            return replay;
+        }
+        recordProductionInventoryConsumptionInternal(
+                consumptionId,
+                serviceIdentity,
+                requestId,
+                interfaceId,
+                itemId,
+                componentFingerprint,
+                exportedCount,
+                exportedAtEpochMillis,
+                "Production inventory " + kind.toLowerCase(java.util.Locale.ROOT)
+                        + " at " + destinationReference + ": " + reason,
+                expected);
+        return productionInventoryExport(serviceIdentity, requestId);
+    }
+
+    public synchronized StoredProductionInventoryExport productionInventoryExport(
+            String serviceIdentity, String requestId) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_inventory_export
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? readProductionInventoryExport(result) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Export", failure);
         }
     }
 
@@ -3095,6 +3243,33 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    private static void validateProductionInventoryExport(
+            UUID exportId,
+            String serviceIdentity,
+            String requestId,
+            UUID interfaceId,
+            UUID actorPlayerId,
+            int slot,
+            String itemId,
+            String componentFingerprint,
+            int exportedCount,
+            String kind,
+            String destinationReference,
+            long exportedAtEpochMillis,
+            String reason,
+            UUID consumptionId) {
+        if (exportId == null || serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank() || interfaceId == null
+                || actorPlayerId == null || slot < 0 || itemId == null || itemId.isBlank()
+                || componentFingerprint == null || componentFingerprint.isBlank()
+                || exportedCount <= 0 || kind == null || kind.isBlank()
+                || destinationReference == null || destinationReference.isBlank()
+                || exportedAtEpochMillis < 0L || reason == null || reason.isBlank()
+                || consumptionId == null) {
+            throw new IllegalArgumentException("Production Inventory Export values are invalid");
+        }
+    }
+
     private void insertProductionInventoryAgeBatches(
             StoredFacilityAccountingReceipt receipt,
             List<StoredProductionInventoryChange> receiptChanges) throws SQLException {
@@ -3153,6 +3328,25 @@ public final class CivicDatabase implements AutoCloseable {
                 result.getInt("consumed_count"),
                 result.getLong("consumed_at_epoch_millis"),
                 result.getString("reason"));
+    }
+
+    private static StoredProductionInventoryExport readProductionInventoryExport(
+            ResultSet result) throws SQLException {
+        return new StoredProductionInventoryExport(
+                UUID.fromString(result.getString("export_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("interface_id")),
+                UUID.fromString(result.getString("actor_player_id")),
+                result.getInt("slot"),
+                result.getString("item_id"),
+                result.getString("component_fingerprint"),
+                result.getInt("exported_count"),
+                result.getString("kind"),
+                result.getString("destination_reference"),
+                result.getLong("exported_at_epoch_millis"),
+                result.getString("reason"),
+                UUID.fromString(result.getString("consumption_id")));
     }
 
     public synchronized StoredFacilityProductionDecision recordFacilityProductionObservation(
@@ -15579,6 +15773,45 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 75");
+            }
+            if (version < 76) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_production_inventory_export (
+                            export_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            interface_id TEXT NOT NULL
+                                REFERENCES facility_accounting_interface(interface_id),
+                            actor_player_id TEXT NOT NULL,
+                            slot INTEGER NOT NULL CHECK (slot >= 0),
+                            item_id TEXT NOT NULL
+                                CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            exported_count INTEGER NOT NULL CHECK (exported_count > 0),
+                            kind TEXT NOT NULL CHECK (
+                                kind IN ('SALE', 'EXPORT', 'PUBLIC_WORKS')
+                            ),
+                            destination_reference TEXT NOT NULL
+                                CHECK (length(trim(destination_reference)) > 0),
+                            exported_at_epoch_millis INTEGER NOT NULL
+                                CHECK (exported_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            consumption_id TEXT NOT NULL UNIQUE
+                                REFERENCES facility_production_inventory_consumption(consumption_id),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                            facility_production_inventory_export_interface_time
+                        ON facility_production_inventory_export (
+                            interface_id, exported_at_epoch_millis, export_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 76");
             }
             connection.commit();
         } catch (SQLException failure) {

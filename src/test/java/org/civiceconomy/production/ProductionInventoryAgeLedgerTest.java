@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.persistence.CivicDatabase;
@@ -101,6 +102,47 @@ class ProductionInventoryAgeLedgerTest {
             assertEquals(0, batches.get(0).remainingCount());
             assertEquals(newerReceipt, batches.get(1).receiptId());
             assertEquals(2, batches.get(1).remainingCount());
+        }
+    }
+
+    @Test
+    void exportUsesServerObservedStackAndReplaysWithoutASecondExternalEffect() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("inventory-export.sqlite3"))) {
+            registerInterface(database);
+            ProductionInventoryAgeLedger ledger = new ProductionInventoryAgeLedger(database, CLOCK);
+            ledger.recordReceipt(receipt(RECEIPT, CLOCK.millis(), 4));
+            AtomicInteger externalCalls = new AtomicInteger();
+            ProductionInventoryExportCoordinator coordinator =
+                    new ProductionInventoryExportCoordinator(
+                            database,
+                            CLOCK,
+                            request -> {
+                                externalCalls.incrementAndGet();
+                                return new ProductionStack(
+                                        "create:wheat_flour", "components:{}", request.count());
+                            });
+            ProductionInventoryExportRequest request = new ProductionInventoryExportRequest(
+                    SERVICE,
+                    "export-request",
+                    INTERFACE,
+                    ACTOR,
+                    4,
+                    3,
+                    ProductionInventoryExportKind.EXPORT,
+                    "trusted-export-terminal",
+                    CLOCK.millis() + 1_000L,
+                    "Export produced goods");
+
+            ProductionInventoryExport exported = coordinator.export(request);
+
+            assertEquals(1, externalCalls.get());
+            assertEquals("create:wheat_flour", exported.exportedStack().itemId());
+            assertEquals(3, exported.exportedStack().count());
+            assertEquals(3, exported.consumption().consumedCount());
+            assertEquals(exported, coordinator.export(request));
+            assertEquals(1, externalCalls.get());
+            assertEquals(1, ledger.batches(INTERFACE).get(0).remainingCount());
         }
     }
 

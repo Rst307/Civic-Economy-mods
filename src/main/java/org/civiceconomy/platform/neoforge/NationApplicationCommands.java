@@ -59,6 +59,7 @@ import org.civiceconomy.nation.NationPopulationCalculator;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.RevokeNationFiscalPermission;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.production.ProductionInventoryExportKind;
 import org.civiceconomy.strength.NationalStrengthRecalculation;
 import org.civiceconomy.territory.TerritoryFreeAllocation;
 import org.civiceconomy.territory.TerritoryFreeAllocationPolicyRegistry;
@@ -1410,6 +1411,25 @@ final class NationApplicationCommands {
                                 context.getSource(),
                                 StringArgumentType.getString(context, "requestId"),
                                 StringArgumentType.getString(context, "reason"))));
+        var export = Commands.argument("requestId", StringArgumentType.word())
+                .then(Commands.argument("slot", IntegerArgumentType.integer(0))
+                        .then(Commands.argument("count", IntegerArgumentType.integer(1))
+                                .then(Commands.argument("kind", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason",
+                                                        StringArgumentType.greedyString())
+                                                .executes(context -> exportProductionInventory(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(
+                                                                context, "requestId"),
+                                                        IntegerArgumentType.getInteger(
+                                                                context, "slot"),
+                                                        IntegerArgumentType.getInteger(
+                                                                context, "count"),
+                                                        StringArgumentType.getString(
+                                                                context, "kind"),
+                                                        StringArgumentType.getString(
+                                                                context, "reason")))))));
         return Commands.literal("facility")
                 .then(Commands.literal("baseline")
                         .then(Commands.literal("capture").then(capture))
@@ -1417,8 +1437,47 @@ final class NationApplicationCommands {
                 .then(Commands.literal("interface")
                         .then(Commands.literal("bind").then(bind)))
                 .then(Commands.literal("register").then(register))
+                .then(Commands.literal("export").then(export))
                 .then(Commands.literal("status")
                         .executes(context -> facilityAccountingStatus(context.getSource())));
+    }
+
+    private static int exportProductionInventory(
+            CommandSourceStack source,
+            String requestId,
+            int slot,
+            int count,
+            String kindText,
+            String reason)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        final ProductionInventoryExportKind kind;
+        try {
+            kind = ProductionInventoryExportKind.valueOf(
+                    kindText.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException failure) {
+            source.sendFailure(Component.literal(
+                    "Production export kind must be SALE, EXPORT, or PUBLIC_WORKS"));
+            return 0;
+        }
+        CivicServerRuntime.current()
+                .exportProductionInventory(player, requestId, slot, count, kind, reason)
+                .whenComplete((export, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportFailure(source, "Production inventory export", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Exported " + export.exportedStack().count()
+                                                + "x " + export.exportedStack().itemId()
+                                                + " as " + export.request().kind()
+                                                + " export=" + export.exportId()),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production inventory export queued"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static int activateFacilityAccountingBaseline(

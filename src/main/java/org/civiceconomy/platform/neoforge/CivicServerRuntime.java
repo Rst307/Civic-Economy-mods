@@ -21,12 +21,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.level.ChunkPos;
@@ -135,6 +137,11 @@ import org.civiceconomy.production.FacilityProductionMatcher;
 import org.civiceconomy.production.FacilityProductionObservation;
 import org.civiceconomy.production.FacilityProductionObservationRegistry;
 import org.civiceconomy.production.ProductionInventoryAgeLedger;
+import org.civiceconomy.production.ProductionInventoryExport;
+import org.civiceconomy.production.ProductionInventoryExportCoordinator;
+import org.civiceconomy.production.ProductionInventoryExportKind;
+import org.civiceconomy.production.ProductionInventoryExportRequest;
+import org.civiceconomy.production.ProductionStack;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
 import org.civiceconomy.production.RegisteredFacilityTerritoryReconciler;
@@ -1939,6 +1946,140 @@ public final class CivicServerRuntime {
                                         actorPlayerId,
                                         actorSnapshot.team().teamId(),
                                         actorSnapshot.position())));
+    }
+
+    CompletableFuture<ProductionInventoryExport> exportProductionInventory(
+            ServerPlayer actor,
+            String requestId,
+            int slot,
+            int count,
+            ProductionInventoryExportKind kind,
+            String reason) {
+        RuntimeState current = requireState();
+        UUID actorPlayerId = actor.getUUID();
+        Clock commandClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
+        return onServer(current, () -> snapshotFacilityAccountingInterface(actor))
+                .thenCompose(snapshot -> current.writer.submitDatabase(database -> {
+                    FacilityAdministration administration = facilityAdministrationForExport(
+                            database, snapshot.team(), commandClock);
+                    administration.requireAuthority(
+                            actorPlayerId, snapshot.team().teamId());
+                    var facility = database.registeredFacilityAt(
+                            snapshot.position().dimensionId(),
+                            snapshot.position().blockX(),
+                            snapshot.position().blockZ());
+                    if (facility == null
+                            || !facility.ftbTeamId().equals(snapshot.team().teamId())) {
+                        throw new SecurityException(
+                                "Export target is not inside the actor's exact Facility");
+                    }
+                    var accountingInterface = database.facilityAccountingInterface(
+                            facility.facilityId());
+                    if (accountingInterface == null
+                            || accountingInterface.blockX() != snapshot.position().blockX()
+                            || accountingInterface.blockY() != snapshot.position().blockY()
+                            || accountingInterface.blockZ() != snapshot.position().blockZ()
+                            || !accountingInterface.dimensionId().equals(
+                                    snapshot.position().dimensionId())) {
+                        throw new SecurityException(
+                                "Export target is not the exact registered Facility Accounting Interface");
+                    }
+                    var replay = database.productionInventoryExport(
+                            FacilityAdministration.SERVICE_IDENTITY.value(), requestId);
+                    ProductionInventoryExportRequest request =
+                            new ProductionInventoryExportRequest(
+                                    FacilityAdministration.SERVICE_IDENTITY,
+                                    requestId,
+                                    accountingInterface.interfaceId(),
+                                    actorPlayerId,
+                                    slot,
+                                    count,
+                                    kind,
+                                    "facility-interface:" + accountingInterface.interfaceId(),
+                                    replay == null
+                                            ? commandClock.millis()
+                                            : replay.exportedAtEpochMillis(),
+                                    reason);
+                    return new ProductionExportPreparation(
+                            request,
+                            snapshot.position(),
+                            replay);
+                }))
+                .thenCompose(preparation -> {
+                    if (preparation.replay() != null) {
+                        return current.writer.submitDatabase(database ->
+                                new ProductionInventoryExportCoordinator(
+                                                database,
+                                                commandClock,
+                                                ignored -> {
+                                                    throw new IllegalStateException(
+                                                            "Replay must not invoke the export source");
+                                                })
+                                        .export(preparation.request()));
+                    }
+                    return onServer(current, () -> extractProductionExportStack(
+                                    actor, preparation.position(), slot, count))
+                            .thenCompose(actual -> current.writer.submitDatabase(database ->
+                                    new ProductionInventoryExportCoordinator(
+                                                    database,
+                                                    commandClock,
+                                                    ignored -> actual)
+                                            .export(preparation.request())));
+                });
+    }
+
+    private static ProductionStack extractProductionExportStack(
+            ServerPlayer actor,
+            FacilityAccountingInterfacePosition position,
+            int slot,
+            int count) {
+        BlockEntity blockEntity = actor.level().getBlockEntity(new BlockPos(
+                position.blockX(), position.blockY(), position.blockZ()));
+        if (!(blockEntity instanceof FacilityAccountingInterfaceBlockEntity accountingInterface)
+                || !actor.level().dimension().location().toString()
+                        .equals(position.dimensionId())) {
+            throw new SecurityException(
+                    "Export target is not a real server Facility Accounting Interface");
+        }
+        ItemStack removed = accountingInterface.removeItem(slot, count);
+        if (removed.isEmpty() || removed.getCount() != count) {
+            throw new IllegalStateException(
+                    "Facility Accounting Interface does not contain the requested export quantity");
+        }
+        ItemStack identity = removed.copyWithCount(1);
+        return new ProductionStack(
+                BuiltInRegistries.ITEM.getKey(removed.getItem()).toString(),
+                identity.saveOptional(actor.level().registryAccess()).toString(),
+                removed.getCount());
+    }
+
+    private static FacilityAdministration facilityAdministrationForExport(
+            CivicDatabase database, NationTeam team, Clock operationClock) {
+        NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
+        NationRegistry nations = new NationRegistry(database, teams);
+        CitizenshipRegistry citizenships = new CitizenshipRegistry(
+                database, CITIZENSHIP_TRANSFER_COOLDOWN, operationClock);
+        CitizenshipCorrectionGraceRegistry corrections =
+                new CitizenshipCorrectionGraceRegistry(database, operationClock);
+        FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
+                nations, citizenships, corrections, teams);
+        EffectiveTerritoryFacilityAuthority territory =
+                new EffectiveTerritoryFacilityAuthority(
+                        database,
+                        new EffectiveTerritoryQuery(
+                                new TerritoryMaintenanceRegistry(database, operationClock),
+                                NO_TERRITORY_OWNERSHIP),
+                        operationClock);
+        return new FacilityAdministration(
+                nations,
+                provider,
+                new NationFiscalAuthorityRegistry(database, provider, operationClock),
+                new RegisteredFacilityRegistry(
+                        database,
+                        territory,
+                        operationClock,
+                        REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                new FacilityAccountingInterfaceRegistry(database, operationClock));
     }
 
     private FacilityBaselineActorSnapshot snapshotFacilityBaselineActor(ServerPlayer actor) {
@@ -4430,6 +4571,11 @@ public final class CivicServerRuntime {
 
     private record FacilityInterfaceSnapshot(
             NationTeam team, FacilityAccountingInterfacePosition position) {}
+
+    private record ProductionExportPreparation(
+            ProductionInventoryExportRequest request,
+            FacilityAccountingInterfacePosition position,
+            org.civiceconomy.persistence.StoredProductionInventoryExport replay) {}
 
     private record FacilityBaselineActorSnapshot(
             NationTeam team, FacilityAccountingInterfacePosition position) {}

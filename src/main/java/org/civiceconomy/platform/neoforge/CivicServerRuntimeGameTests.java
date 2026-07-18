@@ -115,11 +115,14 @@ import org.civiceconomy.persistence.StoredFacilityBaselineMachine;
 import org.civiceconomy.persistence.StoredFacilityAccountingReceipt;
 import org.civiceconomy.persistence.StoredFacilityProductionDecision;
 import org.civiceconomy.persistence.StoredProductionInventoryChange;
+import org.civiceconomy.persistence.StoredProductionInventoryExport;
 import org.civiceconomy.persistence.StoredRegisteredFacility;
 import org.civiceconomy.persistence.StoredRegisteredFacilityStateTransition;
 import org.civiceconomy.production.FacilityAdministration;
 import org.civiceconomy.production.FacilityAccountingBaseline;
 import org.civiceconomy.production.FacilityAccountingStatus;
+import org.civiceconomy.production.ProductionInventoryExport;
+import org.civiceconomy.production.ProductionInventoryExportKind;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.mint.MintBatch;
 
@@ -1375,7 +1378,7 @@ public final class CivicServerRuntimeGameTests {
                 .getChild("backup");
         var facility = economy.getChild("nation").getChild("facility");
         helper.assertValueEqual(
-                Set.of("interface", "register", "baseline", "status"),
+                Set.of("interface", "register", "baseline", "export", "status"),
                 facility.getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
@@ -1676,6 +1679,11 @@ public final class CivicServerRuntimeGameTests {
                 new AtomicReference<>();
         AtomicReference<List<StoredProductionInventoryChange>> persistedReceiptChanges =
                 new AtomicReference<>(List.of());
+        AtomicBoolean exportFinished = new AtomicBoolean();
+        AtomicReference<Throwable> exportFailure = new AtomicReference<>();
+        AtomicReference<ProductionInventoryExport> persistedExport = new AtomicReference<>();
+        AtomicReference<StoredProductionInventoryExport> persistedExportRow =
+                new AtomicReference<>();
         AtomicReference<UUID> productionObservationId = new AtomicReference<>();
         AtomicBoolean territoryPauseFinished = new AtomicBoolean();
         AtomicReference<Throwable> territoryPauseFailure = new AtomicReference<>();
@@ -2195,6 +2203,66 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertTrue(
                             !persistedReceiptChanges.get().isEmpty(),
                             "persisted real interface inventory increase");
+                })
+                .thenExecute(() -> {
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        exportFinished.set(true);
+                        return;
+                    }
+                    runtime.exportProductionInventory(
+                                    player,
+                                    requestId + "-export",
+                                    5,
+                                    1,
+                                    ProductionInventoryExportKind.EXPORT,
+                                    "Export one server-observed produced item")
+                            .thenCompose(first -> runtime.exportProductionInventory(
+                                    player,
+                                    requestId + "-export",
+                                    5,
+                                    1,
+                                    ProductionInventoryExportKind.EXPORT,
+                                    "Export one server-observed produced item")
+                                    .thenApply(replay -> {
+                                        helper.assertValueEqual(
+                                                first,
+                                                replay,
+                                                "production export replay identity and payload");
+                                        return first;
+                                    }))
+                            .thenCompose(exported -> runtime.submitDatabase(database -> {
+                                persistedExportRow.set(database.productionInventoryExport(
+                                        FacilityAdministration.SERVICE_IDENTITY.value(),
+                                        requestId + "-export"));
+                                return exported;
+                            }))
+                            .whenComplete((exported, failure) -> {
+                                persistedExport.set(exported);
+                                exportFailure.set(failure);
+                                exportFinished.set(true);
+                            });
+                })
+                .thenWaitUntil(() -> {
+                    helper.assertTrue(exportFinished.get(), "production export completed");
+                    if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
+                        return;
+                    }
+                    helper.assertTrue(
+                            exportFailure.get() == null,
+                            exportFailure.get() == null
+                                    ? "production export state"
+                                    : "production export failure: "
+                                            + rootCause(exportFailure.get()).getMessage());
+                    helper.assertTrue(
+                            persistedExport.get() != null,
+                            "server-authoritative production export");
+                    helper.assertValueEqual(
+                            1,
+                            persistedExport.get().exportedStack().count(),
+                            "exported server-observed quantity");
+                    helper.assertTrue(
+                            persistedExportRow.get() != null,
+                            "persisted production export audit row");
                 })
                 .thenExecute(() -> {
                     if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
@@ -7613,7 +7681,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(75, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(76, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

@@ -283,3 +283,11 @@ _Avoid_: 本地售价、管理员随意估价
 **库存年龄批次（Production Inventory Age Batch）**:
 一次 Facility Accounting Receipt 中同一槽位与物品组件身份的进入数量，以及该数量首次进入核算接口的时间；接口内部搬运不刷新时间，真实消费按最早批次优先扣减。
 _Avoid_: 当前库存快照、搬运时间、库存总值
+
+**可信生产库存出口边界（Trusted Production Inventory Export Boundary）**:
+由服务器确认的设施核算接口出口事件；请求只表达槽位、数量和出口意图，实际物品与组件身份必须来自服务器真实移出的 ItemStack，不能由调用者提交字符串伪造。
+_Avoid_: 普通箱子搬运、客户端销售声明、任意物流网络扫描
+
+**生产库存出口记录（Production Inventory Export Event）**:
+一次可信出口与对应库存消费的不可变、可重放审计记录，绑定真实玩家、核算接口、出口类型和服务器记录的物品身份；SALE、EXPORT 与 PUBLIC_WORKS 只表示出口边界，不自动创造货币。
+_Avoid_: 玩家收据、库存估值、自动付款

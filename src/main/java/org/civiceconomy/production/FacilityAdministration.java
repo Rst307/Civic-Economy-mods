@@ -92,7 +92,7 @@ public final class FacilityAdministration {
                 reason));
     }
 
-    private NationId requireAuthority(UUID actorPlayerId, UUID ftbTeamId) {
+    public NationId requireAuthority(UUID actorPlayerId, UUID ftbTeamId) {
         NationFacts actorNation = provider.findForCitizen(actorPlayerId)
                 .orElseThrow(() -> new SecurityException(
                         "Facility actor has no effective formal Citizenship"));
