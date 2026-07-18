@@ -38,10 +38,14 @@ import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
 import org.civiceconomy.production.GlobalReferencePriceVersion;
+import org.civiceconomy.production.ProductionIndustryAssignmentRegistry;
+import org.civiceconomy.production.ProductionIndustryAssignmentVersion;
+import org.civiceconomy.production.ProductionIndustryId;
 import org.civiceconomy.production.ProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
 import org.civiceconomy.production.ProductionMarginalReturnPolicyVersion;
 import org.civiceconomy.production.ScheduleGlobalReferencePrice;
+import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
@@ -64,6 +68,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-reference-price");
     private static final ServiceIdentity PRODUCTION_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-production-policy");
+    private static final ServiceIdentity PRODUCTION_INDUSTRY_SERVICE =
+            new ServiceIdentity("civiceconomy-production-industry");
 
     private FiscalAdministrationCommands() {}
 
@@ -667,7 +673,125 @@ public final class FiscalAdministrationCommands {
                                 .executes(context -> showProductionMarginalReturnPolicy(
                                         context.getSource())))
                         .then(Commands.literal("schedule")
-                                .then(facilityCap)));
+                                .then(facilityCap)))
+                .then(productionIndustryCommand());
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            productionIndustryCommand() {
+        return Commands.literal("industry")
+                .then(Commands.literal("show")
+                        .then(Commands.argument("createVersion", StringArgumentType.word())
+                                .then(Commands.argument("recipeId", ResourceLocationArgument.id())
+                                        .executes(context -> showProductionIndustryAssignment(
+                                                context.getSource(),
+                                                StringArgumentType.getString(
+                                                        context, "createVersion"),
+                                                ResourceLocationArgument.getId(
+                                                        context, "recipeId").toString())))))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument("createVersion", StringArgumentType.word())
+                                .then(Commands.argument("recipeId", ResourceLocationArgument.id())
+                                        .then(Commands.argument(
+                                                        "industryId",
+                                                        StringArgumentType.word())
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleProductionIndustryAssignment(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(context, "createVersion"),
+                                                                                        ResourceLocationArgument.getId(context, "recipeId").toString(),
+                                                                                        StringArgumentType.getString(context, "industryId"),
+                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                        StringArgumentType.getString(context, "reason"))))))))));
+    }
+
+    private static int showProductionIndustryAssignment(
+            CommandSourceStack source, String createVersion, String recipeId) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new ProductionIndustryAssignmentRegistry(
+                                database, clock)
+                        .assignment(createVersion, recipeId, Instant.now(clock)))
+                .whenComplete((assignment, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Production Industry assignment query", failure);
+                    } else if (assignment.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Production Industry is not assigned for createVersion="
+                                                + createVersion + " recipe=" + recipeId
+                                                + "; contribution remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatProductionIndustryAssignment(
+                                        assignment.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production Industry assignment query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleProductionIndustryAssignment(
+            CommandSourceStack source,
+            String createVersion,
+            String recipeId,
+            String industryId,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new ProductionIndustryAssignmentRegistry(
+                                database, clock)
+                        .schedule(new ScheduleProductionIndustryAssignment(
+                                PRODUCTION_INDUSTRY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                createVersion,
+                                recipeId,
+                                new ProductionIndustryId(industryId),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((assignment, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled "
+                                                + formatProductionIndustryAssignment(assignment)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Production Industry assignment schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production Industry assignment schedule queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatProductionIndustryAssignment(
+            ProductionIndustryAssignmentVersion assignment) {
+        return "Production Industry assignment " + assignment.assignmentId()
+                + " createVersion=" + assignment.createVersion()
+                + " recipe=" + assignment.recipeId()
+                + " industry=" + assignment.industryId().value()
+                + " effectiveAt=" + assignment.effectiveAt()
+                + " actor=" + assignment.actorIdentity();
     }
 
     private static int showProductionMarginalReturnPolicy(CommandSourceStack source) {

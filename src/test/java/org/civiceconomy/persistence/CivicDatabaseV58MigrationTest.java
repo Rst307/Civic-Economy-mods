@@ -65,7 +65,7 @@ class CivicDatabaseV58MigrationTest {
                     ACTOR,
                     "Migration cancellation audit"));
 
-            assertEquals(78, migrated.schemaVersion());
+            assertEquals(79, migrated.schemaVersion());
             assertEquals("CANCELLED", cancelled.state());
             assertEquals("Migration cancellation audit", cancelled.cancellationReason());
         }

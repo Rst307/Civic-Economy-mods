@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 78;
+    private static final int SCHEMA_VERSION = 79;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4483,6 +4483,21 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Production Marginal Return policy request", failure);
+        }
+    }
+
+    public synchronized StoredProductionIndustryAssignment productionIndustryAssignment(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_industry_assignment
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readProductionIndustryAssignment(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Industry assignment request", failure);
         }
     }
 
@@ -9259,6 +9274,28 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredProductionIndustryAssignment
+            currentProductionIndustryAssignment(
+                    String createVersion, String recipeId, long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_industry_assignment
+                WHERE create_version = ? AND recipe_id = ?
+                  AND effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         assignment_id DESC
+                LIMIT 1
+                """)) {
+            query.setString(1, createVersion);
+            query.setString(2, recipeId);
+            query.setLong(3, asOfEpochMillis);
+            return readProductionIndustryAssignment(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Production Industry assignment", failure);
+        }
+    }
+
     public synchronized StoredGlobalReferencePrice currentGlobalReferencePrice(
             String itemId, String componentFingerprint, long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -9418,6 +9455,43 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to schedule Production Marginal Return policy", failure);
+        }
+    }
+
+    public synchronized StoredProductionIndustryAssignment
+            scheduleProductionIndustryAssignment(
+                    UUID assignmentId,
+                    String serviceIdentity,
+                    String requestId,
+                    String actorIdentity,
+                    String createVersion,
+                    String recipeId,
+                    String industryId,
+                    long effectiveAtEpochMillis,
+                    String reason,
+                    long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO production_industry_assignment (
+                    assignment_id, service_identity, request_id, actor_identity,
+                    create_version, recipe_id, industry_id,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, assignmentId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setString(5, createVersion);
+            insert.setString(6, recipeId);
+            insert.setString(7, industryId);
+            insert.setLong(8, effectiveAtEpochMillis);
+            insert.setString(9, reason);
+            insert.setLong(10, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return productionIndustryAssignment(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to schedule Production Industry assignment", failure);
         }
     }
 
@@ -16225,6 +16299,41 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 78");
             }
+            if (version < 79) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS production_industry_assignment (
+                            assignment_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            create_version TEXT NOT NULL
+                                CHECK (length(trim(create_version)) > 0),
+                            recipe_id TEXT NOT NULL
+                                CHECK (length(trim(recipe_id)) > 0),
+                            industry_id TEXT NOT NULL
+                                CHECK (length(trim(industry_id)) > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS production_industry_assignment_current
+                        ON production_industry_assignment (
+                            create_version, recipe_id,
+                            effective_at_epoch_millis,
+                            recorded_at_epoch_millis,
+                            assignment_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 79");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -16803,6 +16912,26 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getInt("facility_excess_weight_basis_points"),
                     result.getLong("industry_soft_cap_minor_units"),
                     result.getInt("industry_excess_weight_basis_points"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredProductionIndustryAssignment readProductionIndustryAssignment(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredProductionIndustryAssignment(
+                    UUID.fromString(result.getString("assignment_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getString("create_version"),
+                    result.getString("recipe_id"),
+                    result.getString("industry_id"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));

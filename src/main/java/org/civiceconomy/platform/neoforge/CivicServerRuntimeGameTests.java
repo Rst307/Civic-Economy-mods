@@ -2626,6 +2626,9 @@ public final class CivicServerRuntimeGameTests {
         String marginalReturnRequestId = "marginal-return-command-" + UUID.randomUUID();
         String unauthorizedMarginalReturnRequestId =
                 "marginal-return-unauthorized-" + UUID.randomUUID();
+        String industryRequestId = "production-industry-command-" + UUID.randomUUID();
+        String unauthorizedIndustryRequestId =
+                "production-industry-unauthorized-" + UUID.randomUUID();
         long effectiveAt = java.time.Instant.now().plusSeconds(60L).toEpochMilli();
         var server = helper.getLevel().getServer();
         Path databaseFile = server.getWorldPath(LevelResource.ROOT)
@@ -2656,6 +2659,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin production marginal-return schedule 100000 5000 500000 2500 "
                         + effectiveAt + " " + marginalReturnRequestId
                         + " GameTest Production Marginal Return policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
+                        + effectiveAt + " " + industryRequestId
+                        + " GameTest Production Industry assignment");
         ServerPlayer nonOperator = new ServerPlayer(
                 server,
                 helper.getLevel(),
@@ -2671,6 +2679,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin production marginal-return schedule 1 1 1 1 "
                         + effectiveAt + " " + unauthorizedMarginalReturnRequestId
                         + " Untrusted Production Marginal Return policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
+                        + effectiveAt + " " + unauthorizedIndustryRequestId
+                        + " Untrusted Production Industry assignment");
 
         helper.succeedWhen(() -> {
             assertTerritoryPolicyScheduled(helper, databaseFile, requestId, effectiveAt);
@@ -2686,6 +2699,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, marginalReturnRequestId, effectiveAt);
             assertProductionMarginalReturnPolicyAbsent(
                     helper, databaseFile, unauthorizedMarginalReturnRequestId);
+            assertProductionIndustryAssignmentScheduled(
+                    helper, databaseFile, industryRequestId, effectiveAt);
+            assertProductionIndustryAssignmentAbsent(
+                    helper, databaseFile, unauthorizedIndustryRequestId);
         });
     }
 
@@ -7698,7 +7715,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(78, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(79, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -7985,6 +8002,71 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Production Marginal Return policy",
+                    failure);
+        }
+    }
+
+    private static void assertProductionIndustryAssignmentScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, create_version, recipe_id, industry_id,
+                               effective_at_epoch_millis, reason
+                        FROM production_industry_assignment
+                        WHERE service_identity = 'civiceconomy-production-industry'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Production Industry assignment");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Production Industry administrator");
+                helper.assertValueEqual("6.0.6", result.getString(2), "exact Create version");
+                helper.assertValueEqual(
+                        "create:milling/wheat", result.getString(3), "exact recipe identity");
+                helper.assertValueEqual(
+                        "food-processing", result.getString(4), "trusted Production Industry");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(5),
+                        "Production Industry assignment effective time");
+                helper.assertValueEqual(
+                        "GameTest Production Industry assignment",
+                        result.getString(6),
+                        "Production Industry assignment reason");
+                helper.assertFalse(result.next(), "duplicate Production Industry assignment");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Production Industry assignment command result",
+                    failure);
+        }
+    }
+
+    private static void assertProductionIndustryAssignmentAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM production_industry_assignment
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized industry assignment count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Production Industry assignment");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Production Industry assignment",
                     failure);
         }
     }
