@@ -51,7 +51,16 @@ class FacilityProductionObservationRegistryTest {
 
             assertEquals(FacilityProductionDecisionKind.FACILITY_BASELINING,
                     expected.decision().kind());
+            assertEquals(
+                    receipt().observedAtEpochMillis(),
+                    new ProductionInventoryAgeLedger(database, CLOCK)
+                            .batches(INTERFACE)
+                            .get(0)
+                            .age()
+                            .firstObservedAtEpochMillis());
             assertEquals(expected, registry.record(completion(), receipt()));
+            assertEquals(1, new ProductionInventoryAgeLedger(database, CLOCK)
+                    .batches(INTERFACE).size());
         }
         try (CivicDatabase reopened = database(file)) {
             FacilityProductionObservation restored =

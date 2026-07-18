@@ -134,6 +134,7 @@ import org.civiceconomy.production.FacilityCorePosition;
 import org.civiceconomy.production.FacilityProductionMatcher;
 import org.civiceconomy.production.FacilityProductionObservation;
 import org.civiceconomy.production.FacilityProductionObservationRegistry;
+import org.civiceconomy.production.ProductionInventoryAgeLedger;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
 import org.civiceconomy.production.RegisteredFacilityTerritoryReconciler;
@@ -638,6 +639,7 @@ public final class CivicServerRuntime {
                 increase.position(),
                 increase.observedAtEpochMillis(),
                 increase.receivedOutputs());
+        new ProductionInventoryAgeLedger(database, operationClock).recordReceipt(receipt);
         EffectiveTerritoryFacilityAuthority territory =
                 new EffectiveTerritoryFacilityAuthority(
                         database,

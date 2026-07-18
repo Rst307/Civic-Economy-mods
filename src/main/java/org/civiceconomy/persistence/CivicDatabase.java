@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 74;
+    private static final int SCHEMA_VERSION = 75;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -2757,6 +2757,404 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized List<StoredProductionInventoryAgeBatch>
+            recordProductionInventoryAgeReceipt(
+                    StoredFacilityAccountingReceipt receipt,
+                    List<StoredProductionInventoryChange> receiptChanges) {
+        validateProductionInventoryAgeReceipt(receipt, receiptChanges);
+        StoredFacilityAccountingReceipt replay = facilityAccountingReceipt(receipt.receiptId());
+        if (replay != null) {
+            if (!replay.equals(receipt)
+                    || !facilityAccountingReceiptChanges(receipt.receiptId())
+                            .equals(receiptChanges)) {
+                throw new IllegalStateException(
+                        "Production inventory age receipt replay changed its immutable payload");
+            }
+            if (productionInventoryAgeBatchesForReceipt(receipt.receiptId()).isEmpty()) {
+                try {
+                    connection.setAutoCommit(false);
+                    insertProductionInventoryAgeBatches(receipt, receiptChanges);
+                    connection.commit();
+                } catch (SQLException failure) {
+                    try {
+                        connection.rollback();
+                    } catch (SQLException rollbackFailure) {
+                        failure.addSuppressed(rollbackFailure);
+                    }
+                    throw new IllegalStateException(
+                            "Unable to backfill Production Inventory Age receipt "
+                                    + receipt.receiptId(),
+                            failure);
+                } finally {
+                    try {
+                        connection.setAutoCommit(true);
+                    } catch (SQLException failure) {
+                        throw new IllegalStateException(
+                                "Unable to restore Production Inventory Age transaction mode",
+                                failure);
+                    }
+                }
+            }
+            return productionInventoryAgeBatchesForReceipt(receipt.receiptId());
+        }
+        try {
+            connection.setAutoCommit(false);
+            insertFacilityAccountingReceipt(receipt);
+            insertFacilityAccountingReceiptChanges(receiptChanges);
+            insertProductionInventoryAgeBatches(receipt, receiptChanges);
+            connection.commit();
+            return productionInventoryAgeBatchesForReceipt(receipt.receiptId());
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to record Production Inventory Age receipt "
+                            + receipt.receiptId(),
+                    failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Production Inventory Age transaction mode", failure);
+            }
+        }
+    }
+
+    public synchronized List<StoredProductionInventoryAgeBatch>
+            productionInventoryAgeBatches(UUID interfaceId) {
+        return productionInventoryAgeBatches(interfaceId, null, null);
+    }
+
+    public synchronized StoredProductionInventoryConsumption recordProductionInventoryConsumption(
+            UUID consumptionId,
+            String serviceIdentity,
+            String requestId,
+            UUID interfaceId,
+            String itemId,
+            String componentFingerprint,
+            int consumedCount,
+            long consumedAtEpochMillis,
+            String reason) {
+        validateProductionInventoryConsumption(
+                consumptionId,
+                serviceIdentity,
+                requestId,
+                interfaceId,
+                itemId,
+                componentFingerprint,
+                consumedCount,
+                consumedAtEpochMillis,
+                reason);
+        StoredProductionInventoryConsumption replay =
+                productionInventoryConsumption(serviceIdentity, requestId);
+        if (replay != null) {
+            if (!replay.consumptionId().equals(consumptionId)
+                    || !replay.interfaceId().equals(interfaceId)
+                    || !replay.itemId().equals(itemId)
+                    || !replay.componentFingerprint().equals(componentFingerprint)
+                    || replay.consumedCount() != consumedCount
+                    || replay.consumedAtEpochMillis() != consumedAtEpochMillis
+                    || !replay.reason().equals(reason)) {
+                throw new IllegalStateException(
+                        "Production inventory consumption replay changed its immutable payload");
+            }
+            return replay;
+        }
+
+        List<StoredProductionInventoryAgeBatch> candidates =
+                productionInventoryAgeBatches(interfaceId, itemId, componentFingerprint);
+        long available = candidates.stream()
+                .mapToLong(StoredProductionInventoryAgeBatch::remainingCount)
+                .sum();
+        if (available < consumedCount) {
+            throw new IllegalStateException(
+                    "Production inventory consumption exceeds the available aged inventory");
+        }
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO facility_production_inventory_consumption (
+                        consumption_id, service_identity, request_id, interface_id,
+                        item_id, component_fingerprint, consumed_count,
+                        consumed_at_epoch_millis, reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, consumptionId.toString());
+                insert.setString(2, serviceIdentity);
+                insert.setString(3, requestId);
+                insert.setString(4, interfaceId.toString());
+                insert.setString(5, itemId);
+                insert.setString(6, componentFingerprint);
+                insert.setInt(7, consumedCount);
+                insert.setLong(8, consumedAtEpochMillis);
+                insert.setString(9, reason);
+                insert.executeUpdate();
+            }
+            int remainingToConsume = consumedCount;
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE facility_production_inventory_age
+                    SET remaining_count = remaining_count - ?
+                    WHERE batch_id = ?
+                    """);
+                    PreparedStatement allocation = connection.prepareStatement("""
+                    INSERT INTO facility_production_inventory_consumption_allocation (
+                        consumption_id, batch_id, consumed_count
+                    ) VALUES (?, ?, ?)
+                    """)) {
+                for (StoredProductionInventoryAgeBatch candidate : candidates) {
+                    if (remainingToConsume == 0) {
+                        break;
+                    }
+                    int allocated = Math.min(remainingToConsume, candidate.remainingCount());
+                    update.setInt(1, allocated);
+                    update.setString(2, candidate.batchId().toString());
+                    update.executeUpdate();
+                    allocation.setString(1, consumptionId.toString());
+                    allocation.setString(2, candidate.batchId().toString());
+                    allocation.setInt(3, allocated);
+                    allocation.executeUpdate();
+                    remainingToConsume -= allocated;
+                }
+            }
+            connection.commit();
+            return productionInventoryConsumption(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to record Production Inventory Consumption "
+                            + consumptionId,
+                    failure);
+        } catch (RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore Production Inventory Consumption transaction mode",
+                        failure);
+            }
+        }
+    }
+
+    public synchronized StoredProductionInventoryConsumption productionInventoryConsumption(
+            String serviceIdentity, String requestId) {
+        if (serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_inventory_consumption
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? readProductionInventoryConsumption(result) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Consumption", failure);
+        }
+    }
+
+    private List<StoredProductionInventoryAgeBatch> productionInventoryAgeBatches(
+            UUID interfaceId, String itemId, String componentFingerprint) {
+        if (interfaceId == null) {
+            return List.of();
+        }
+        String sql = """
+                SELECT * FROM facility_production_inventory_age
+                WHERE interface_id = ?
+                """;
+        if (itemId != null) {
+            sql += " AND item_id = ? AND component_fingerprint = ?";
+        }
+        sql += " ORDER BY first_observed_at_epoch_millis, batch_id";
+        List<StoredProductionInventoryAgeBatch> batches = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement(sql)) {
+            query.setString(1, interfaceId.toString());
+            if (itemId != null) {
+                query.setString(2, itemId);
+                query.setString(3, componentFingerprint);
+            }
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    batches.add(readProductionInventoryAgeBatch(result));
+                }
+            }
+            return List.copyOf(batches);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Age batches", failure);
+        }
+    }
+
+    private List<StoredProductionInventoryAgeBatch> productionInventoryAgeBatchesForReceipt(
+            UUID receiptId) {
+        if (receiptId == null) {
+            return List.of();
+        }
+        List<StoredProductionInventoryAgeBatch> batches = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_inventory_age
+                WHERE receipt_id = ? ORDER BY slot
+                """)) {
+            query.setString(1, receiptId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    batches.add(readProductionInventoryAgeBatch(result));
+                }
+            }
+            return List.copyOf(batches);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Age receipt batches", failure);
+        }
+    }
+
+    private StoredFacilityProductionDecision facilityProductionDecisionForReceipt(
+            UUID receiptId) {
+        if (receiptId == null) {
+            return null;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM facility_production_decision WHERE receipt_id = ?
+                """)) {
+            query.setString(1, receiptId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                String facilityId = result.getString("facility_id");
+                String interfaceId = result.getString("interface_id");
+                return new StoredFacilityProductionDecision(
+                        UUID.fromString(result.getString("observation_id")),
+                        facilityId == null ? null : UUID.fromString(facilityId),
+                        interfaceId == null ? null : UUID.fromString(interfaceId),
+                        UUID.fromString(result.getString("receipt_id")),
+                        result.getString("decision"),
+                        result.getString("reason"),
+                        result.getLong("decided_at_epoch_millis"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Facility Production decision by Receipt", failure);
+        }
+    }
+
+    private static void validateProductionInventoryAgeReceipt(
+            StoredFacilityAccountingReceipt receipt,
+            List<StoredProductionInventoryChange> receiptChanges) {
+        if (receipt == null || receipt.receiptId() == null || receipt.interfaceId() == null
+                || receipt.dimensionId() == null || receipt.dimensionId().isBlank()
+                || receipt.observedAtEpochMillis() < 0L
+                || !validChanges(receipt.receiptId(), "RECEIPT", receiptChanges)) {
+            throw new IllegalArgumentException(
+                    "Production Inventory Age receipt values are invalid");
+        }
+    }
+
+    private static void validateProductionInventoryConsumption(
+            UUID consumptionId,
+            String serviceIdentity,
+            String requestId,
+            UUID interfaceId,
+            String itemId,
+            String componentFingerprint,
+            int consumedCount,
+            long consumedAtEpochMillis,
+            String reason) {
+        if (consumptionId == null || serviceIdentity == null || serviceIdentity.isBlank()
+                || requestId == null || requestId.isBlank() || interfaceId == null
+                || itemId == null || itemId.isBlank() || componentFingerprint == null
+                || componentFingerprint.isBlank() || consumedCount <= 0
+                || consumedAtEpochMillis < 0L || reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Production Inventory Consumption values are invalid");
+        }
+    }
+
+    private void insertProductionInventoryAgeBatches(
+            StoredFacilityAccountingReceipt receipt,
+            List<StoredProductionInventoryChange> receiptChanges) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO facility_production_inventory_age (
+                    batch_id, receipt_id, interface_id, slot, item_id,
+                    component_fingerprint, original_count, remaining_count,
+                    first_observed_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            for (StoredProductionInventoryChange change : receiptChanges) {
+                insert.setString(1, productionInventoryAgeBatchId(
+                        receipt.receiptId(), change.slot()).toString());
+                insert.setString(2, receipt.receiptId().toString());
+                insert.setString(3, receipt.interfaceId().toString());
+                insert.setInt(4, change.slot());
+                insert.setString(5, change.itemId());
+                insert.setString(6, change.componentFingerprint());
+                insert.setInt(7, change.count());
+                insert.setInt(8, change.count());
+                insert.setLong(9, receipt.observedAtEpochMillis());
+                insert.addBatch();
+            }
+            insert.executeBatch();
+        }
+    }
+
+    private static UUID productionInventoryAgeBatchId(UUID receiptId, int slot) {
+        return UUID.nameUUIDFromBytes(("civic-production-inventory-age:" + receiptId + ":" + slot)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static StoredProductionInventoryAgeBatch readProductionInventoryAgeBatch(
+            ResultSet result) throws SQLException {
+        return new StoredProductionInventoryAgeBatch(
+                UUID.fromString(result.getString("batch_id")),
+                UUID.fromString(result.getString("receipt_id")),
+                UUID.fromString(result.getString("interface_id")),
+                result.getInt("slot"),
+                result.getString("item_id"),
+                result.getString("component_fingerprint"),
+                result.getInt("original_count"),
+                result.getInt("remaining_count"),
+                result.getLong("first_observed_at_epoch_millis"));
+    }
+
+    private static StoredProductionInventoryConsumption readProductionInventoryConsumption(
+            ResultSet result) throws SQLException {
+        return new StoredProductionInventoryConsumption(
+                UUID.fromString(result.getString("consumption_id")),
+                result.getString("service_identity"),
+                result.getString("request_id"),
+                UUID.fromString(result.getString("interface_id")),
+                result.getString("item_id"),
+                result.getString("component_fingerprint"),
+                result.getInt("consumed_count"),
+                result.getLong("consumed_at_epoch_millis"),
+                result.getString("reason"));
+    }
+
     public synchronized StoredFacilityProductionDecision recordFacilityProductionObservation(
             StoredCreateRecipeCompletion completion,
             List<StoredProductionInventoryChange> inputs,
@@ -2771,17 +3169,28 @@ public final class CivicDatabase implements AutoCloseable {
             return assertFacilityProductionObservationReplay(
                     replay, completion, inputs, outputs, receipt, receiptChanges, decision);
         }
-        if (facilityAccountingReceipt(receipt.receiptId()) != null) {
+        StoredFacilityAccountingReceipt existingReceipt =
+                facilityAccountingReceipt(receipt.receiptId());
+        if (existingReceipt != null
+                && (!existingReceipt.equals(receipt)
+                        || !facilityAccountingReceiptChanges(receipt.receiptId())
+                                .equals(receiptChanges)
+                        || facilityProductionDecisionForReceipt(receipt.receiptId()) != null)) {
             throw new IllegalStateException(
-                    "Facility Accounting Receipt is already bound to another observation");
+                  "Facility Accounting Receipt is already bound to another observation");
         }
         try {
             connection.setAutoCommit(false);
             insertCreateRecipeCompletion(completion);
             insertCreateRecipeCompletionChanges(inputs);
             insertCreateRecipeCompletionChanges(outputs);
-            insertFacilityAccountingReceipt(receipt);
-            insertFacilityAccountingReceiptChanges(receiptChanges);
+            if (existingReceipt == null) {
+                insertFacilityAccountingReceipt(receipt);
+                insertFacilityAccountingReceiptChanges(receiptChanges);
+            }
+            if (productionInventoryAgeBatchesForReceipt(receipt.receiptId()).isEmpty()) {
+                insertProductionInventoryAgeBatches(receipt, receiptChanges);
+            }
             insertFacilityProductionDecision(decision);
             connection.commit();
             return facilityProductionDecision(completion.observationId());
@@ -15112,6 +15521,64 @@ public final class CivicDatabase implements AutoCloseable {
                         )
                         """);
                 statement.execute("PRAGMA user_version = 74");
+            }
+            if (version < 75) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_production_inventory_age (
+                            batch_id TEXT PRIMARY KEY,
+                            receipt_id TEXT NOT NULL
+                                REFERENCES facility_accounting_receipt_event(receipt_id),
+                            interface_id TEXT NOT NULL
+                                REFERENCES facility_accounting_interface(interface_id),
+                            slot INTEGER NOT NULL CHECK (slot >= 0),
+                            item_id TEXT NOT NULL CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            original_count INTEGER NOT NULL CHECK (original_count > 0),
+                            remaining_count INTEGER NOT NULL
+                                CHECK (remaining_count >= 0 AND remaining_count <= original_count),
+                            first_observed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (first_observed_at_epoch_millis >= 0),
+                            UNIQUE (receipt_id, slot)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS facility_production_inventory_age_lookup
+                        ON facility_production_inventory_age (
+                            interface_id, item_id, component_fingerprint,
+                            remaining_count, first_observed_at_epoch_millis, batch_id
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS facility_production_inventory_consumption (
+                            consumption_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+                            interface_id TEXT NOT NULL
+                                REFERENCES facility_accounting_interface(interface_id),
+                            item_id TEXT NOT NULL CHECK (length(trim(item_id)) > 0),
+                            component_fingerprint TEXT NOT NULL
+                                CHECK (length(trim(component_fingerprint)) > 0),
+                            consumed_count INTEGER NOT NULL CHECK (consumed_count > 0),
+                            consumed_at_epoch_millis INTEGER NOT NULL
+                                CHECK (consumed_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS
+                            facility_production_inventory_consumption_allocation (
+                            consumption_id TEXT NOT NULL
+                                REFERENCES facility_production_inventory_consumption(consumption_id),
+                            batch_id TEXT NOT NULL
+                                REFERENCES facility_production_inventory_age(batch_id),
+                            consumed_count INTEGER NOT NULL CHECK (consumed_count > 0),
+                            PRIMARY KEY (consumption_id, batch_id)
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 75");
             }
             connection.commit();
         } catch (SQLException failure) {

@@ -279,3 +279,7 @@ _Avoid_: 产出总价、机器次数、库存总值
 **全服参考价（Global Reference Price）**:
 由初始配置与可信交易样本共同形成、供所有国家使用的统一核算价格。
 _Avoid_: 本地售价、管理员随意估价
+
+**库存年龄批次（Production Inventory Age Batch）**:
+一次 Facility Accounting Receipt 中同一槽位与物品组件身份的进入数量，以及该数量首次进入核算接口的时间；接口内部搬运不刷新时间，真实消费按最早批次优先扣减。
+_Avoid_: 当前库存快照、搬运时间、库存总值
