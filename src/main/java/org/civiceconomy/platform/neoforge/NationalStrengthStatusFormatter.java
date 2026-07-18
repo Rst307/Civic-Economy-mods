@@ -11,6 +11,7 @@ final class NationalStrengthStatusFormatter {
         var window = recalculation.activityWindow();
         var population = recalculation.effectiveCitizenPopulation();
         var territory = recalculation.effectiveTerritory();
+        var production = recalculation.productionMarginalReturn();
         var compliance = recalculation.mintCompliance();
         return "Nation " + recalculation.nationId().value()
                 + " strength=" + recalculation.assessment().totalBasisPoints()
@@ -30,6 +31,13 @@ final class NationalStrengthStatusFormatter {
                 + " suspendedClaims=" + territory.suspendedClaimCount()
                 + " unassessedClaims=" + territory.unassessedClaimCount()
                 + " territoryAvailable=" + territory.ownershipAvailable()
+                + " productionBasisPoints="
+                + recalculation.assessment()
+                        .component(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE)
+                        .normalizedInputBasisPoints()
+                + " productionFinalValue=" + production.finalValueMinorUnits()
+                + " productionAccepted=" + production.acceptedContributionCount()
+                + " productionUnbound=" + production.unboundExportedObservationCount()
                 + " complianceBasisPoints="
                 + recalculation.assessment()
                         .component(NationalStrengthComponent.COMPLIANCE)

@@ -63,7 +63,9 @@ class NationalStrengthStatusFormattingTest {
                         + " effectiveCitizenBasisPoints=5000 effectiveCitizens=1"
                         + " populationEquivalent=0.500 effectiveTerritoryBasisPoints=0"
                         + " currentClaims=0 effectiveClaims=0 suspendedClaims=0"
-                        + " unassessedClaims=0 territoryAvailable=false complianceBasisPoints=0"
+                        + " unassessedClaims=0 territoryAvailable=false productionBasisPoints=0"
+                        + " productionFinalValue=0 productionAccepted=0 productionUnbound=0"
+                        + " complianceBasisPoints=0"
                         + " complianceObservations=0 cleanCommits=0 recoveredCommits=0"
                         + " quarantinedRecoveries=0 openIncidents=0 activityBasisPoints=2500"
                         + " acceptedValue=625 accepted=2 excluded=1 paused=true",

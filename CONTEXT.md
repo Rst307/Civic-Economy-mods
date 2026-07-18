@@ -288,6 +288,10 @@ _Avoid_: 硬性禁止生产、税款、货币销毁、产量清零
 由受信任服务器治理安排、在未来时刻生效的单设施与单产业软上限及超额权重规则；新版本不能改写旧生产证据或旧评估采用的策略。
 _Avoid_: 即时配置、自动税率、产量限制、玩家自定义倍率
 
+**滚动生产边际回报评估（Rolling Production Marginal Return Assessment）**:
+一个 Nation 在统一滚动窗口内，把证据时刻绑定的生产贡献按近期权重、单设施和单产业累计用量得出的可解释结论；策略换版不会重置同一窗口内已经使用的软上限。
+_Avoid_: 策略版本分桶、永久生产总分、当前策略重算、设施计数
+
 **证据时刻生产贡献绑定（Evidence-Time Production Contribution Binding）**:
 把一条出口锚定的正 Production Value Added 固定到证据发生时有效的 Registered Facility、Production Industry assignment 和 Production Marginal Return Policy；拆分出口与后续策略版本不能复制或改写这条贡献。
 _Avoid_: 当前策略重算、每次出口贡献、可变生产评分、玩家声明的策略

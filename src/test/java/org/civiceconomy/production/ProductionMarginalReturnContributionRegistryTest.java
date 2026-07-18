@@ -5,9 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.nation.NationId;
@@ -18,6 +20,10 @@ import org.civiceconomy.persistence.StoredFacilityAccountingReceipt;
 import org.civiceconomy.persistence.StoredFacilityProductionDecision;
 import org.civiceconomy.persistence.StoredProductionInventoryChange;
 import org.civiceconomy.territory.TerritoryClaimPosition;
+import org.civiceconomy.strength.NationalStrengthComponent;
+import org.civiceconomy.strength.NationalStrengthComponentState;
+import org.civiceconomy.strength.NationalStrengthSnapshotBuilder;
+import org.civiceconomy.strength.NationalStrengthSnapshotConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -248,6 +254,152 @@ class ProductionMarginalReturnContributionRegistryTest {
             assertEquals(original, replay);
             assertEquals(EFFECTIVE_AT, replay.industryAssignment().effectiveAt());
             assertEquals(EFFECTIVE_AT, replay.marginalReturnPolicy().effectiveAt());
+        }
+    }
+
+    @Test
+    void listsBindingsOnlyForThePersistedNationAndHalfOpenEvidenceWindow() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("nation-window-bindings.sqlite3"))) {
+            UUID exportId = persistAcceptedObservationAndExport(database);
+            ProductionMarginalReturnContributionRegistry registry = configuredRegistry(database);
+            BoundProductionMarginalReturnContribution expected = registry
+                    .bindExport(exportId)
+                    .get(0)
+                    .binding()
+                    .orElseThrow();
+
+            assertEquals(
+                    List.of(expected),
+                    registry.bindings(
+                            NATION,
+                            OBSERVED_AT.minusMillis(1L),
+                            OBSERVED_AT.plusMillis(1L)));
+            assertEquals(
+                    List.of(),
+                    registry.bindings(
+                            new NationId(UUID.fromString(
+                                    "99999999-9999-9999-9999-999999999999")),
+                            OBSERVED_AT.minusMillis(1L),
+                            OBSERVED_AT.plusMillis(1L)));
+            assertEquals(
+                    List.of(),
+                    registry.bindings(
+                            NATION,
+                            OBSERVED_AT.minusMillis(1L),
+                            OBSERVED_AT));
+        }
+    }
+
+    @Test
+    void persistsTheCurrentRollingAssessmentAndExplanationAcrossRestart() {
+        Path file = temporaryDirectory.resolve("rolling-assessment.sqlite3");
+        RollingProductionMarginalReturnAssessment expected;
+        Instant assessedAt = OBSERVED_AT.plus(Duration.ofDays(3));
+        try (CivicDatabase database = database(file)) {
+            UUID exportId = persistAcceptedObservationAndExport(database);
+            ProductionMarginalReturnContributionRegistry contributions =
+                    configuredRegistry(database);
+            contributions.bindExport(exportId);
+            RollingProductionMarginalReturnRegistry rolling =
+                    new RollingProductionMarginalReturnRegistry(
+                            database,
+                            contributions,
+                            new RollingProductionMarginalReturnCalculator(
+                                    Duration.ofDays(30), Duration.ofDays(7)));
+
+            expected = rolling.assess(NATION, assessedAt);
+
+            assertEquals(15L, expected.rawValueMinorUnits());
+            assertEquals(15L, expected.finalValueMinorUnits());
+            assertEquals(1, expected.contributions().size());
+        }
+
+        try (CivicDatabase reopened = database(file)) {
+            RollingProductionMarginalReturnAssessment restored =
+                    new RollingProductionMarginalReturnRegistry(
+                                    reopened,
+                                    unconfiguredRegistry(reopened),
+                                    new RollingProductionMarginalReturnCalculator(
+                                            Duration.ofDays(30), Duration.ofDays(7)))
+                            .current(NATION);
+
+            assertEquals(expected, restored);
+        }
+    }
+
+    @Test
+    void completeRollingEvidenceActivatesTheProductionStrengthComponent() {
+        Instant assessedAt = OBSERVED_AT.plus(Duration.ofDays(3));
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("production-strength.sqlite3"))) {
+            UUID exportId = persistAcceptedObservationAndExport(database);
+            configuredRegistry(database).bindExport(exportId);
+
+            var recalculation = new NationalStrengthSnapshotBuilder(
+                            database,
+                            new NationalStrengthSnapshotConfiguration(
+                                    Duration.ofDays(7),
+                                    Duration.ofDays(60),
+                                    Duration.ofHours(8),
+                                    4,
+                                    4,
+                                    Duration.ofDays(30),
+                                    Duration.ofDays(30),
+                                    10_000L,
+                                    Duration.ofDays(30),
+                                    Duration.ofDays(7),
+                                    60L),
+                            Map.of(),
+                            true)
+                    .recalculateAll(assessedAt.toEpochMilli())
+                    .nations()
+                    .get(NATION);
+
+            assertEquals(15L, recalculation.productionMarginalReturn().finalValueMinorUnits());
+            assertEquals(
+                    5_000,
+                    recalculation.assessment()
+                            .component(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE)
+                            .normalizedInputBasisPoints());
+            assertEquals(
+                    NationalStrengthComponentState.ACTIVE,
+                    recalculation.assessment().componentState(
+                            NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE));
+        }
+    }
+
+    @Test
+    void exportedIncludedObservationWithoutABindingKeepsProductionStrengthPaused() {
+        Instant assessedAt = OBSERVED_AT.plus(Duration.ofDays(3));
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("unbound-production-strength.sqlite3"))) {
+            persistAcceptedObservationAndExport(database);
+
+            var recalculation = new NationalStrengthSnapshotBuilder(
+                            database,
+                            new NationalStrengthSnapshotConfiguration(
+                                    Duration.ofDays(7),
+                                    Duration.ofDays(60),
+                                    Duration.ofHours(8),
+                                    4,
+                                    4,
+                                    Duration.ofDays(30),
+                                    Duration.ofDays(30),
+                                    10_000L,
+                                    Duration.ofDays(30),
+                                    Duration.ofDays(7),
+                                    60L),
+                            Map.of(),
+                            true)
+                    .recalculateAll(assessedAt.toEpochMilli())
+                    .nations()
+                    .get(NATION);
+
+            assertEquals(
+                    NationalStrengthComponentState.PAUSED_ANOMALY,
+                    recalculation.assessment().componentState(
+                            NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE));
         }
     }
 

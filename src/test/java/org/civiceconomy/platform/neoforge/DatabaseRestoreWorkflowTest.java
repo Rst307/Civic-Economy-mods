@@ -226,7 +226,7 @@ class DatabaseRestoreWorkflowTest {
                 .resolve(restoreOperationId + "-activated.properties")));
         assertFalse(Files.exists(databaseDirectory.resolve("restore/pending.properties")));
         try (CivicDatabase restored = CivicDatabase.open(databaseFile, IDENTITY)) {
-            assertEquals(80, restored.schemaVersion());
+            assertEquals(81, restored.schemaVersion());
             assertEquals(300L, reserved(restored));
             StoredDatabaseRestoreOperation operation =
                     restored.databaseRestoreOperation(restoreOperationId);

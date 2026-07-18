@@ -16,6 +16,14 @@ import org.civiceconomy.nation.NationPopulationCalculator;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.nation.OnlineTimeLedger;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.production.GlobalReferencePriceRegistry;
+import org.civiceconomy.production.ProductionIndustryAssignmentRegistry;
+import org.civiceconomy.production.ProductionMarginalReturnContributionRegistry;
+import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
+import org.civiceconomy.production.ProductionValueAddedCalculator;
+import org.civiceconomy.production.RollingProductionMarginalReturnAssessment;
+import org.civiceconomy.production.RollingProductionMarginalReturnCalculator;
+import org.civiceconomy.production.RollingProductionMarginalReturnRegistry;
 import org.civiceconomy.territory.TerritoryClaimPosition;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 
@@ -28,6 +36,10 @@ public final class NationalStrengthSnapshotBuilder {
     private final Duration complianceWindow;
     private final DiminishingStrengthNormalizer effectiveCitizenNormalizer;
     private final DiminishingStrengthNormalizer effectiveTerritoryNormalizer;
+    private final Duration productionWindow;
+    private final Duration productionFullWeightWindow;
+    private final DiminishingStrengthNormalizer productionNormalizer;
+    private final boolean productionScoringAvailable;
     private final Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam;
 
     public NationalStrengthSnapshotBuilder(
@@ -56,6 +68,10 @@ public final class NationalStrengthSnapshotBuilder {
         this.effectiveCitizenNormalizer =
                 new DiminishingStrengthNormalizer(effectiveCitizenFullStrengthScale);
         this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(100D);
+        this.productionWindow = Duration.ofDays(30);
+        this.productionFullWeightWindow = Duration.ofDays(7);
+        this.productionNormalizer = new DiminishingStrengthNormalizer(1D);
+        this.productionScoringAvailable = false;
         this.currentClaimsByTeam = Map.of();
         this.recalculator = new NationalStrengthRecalculator(
                 database, activityWindowMillis, activityFullStrengthScale);
@@ -65,6 +81,14 @@ public final class NationalStrengthSnapshotBuilder {
             CivicDatabase database,
             NationalStrengthSnapshotConfiguration configuration,
             Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam) {
+        this(database, configuration, currentClaimsByTeam, false);
+    }
+
+    public NationalStrengthSnapshotBuilder(
+            CivicDatabase database,
+            NationalStrengthSnapshotConfiguration configuration,
+            Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam,
+            boolean productionScoringAvailable) {
         if (database == null || configuration == null || currentClaimsByTeam == null
                 || currentClaimsByTeam.entrySet().stream().anyMatch(entry -> entry.getKey() == null
                         || entry.getValue() == null
@@ -81,6 +105,11 @@ public final class NationalStrengthSnapshotBuilder {
                 configuration.effectiveCitizenFullStrengthScale());
         this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(
                 configuration.effectiveTerritoryFullStrengthScale());
+        this.productionWindow = configuration.productionWindow();
+        this.productionFullWeightWindow = configuration.productionFullWeightWindow();
+        this.productionNormalizer = new DiminishingStrengthNormalizer(
+                configuration.productionFullStrengthScaleMinorUnits());
+        this.productionScoringAvailable = productionScoringAvailable;
         this.currentClaimsByTeam = currentClaimsByTeam.entrySet().stream()
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(
                         Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
@@ -108,6 +137,23 @@ public final class NationalStrengthSnapshotBuilder {
         TerritoryMaintenanceRegistry maintenance =
                 new TerritoryMaintenanceRegistry(database, recalculationClock);
         MintComplianceSource complianceSource = new MintComplianceSource(database);
+        RollingProductionMarginalReturnCalculator productionCalculator =
+                new RollingProductionMarginalReturnCalculator(
+                        productionWindow, productionFullWeightWindow);
+        RollingProductionMarginalReturnRegistry productionSource =
+                new RollingProductionMarginalReturnRegistry(
+                        database,
+                        new ProductionMarginalReturnContributionRegistry(
+                                database,
+                                new ProductionValueAddedCalculator(
+                                        new GlobalReferencePriceRegistry(
+                                                database, recalculationClock)),
+                                new ProductionIndustryAssignmentRegistry(
+                                        database, recalculationClock),
+                                new ProductionMarginalReturnPolicyRegistry(
+                                        database, recalculationClock),
+                                recalculationClock),
+                        productionCalculator);
         for (var stored : database.registeredNations()) {
             NationId nationId = new NationId(stored.nationId());
             var population = populations.calculate(nationId, recalculatedAt);
@@ -143,8 +189,19 @@ public final class NationalStrengthSnapshotBuilder {
                     : recalculatedAtEpochMillis - complianceWindow.toMillis();
             MintComplianceAssessment compliance = complianceSource.assess(
                     nationId, complianceStart, recalculatedAtEpochMillis);
-            EnumSet<NationalStrengthComponent> anomalies = EnumSet.of(
-                    NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
+            RollingProductionMarginalReturnAssessment production =
+                    productionScoringAvailable
+                            ? productionSource.assess(nationId, recalculatedAt)
+                            : productionCalculator.assess(
+                                    nationId, List.of(), recalculatedAt);
+            EnumSet<NationalStrengthComponent> anomalies =
+                    EnumSet.noneOf(NationalStrengthComponent.class);
+            if (!productionScoringAvailable) {
+                anomalies.add(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
+            }
+            if (!production.healthy()) {
+                anomalies.add(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
+            }
             if (territory.anomalous()) {
                 anomalies.add(NationalStrengthComponent.EFFECTIVE_TERRITORY);
             }
@@ -153,7 +210,7 @@ public final class NationalStrengthSnapshotBuilder {
             }
             NationalStrengthComponents conservativeInputs = new NationalStrengthComponents(
                     effectiveCitizenNormalizer.normalize(population.populationEquivalent()),
-                    0,
+                    productionNormalizer.normalize(production.finalValueMinorUnits()),
                     0,
                     effectiveTerritoryNormalizer.normalize(
                             territory.effectiveClaimCount()),
@@ -167,6 +224,7 @@ public final class NationalStrengthSnapshotBuilder {
                             population,
                             territory,
                             compliance,
+                            production,
                             conservativeInputs));
         }
         return new NationalStrengthSnapshot(recalculatedAtEpochMillis, recalculations);

@@ -83,6 +83,7 @@ import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationApplicationId;
 import org.civiceconomy.nation.NationApplicationRegistry;
 import org.civiceconomy.nation.NationFoundingPolicy;
+import org.civiceconomy.nation.NationId;
 import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
 import org.civiceconomy.nation.CitizenshipRegistry;
@@ -94,6 +95,8 @@ import org.civiceconomy.nation.FtbTeamsNationProvider;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.RegisterNation;
+import org.civiceconomy.strength.NationalStrengthRecalculation;
+import org.civiceconomy.strength.NationalStrengthSnapshot;
 import org.civiceconomy.territory.IssueTerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermit;
 import org.civiceconomy.territory.TerritoryClaimPermitRegistry;
@@ -1706,6 +1709,7 @@ public final class CivicServerRuntimeGameTests {
                 new AtomicReference<>();
         AtomicReference<StoredProductionMarginalReturnContribution> persistedContribution =
                 new AtomicReference<>();
+        AtomicReference<NationId> productionNation = new AtomicReference<>();
         AtomicReference<UUID> productionObservationId = new AtomicReference<>();
         AtomicBoolean territoryPauseFinished = new AtomicBoolean();
         AtomicReference<Throwable> territoryPauseFailure = new AtomicReference<>();
@@ -1835,11 +1839,12 @@ public final class CivicServerRuntimeGameTests {
                                     "Real Create marginal-return policy"));
                     return nation.nationId();
                 })
-                .whenComplete((ignored, setupFailure) ->
+                .whenComplete((registeredNation, setupFailure) ->
                         helper.getLevel().getServer().execute(() -> {
                             if (setupFailure != null) {
                                 asyncFailure.set(setupFailure);
                             } else {
+                                productionNation.set(registeredNation);
                                 setupReady.set(true);
                             }
                         }));
@@ -2346,6 +2351,25 @@ public final class CivicServerRuntimeGameTests {
                     helper.assertTrue(
                             persistedContribution.get().valueAddedMinorUnits() > 0L,
                             "real Create production contribution is positive");
+                    NationalStrengthSnapshot productionSnapshot = runtime
+                            .nationalStrengthSnapshotForGameTest()
+                            .orElseThrow(() -> new AssertionError(
+                                    "production National Strength snapshot is pending"));
+                    NationalStrengthRecalculation productionStrength =
+                            productionSnapshot.nations().get(productionNation.get());
+                    helper.assertTrue(
+                            productionStrength != null,
+                            "production National Strength contains the exact Nation");
+                    helper.assertTrue(
+                            productionStrength.productionMarginalReturn()
+                                    .finalValueMinorUnits() > 0L,
+                            "real Create rolling Production Marginal Return is positive");
+                    helper.assertValueEqual(
+                            org.civiceconomy.strength.NationalStrengthComponentState.ACTIVE,
+                            productionStrength.assessment().componentState(
+                                    org.civiceconomy.strength.NationalStrengthComponent
+                                            .PRODUCTION_AND_INFRASTRUCTURE),
+                            "real Create production National Strength component");
                 })
                 .thenExecute(() -> {
                     if (!CivicEconomy.compatibilityReport().productionScoringEnabled()) {
@@ -7798,7 +7822,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(80, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(81, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);

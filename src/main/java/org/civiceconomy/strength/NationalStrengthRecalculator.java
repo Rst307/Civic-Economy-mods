@@ -3,6 +3,7 @@ package org.civiceconomy.strength;
 import org.civiceconomy.nation.NationId;
 import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
 import org.civiceconomy.persistence.CivicDatabase;
+import org.civiceconomy.production.RollingProductionMarginalReturnAssessment;
 
 public final class NationalStrengthRecalculator {
     private final AuditableEconomicActivityWindow activityWindow;
@@ -27,9 +28,31 @@ public final class NationalStrengthRecalculator {
             EffectiveTerritoryStrengthAssessment effectiveTerritory,
             MintComplianceAssessment mintCompliance,
             NationalStrengthComponents serverDerivedComponents) {
+        return recalculate(
+                nationId,
+                recalculatedAtEpochMillis,
+                effectiveCitizenPopulation,
+                effectiveTerritory,
+                mintCompliance,
+                new RollingProductionMarginalReturnAssessment(
+                        nationId,
+                        Math.max(0L, recalculatedAtEpochMillis - 1L),
+                        recalculatedAtEpochMillis,
+                        0L, 0L, 0L, 0L, 0L, 0L, 0, 0, java.util.List.of()),
+                serverDerivedComponents);
+    }
+
+    public NationalStrengthRecalculation recalculate(
+            NationId nationId,
+            long recalculatedAtEpochMillis,
+            NationEffectiveCitizenPopulation effectiveCitizenPopulation,
+            EffectiveTerritoryStrengthAssessment effectiveTerritory,
+            MintComplianceAssessment mintCompliance,
+            RollingProductionMarginalReturnAssessment productionMarginalReturn,
+            NationalStrengthComponents serverDerivedComponents) {
         if (nationId == null || recalculatedAtEpochMillis <= 0L
                 || effectiveCitizenPopulation == null || effectiveTerritory == null
-                || mintCompliance == null
+                || mintCompliance == null || productionMarginalReturn == null
                 || serverDerivedComponents == null
                 || !nationId.equals(effectiveCitizenPopulation.nationId())
                 || effectiveCitizenPopulation.asOf().toEpochMilli()
@@ -57,6 +80,7 @@ public final class NationalStrengthRecalculator {
                 effectiveCitizenPopulation,
                 effectiveTerritory,
                 mintCompliance,
+                productionMarginalReturn,
                 activity);
     }
 }

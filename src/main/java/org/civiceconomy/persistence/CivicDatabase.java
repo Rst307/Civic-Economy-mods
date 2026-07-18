@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 80;
+    private static final int SCHEMA_VERSION = 81;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4538,6 +4538,337 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Production Marginal Return contribution", failure);
+        }
+    }
+
+    public synchronized List<StoredProductionMarginalReturnContribution>
+            productionMarginalReturnContributions(
+                    UUID nationId,
+                    long windowStartEpochMillis,
+                    long windowEndEpochMillis) {
+        if (nationId == null || windowStartEpochMillis < 0L
+                || windowEndEpochMillis <= windowStartEpochMillis) {
+            throw new IllegalArgumentException(
+                    "Production Marginal Return contribution window is invalid");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT contribution.*
+                FROM production_marginal_return_contribution contribution
+                JOIN registered_facility facility
+                  ON facility.facility_id = contribution.facility_id
+                WHERE facility.nation_id = ?
+                  AND contribution.evidence_at_epoch_millis >= ?
+                  AND contribution.evidence_at_epoch_millis < ?
+                ORDER BY contribution.evidence_at_epoch_millis,
+                         contribution.observation_id
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setLong(2, windowStartEpochMillis);
+            query.setLong(3, windowEndEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                List<StoredProductionMarginalReturnContribution> contributions =
+                        new ArrayList<>();
+                while (result.next()) {
+                    contributions.add(readProductionMarginalReturnContribution(result));
+                }
+                return List.copyOf(contributions);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Marginal Return contribution window", failure);
+        }
+    }
+
+    public synchronized int unboundExportedProductionObservationCount(
+            UUID nationId, long windowStartEpochMillis, long windowEndEpochMillis) {
+        if (nationId == null || windowStartEpochMillis < 0L
+                || windowEndEpochMillis <= windowStartEpochMillis) {
+            throw new IllegalArgumentException(
+                    "Unbound exported production observation window is invalid");
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT COUNT(DISTINCT decision.observation_id)
+                FROM facility_production_decision decision
+                JOIN create_recipe_completion completion
+                  ON completion.observation_id = decision.observation_id
+                JOIN registered_facility facility
+                  ON facility.facility_id = decision.facility_id
+                JOIN facility_production_inventory_age age
+                  ON age.receipt_id = decision.receipt_id
+                JOIN facility_production_inventory_consumption_allocation allocation
+                  ON allocation.batch_id = age.batch_id
+                JOIN facility_production_inventory_export export
+                  ON export.consumption_id = allocation.consumption_id
+                LEFT JOIN production_marginal_return_contribution contribution
+                  ON contribution.observation_id = decision.observation_id
+                WHERE facility.nation_id = ?
+                  AND decision.decision = 'INCLUDED'
+                  AND completion.observed_at_epoch_millis >= ?
+                  AND completion.observed_at_epoch_millis < ?
+                  AND contribution.observation_id IS NULL
+                """)) {
+            query.setString(1, nationId.toString());
+            query.setLong(2, windowStartEpochMillis);
+            query.setLong(3, windowEndEpochMillis);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getInt(1) : 0;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to count unbound exported production observations", failure);
+        }
+    }
+
+    public synchronized void replaceRollingProductionMarginalReturnAssessment(
+            StoredRollingProductionMarginalReturnAssessment assessment,
+            List<StoredRollingProductionContributionAssessment> details) {
+        validateRollingProductionMarginalReturnAssessment(assessment, details);
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement upsert = connection.prepareStatement("""
+                    INSERT INTO production_rolling_marginal_return_assessment (
+                        nation_id, window_start_epoch_millis, window_end_epoch_millis,
+                        raw_value_minor_units, recency_weighted_value_minor_units,
+                        after_facility_returns_minor_units, final_value_minor_units,
+                        facility_marginal_reduction_minor_units,
+                        industry_marginal_reduction_minor_units,
+                        accepted_contribution_count,
+                        unbound_exported_observation_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(nation_id) DO UPDATE SET
+                        window_start_epoch_millis = excluded.window_start_epoch_millis,
+                        window_end_epoch_millis = excluded.window_end_epoch_millis,
+                        raw_value_minor_units = excluded.raw_value_minor_units,
+                        recency_weighted_value_minor_units =
+                            excluded.recency_weighted_value_minor_units,
+                        after_facility_returns_minor_units =
+                            excluded.after_facility_returns_minor_units,
+                        final_value_minor_units = excluded.final_value_minor_units,
+                        facility_marginal_reduction_minor_units =
+                            excluded.facility_marginal_reduction_minor_units,
+                        industry_marginal_reduction_minor_units =
+                            excluded.industry_marginal_reduction_minor_units,
+                        accepted_contribution_count = excluded.accepted_contribution_count,
+                        unbound_exported_observation_count =
+                            excluded.unbound_exported_observation_count
+                    """)) {
+                upsert.setString(1, assessment.nationId().toString());
+                upsert.setLong(2, assessment.windowStartEpochMillis());
+                upsert.setLong(3, assessment.windowEndEpochMillis());
+                upsert.setLong(4, assessment.rawValueMinorUnits());
+                upsert.setLong(5, assessment.recencyWeightedValueMinorUnits());
+                upsert.setLong(6, assessment.afterFacilityReturnsMinorUnits());
+                upsert.setLong(7, assessment.finalValueMinorUnits());
+                upsert.setLong(8, assessment.facilityMarginalReductionMinorUnits());
+                upsert.setLong(9, assessment.industryMarginalReductionMinorUnits());
+                upsert.setInt(10, assessment.acceptedContributionCount());
+                upsert.setInt(11, assessment.unboundExportedObservationCount());
+                upsert.executeUpdate();
+            }
+            try (PreparedStatement delete = connection.prepareStatement("""
+                    DELETE FROM production_rolling_marginal_return_contribution
+                    WHERE nation_id = ?
+                    """)) {
+                delete.setString(1, assessment.nationId().toString());
+                delete.executeUpdate();
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO production_rolling_marginal_return_contribution (
+                        nation_id, observation_id, anchor_export_id, facility_id,
+                        industry_id, industry_assignment_id, marginal_return_policy_id,
+                        evidence_at_epoch_millis, recency_weight_basis_points,
+                        raw_value_minor_units, recency_weighted_value_minor_units,
+                        facility_usage_before_minor_units,
+                        after_facility_returns_minor_units,
+                        industry_usage_before_minor_units, final_value_minor_units
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                for (StoredRollingProductionContributionAssessment detail : details) {
+                    insert.setString(1, detail.nationId().toString());
+                    insert.setString(2, detail.observationId().toString());
+                    insert.setString(3, detail.anchorExportId().toString());
+                    insert.setString(4, detail.facilityId().toString());
+                    insert.setString(5, detail.industryId());
+                    insert.setString(6, detail.industryAssignmentId().toString());
+                    insert.setString(7, detail.marginalReturnPolicyId().toString());
+                    insert.setLong(8, detail.evidenceAtEpochMillis());
+                    insert.setInt(9, detail.recencyWeightBasisPoints());
+                    insert.setLong(10, detail.rawValueMinorUnits());
+                    insert.setLong(11, detail.recencyWeightedValueMinorUnits());
+                    insert.setLong(12, detail.facilityUsageBeforeMinorUnits());
+                    insert.setLong(13, detail.afterFacilityReturnsMinorUnits());
+                    insert.setLong(14, detail.industryUsageBeforeMinorUnits());
+                    insert.setLong(15, detail.finalValueMinorUnits());
+                    insert.executeUpdate();
+                }
+            }
+            connection.commit();
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw new IllegalStateException(
+                    "Unable to replace rolling Production Marginal Return assessment", failure);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException failure) {
+                throw new IllegalStateException(
+                        "Unable to restore rolling Production assessment transaction mode",
+                        failure);
+            }
+        }
+    }
+
+    public synchronized StoredRollingProductionMarginalReturnAssessment
+            rollingProductionMarginalReturnAssessment(UUID nationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_rolling_marginal_return_assessment
+                WHERE nation_id = ?
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new StoredRollingProductionMarginalReturnAssessment(
+                        UUID.fromString(result.getString("nation_id")),
+                        result.getLong("window_start_epoch_millis"),
+                        result.getLong("window_end_epoch_millis"),
+                        result.getLong("raw_value_minor_units"),
+                        result.getLong("recency_weighted_value_minor_units"),
+                        result.getLong("after_facility_returns_minor_units"),
+                        result.getLong("final_value_minor_units"),
+                        result.getLong("facility_marginal_reduction_minor_units"),
+                        result.getLong("industry_marginal_reduction_minor_units"),
+                        result.getInt("accepted_contribution_count"),
+                        result.getInt("unbound_exported_observation_count"));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read rolling Production Marginal Return assessment", failure);
+        }
+    }
+
+    public synchronized List<StoredRollingProductionContributionAssessment>
+            rollingProductionContributionAssessments(UUID nationId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM production_rolling_marginal_return_contribution
+                WHERE nation_id = ?
+                ORDER BY evidence_at_epoch_millis, observation_id
+                """)) {
+            query.setString(1, nationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                List<StoredRollingProductionContributionAssessment> details = new ArrayList<>();
+                while (result.next()) {
+                    details.add(new StoredRollingProductionContributionAssessment(
+                            UUID.fromString(result.getString("nation_id")),
+                            UUID.fromString(result.getString("observation_id")),
+                            UUID.fromString(result.getString("anchor_export_id")),
+                            UUID.fromString(result.getString("facility_id")),
+                            result.getString("industry_id"),
+                            UUID.fromString(result.getString("industry_assignment_id")),
+                            UUID.fromString(result.getString("marginal_return_policy_id")),
+                            result.getLong("evidence_at_epoch_millis"),
+                            result.getInt("recency_weight_basis_points"),
+                            result.getLong("raw_value_minor_units"),
+                            result.getLong("recency_weighted_value_minor_units"),
+                            result.getLong("facility_usage_before_minor_units"),
+                            result.getLong("after_facility_returns_minor_units"),
+                            result.getLong("industry_usage_before_minor_units"),
+                            result.getLong("final_value_minor_units")));
+                }
+                return List.copyOf(details);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read rolling Production contribution explanations", failure);
+        }
+    }
+
+    private void validateRollingProductionMarginalReturnAssessment(
+            StoredRollingProductionMarginalReturnAssessment assessment,
+            List<StoredRollingProductionContributionAssessment> details) {
+        if (assessment == null || details == null
+                || assessment.nationId() == null
+                || assessment.windowStartEpochMillis() < 0L
+                || assessment.windowEndEpochMillis() <= assessment.windowStartEpochMillis()
+                || assessment.rawValueMinorUnits() < 0L
+                || assessment.recencyWeightedValueMinorUnits() < 0L
+                || assessment.afterFacilityReturnsMinorUnits() < 0L
+                || assessment.finalValueMinorUnits() < 0L
+                || assessment.recencyWeightedValueMinorUnits()
+                        > assessment.rawValueMinorUnits()
+                || assessment.afterFacilityReturnsMinorUnits()
+                        > assessment.recencyWeightedValueMinorUnits()
+                || assessment.finalValueMinorUnits()
+                        > assessment.afterFacilityReturnsMinorUnits()
+                || assessment.acceptedContributionCount() != details.size()
+                || assessment.unboundExportedObservationCount() < 0) {
+            throw new IllegalArgumentException(
+                    "Rolling Production Marginal Return assessment is invalid");
+        }
+        long raw = 0L;
+        long weighted = 0L;
+        long afterFacility = 0L;
+        long finalValue = 0L;
+        try {
+            for (StoredRollingProductionContributionAssessment detail : details) {
+                StoredProductionMarginalReturnContribution source = detail == null
+                        ? null
+                        : productionMarginalReturnContribution(detail.observationId());
+                if (detail == null || source == null
+                        || !assessment.nationId().equals(detail.nationId())
+                        || detail.industryId() == null || detail.industryId().isBlank()
+                        || detail.evidenceAtEpochMillis() < assessment.windowStartEpochMillis()
+                        || detail.evidenceAtEpochMillis() >= assessment.windowEndEpochMillis()
+                        || detail.recencyWeightBasisPoints() < 0
+                        || detail.recencyWeightBasisPoints() > 10_000
+                        || detail.rawValueMinorUnits() <= 0L
+                        || detail.recencyWeightedValueMinorUnits() < 0L
+                        || detail.recencyWeightedValueMinorUnits()
+                                > detail.rawValueMinorUnits()
+                        || detail.facilityUsageBeforeMinorUnits() < 0L
+                        || detail.afterFacilityReturnsMinorUnits() < 0L
+                        || detail.afterFacilityReturnsMinorUnits()
+                                > detail.recencyWeightedValueMinorUnits()
+                        || detail.industryUsageBeforeMinorUnits() < 0L
+                        || detail.finalValueMinorUnits() < 0L
+                        || detail.finalValueMinorUnits()
+                                > detail.afterFacilityReturnsMinorUnits()
+                        || !source.anchorExportId().equals(detail.anchorExportId())
+                        || !source.facilityId().equals(detail.facilityId())
+                        || !source.industryAssignmentId().equals(detail.industryAssignmentId())
+                        || !source.marginalReturnPolicyId()
+                                .equals(detail.marginalReturnPolicyId())
+                        || source.valueAddedMinorUnits() != detail.rawValueMinorUnits()
+                        || source.evidenceAtEpochMillis() != detail.evidenceAtEpochMillis()) {
+                    throw new IllegalStateException(
+                            "Rolling production explanation is not bound to durable contribution facts");
+                }
+                raw = Math.addExact(raw, detail.rawValueMinorUnits());
+                weighted = Math.addExact(
+                        weighted, detail.recencyWeightedValueMinorUnits());
+                afterFacility = Math.addExact(
+                        afterFacility, detail.afterFacilityReturnsMinorUnits());
+                finalValue = Math.addExact(finalValue, detail.finalValueMinorUnits());
+            }
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException(
+                    "Rolling Production Marginal Return assessment overflow", overflow);
+        }
+        if (raw != assessment.rawValueMinorUnits()
+                || weighted != assessment.recencyWeightedValueMinorUnits()
+                || afterFacility != assessment.afterFacilityReturnsMinorUnits()
+                || finalValue != assessment.finalValueMinorUnits()
+                || assessment.facilityMarginalReductionMinorUnits()
+                        != weighted - afterFacility
+                || assessment.industryMarginalReductionMinorUnits()
+                        != afterFacility - finalValue) {
+            throw new IllegalStateException(
+                    "Rolling Production Marginal Return totals do not match explanations");
         }
     }
 
@@ -16483,6 +16814,110 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 80");
             }
+            if (version < 81) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS
+                            production_rolling_marginal_return_assessment (
+                            nation_id TEXT PRIMARY KEY
+                                REFERENCES nation_registry(nation_id),
+                            window_start_epoch_millis INTEGER NOT NULL
+                                CHECK (window_start_epoch_millis >= 0),
+                            window_end_epoch_millis INTEGER NOT NULL
+                                CHECK (window_end_epoch_millis > window_start_epoch_millis),
+                            raw_value_minor_units INTEGER NOT NULL
+                                CHECK (raw_value_minor_units >= 0),
+                            recency_weighted_value_minor_units INTEGER NOT NULL
+                                CHECK (
+                                    recency_weighted_value_minor_units >= 0
+                                    AND recency_weighted_value_minor_units
+                                        <= raw_value_minor_units
+                                ),
+                            after_facility_returns_minor_units INTEGER NOT NULL
+                                CHECK (
+                                    after_facility_returns_minor_units >= 0
+                                    AND after_facility_returns_minor_units
+                                        <= recency_weighted_value_minor_units
+                                ),
+                            final_value_minor_units INTEGER NOT NULL
+                                CHECK (
+                                    final_value_minor_units >= 0
+                                    AND final_value_minor_units
+                                        <= after_facility_returns_minor_units
+                                ),
+                            facility_marginal_reduction_minor_units INTEGER NOT NULL
+                                CHECK (facility_marginal_reduction_minor_units >= 0),
+                            industry_marginal_reduction_minor_units INTEGER NOT NULL
+                                CHECK (industry_marginal_reduction_minor_units >= 0),
+                            accepted_contribution_count INTEGER NOT NULL
+                                CHECK (accepted_contribution_count >= 0),
+                            unbound_exported_observation_count INTEGER NOT NULL
+                                CHECK (unbound_exported_observation_count >= 0)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS
+                            production_rolling_marginal_return_contribution (
+                            nation_id TEXT NOT NULL
+                                REFERENCES production_rolling_marginal_return_assessment(
+                                    nation_id
+                                ) ON DELETE CASCADE,
+                            observation_id TEXT NOT NULL
+                                REFERENCES production_marginal_return_contribution(
+                                    observation_id
+                                ),
+                            anchor_export_id TEXT NOT NULL
+                                REFERENCES facility_production_inventory_export(export_id),
+                            facility_id TEXT NOT NULL
+                                REFERENCES registered_facility(facility_id),
+                            industry_id TEXT NOT NULL
+                                CHECK (length(trim(industry_id)) > 0),
+                            industry_assignment_id TEXT NOT NULL
+                                REFERENCES production_industry_assignment(assignment_id),
+                            marginal_return_policy_id TEXT NOT NULL
+                                REFERENCES production_marginal_return_policy(policy_id),
+                            evidence_at_epoch_millis INTEGER NOT NULL
+                                CHECK (evidence_at_epoch_millis >= 0),
+                            recency_weight_basis_points INTEGER NOT NULL
+                                CHECK (
+                                    recency_weight_basis_points >= 0
+                                    AND recency_weight_basis_points <= 10000
+                                ),
+                            raw_value_minor_units INTEGER NOT NULL
+                                CHECK (raw_value_minor_units > 0),
+                            recency_weighted_value_minor_units INTEGER NOT NULL
+                                CHECK (
+                                    recency_weighted_value_minor_units >= 0
+                                    AND recency_weighted_value_minor_units
+                                        <= raw_value_minor_units
+                                ),
+                            facility_usage_before_minor_units INTEGER NOT NULL
+                                CHECK (facility_usage_before_minor_units >= 0),
+                            after_facility_returns_minor_units INTEGER NOT NULL
+                                CHECK (
+                                    after_facility_returns_minor_units >= 0
+                                    AND after_facility_returns_minor_units
+                                        <= recency_weighted_value_minor_units
+                                ),
+                            industry_usage_before_minor_units INTEGER NOT NULL
+                                CHECK (industry_usage_before_minor_units >= 0),
+                            final_value_minor_units INTEGER NOT NULL
+                                CHECK (
+                                    final_value_minor_units >= 0
+                                    AND final_value_minor_units
+                                        <= after_facility_returns_minor_units
+                                ),
+                            PRIMARY KEY (nation_id, observation_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS
+                            production_rolling_marginal_return_contribution_order
+                        ON production_rolling_marginal_return_contribution (
+                            nation_id, evidence_at_epoch_millis, observation_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 81");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -17094,16 +17529,21 @@ public final class CivicDatabase implements AutoCloseable {
             if (!result.next()) {
                 return null;
             }
-            return new StoredProductionMarginalReturnContribution(
-                    UUID.fromString(result.getString("observation_id")),
-                    UUID.fromString(result.getString("anchor_export_id")),
-                    UUID.fromString(result.getString("facility_id")),
-                    UUID.fromString(result.getString("industry_assignment_id")),
-                    UUID.fromString(result.getString("marginal_return_policy_id")),
-                    result.getLong("value_added_minor_units"),
-                    result.getLong("evidence_at_epoch_millis"),
-                    result.getLong("recorded_at_epoch_millis"));
+            return readProductionMarginalReturnContribution(result);
         }
+    }
+
+    private StoredProductionMarginalReturnContribution
+            readProductionMarginalReturnContribution(ResultSet result) throws SQLException {
+        return new StoredProductionMarginalReturnContribution(
+                UUID.fromString(result.getString("observation_id")),
+                UUID.fromString(result.getString("anchor_export_id")),
+                UUID.fromString(result.getString("facility_id")),
+                UUID.fromString(result.getString("industry_assignment_id")),
+                UUID.fromString(result.getString("marginal_return_policy_id")),
+                result.getLong("value_added_minor_units"),
+                result.getLong("evidence_at_epoch_millis"),
+                result.getLong("recorded_at_epoch_millis"));
     }
 
     private StoredGlobalReferencePrice readGlobalReferencePrice(PreparedStatement query)

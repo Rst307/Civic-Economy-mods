@@ -13,6 +13,7 @@ import org.civiceconomy.persistence.StoredProductionIndustryAssignment;
 import org.civiceconomy.persistence.StoredProductionInventoryChange;
 import org.civiceconomy.persistence.StoredProductionMarginalReturnContribution;
 import org.civiceconomy.persistence.StoredProductionMarginalReturnPolicy;
+import org.civiceconomy.nation.NationId;
 
 public final class ProductionMarginalReturnContributionRegistry {
     private final CivicDatabase database;
@@ -122,6 +123,35 @@ public final class ProductionMarginalReturnContributionRegistry {
         StoredProductionMarginalReturnContribution stored =
                 database.productionMarginalReturnContribution(observationId);
         return stored == null ? null : toBinding(stored);
+    }
+
+    public List<BoundProductionMarginalReturnContribution> bindings(
+            NationId nationId, Instant windowStart, Instant windowEnd) {
+        if (nationId == null || windowStart == null || windowEnd == null
+                || windowStart.isBefore(Instant.EPOCH) || !windowEnd.isAfter(windowStart)) {
+            throw new IllegalArgumentException(
+                    "Production contribution Nation and evidence window are invalid");
+        }
+        return database.productionMarginalReturnContributions(
+                        nationId.value(),
+                        windowStart.toEpochMilli(),
+                        windowEnd.toEpochMilli())
+                .stream()
+                .map(this::toBinding)
+                .toList();
+    }
+
+    public int unboundExportedObservationCount(
+            NationId nationId, Instant windowStart, Instant windowEnd) {
+        if (nationId == null || windowStart == null || windowEnd == null
+                || windowStart.isBefore(Instant.EPOCH) || !windowEnd.isAfter(windowStart)) {
+            throw new IllegalArgumentException(
+                    "Unbound production observation Nation and window are invalid");
+        }
+        return database.unboundExportedProductionObservationCount(
+                nationId.value(),
+                windowStart.toEpochMilli(),
+                windowEnd.toEpochMilli());
     }
 
     private FacilityProductionObservation observation(UUID observationId) {

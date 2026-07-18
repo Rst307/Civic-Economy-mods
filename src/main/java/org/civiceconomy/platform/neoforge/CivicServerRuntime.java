@@ -251,6 +251,10 @@ public final class CivicServerRuntime {
     private static final int NATIONAL_STRENGTH_EFFECTIVE_CITIZEN_FULL_SCALE = 10;
     private static final int NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE = 100;
     private static final long NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE = 10_000L;
+    private static final Duration NATIONAL_STRENGTH_PRODUCTION_WINDOW = Duration.ofDays(30);
+    private static final Duration NATIONAL_STRENGTH_PRODUCTION_FULL_WEIGHT_WINDOW =
+            Duration.ofDays(7);
+    private static final long NATIONAL_STRENGTH_PRODUCTION_FULL_SCALE = 100_000L;
     private static final int REGISTERED_FACILITY_MAX_SCOPE_CHUNKS = 16;
     private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
             Duration.ofSeconds(5);
@@ -845,7 +849,8 @@ public final class CivicServerRuntime {
                     NationalStrengthSnapshot refreshed = new NationalStrengthSnapshotBuilder(
                                     database,
                                     nationalStrengthConfiguration(),
-                                    context.currentClaimsByTeam())
+                                    context.currentClaimsByTeam(),
+                                    CivicEconomy.compatibilityReport().productionScoringEnabled())
                             .recalculateAll(clock.millis());
                     current.nationalStrengthSnapshot = refreshed;
                     NationalStrengthRecalculation recalculation =
@@ -2046,6 +2051,7 @@ public final class CivicServerRuntime {
                                             database, commandClock),
                                     commandClock)
                             .bindExport(export.exportId());
+                    scheduleNationalStrengthRecalculation(current);
                     return export;
                 }));
     }
@@ -4255,7 +4261,9 @@ public final class CivicServerRuntime {
                         new NationalStrengthSnapshotBuilder(
                                         database,
                                         nationalStrengthConfiguration(),
-                                        currentClaims)
+                                        currentClaims,
+                                        CivicEconomy.compatibilityReport()
+                                                .productionScoringEnabled())
                                 .recalculateAll(recalculatedAt)))
                 .whenComplete((snapshot, failure) -> {
                     current.nationalStrengthRecalculationQueued.set(false);
@@ -4372,7 +4380,10 @@ public final class CivicServerRuntime {
                 NATIONAL_STRENGTH_EFFECTIVE_TERRITORY_FULL_SCALE,
                 NATIONAL_STRENGTH_COMPLIANCE_WINDOW,
                 NATIONAL_STRENGTH_ACTIVITY_WINDOW,
-                NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE);
+                NATIONAL_STRENGTH_ACTIVITY_FULL_SCALE,
+                NATIONAL_STRENGTH_PRODUCTION_WINDOW,
+                NATIONAL_STRENGTH_PRODUCTION_FULL_WEIGHT_WINDOW,
+                NATIONAL_STRENGTH_PRODUCTION_FULL_SCALE);
     }
 
     private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(

@@ -1,0 +1,3 @@
+# Share rolling marginal usage across policy versions
+
+Within one Rolling Production Marginal Return Assessment, Civic orders contributions by evidence time and accumulates facility and Production Industry usage across all policy versions. Each contribution still applies the Production Marginal Return Policy bound at its own evidence time, but a later policy version cannot reset earlier soft-cap usage; version-scoped buckets would let repeated policy changes restore full-weight production and inflate National Strength, while recomputing old contributions under the newest policy would rewrite immutable evidence-time decisions.
