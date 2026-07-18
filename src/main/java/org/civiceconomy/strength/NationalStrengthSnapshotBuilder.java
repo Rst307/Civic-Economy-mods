@@ -9,6 +9,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
@@ -20,6 +21,8 @@ import org.civiceconomy.production.GlobalReferencePriceRegistry;
 import org.civiceconomy.production.ProductionIndustryAssignmentRegistry;
 import org.civiceconomy.production.ProductionMarginalReturnContributionRegistry;
 import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
+import org.civiceconomy.production.ProductionStrengthPolicyRegistry;
+import org.civiceconomy.production.ProductionStrengthPolicyVersion;
 import org.civiceconomy.production.ProductionValueAddedCalculator;
 import org.civiceconomy.production.RollingProductionMarginalReturnAssessment;
 import org.civiceconomy.production.RollingProductionMarginalReturnCalculator;
@@ -36,9 +39,6 @@ public final class NationalStrengthSnapshotBuilder {
     private final Duration complianceWindow;
     private final DiminishingStrengthNormalizer effectiveCitizenNormalizer;
     private final DiminishingStrengthNormalizer effectiveTerritoryNormalizer;
-    private final Duration productionWindow;
-    private final Duration productionFullWeightWindow;
-    private final DiminishingStrengthNormalizer productionNormalizer;
     private final boolean productionScoringAvailable;
     private final Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam;
 
@@ -68,9 +68,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.effectiveCitizenNormalizer =
                 new DiminishingStrengthNormalizer(effectiveCitizenFullStrengthScale);
         this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(100D);
-        this.productionWindow = Duration.ofDays(30);
-        this.productionFullWeightWindow = Duration.ofDays(7);
-        this.productionNormalizer = new DiminishingStrengthNormalizer(1D);
         this.productionScoringAvailable = false;
         this.currentClaimsByTeam = Map.of();
         this.recalculator = new NationalStrengthRecalculator(
@@ -105,10 +102,6 @@ public final class NationalStrengthSnapshotBuilder {
                 configuration.effectiveCitizenFullStrengthScale());
         this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(
                 configuration.effectiveTerritoryFullStrengthScale());
-        this.productionWindow = configuration.productionWindow();
-        this.productionFullWeightWindow = configuration.productionFullWeightWindow();
-        this.productionNormalizer = new DiminishingStrengthNormalizer(
-                configuration.productionFullStrengthScaleMinorUnits());
         this.productionScoringAvailable = productionScoringAvailable;
         this.currentClaimsByTeam = currentClaimsByTeam.entrySet().stream()
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -137,23 +130,19 @@ public final class NationalStrengthSnapshotBuilder {
         TerritoryMaintenanceRegistry maintenance =
                 new TerritoryMaintenanceRegistry(database, recalculationClock);
         MintComplianceSource complianceSource = new MintComplianceSource(database);
-        RollingProductionMarginalReturnCalculator productionCalculator =
-                new RollingProductionMarginalReturnCalculator(
-                        productionWindow, productionFullWeightWindow);
+        Optional<ProductionStrengthPolicyVersion> productionPolicy =
+                new ProductionStrengthPolicyRegistry(database, recalculationClock)
+                        .current(recalculatedAt);
         RollingProductionMarginalReturnRegistry productionSource =
-                new RollingProductionMarginalReturnRegistry(
-                        database,
-                        new ProductionMarginalReturnContributionRegistry(
-                                database,
-                                new ProductionValueAddedCalculator(
-                                        new GlobalReferencePriceRegistry(
-                                                database, recalculationClock)),
-                                new ProductionIndustryAssignmentRegistry(
-                                        database, recalculationClock),
-                                new ProductionMarginalReturnPolicyRegistry(
-                                        database, recalculationClock),
-                                recalculationClock),
-                        productionCalculator);
+                productionScoringAvailable && productionPolicy.isPresent()
+                        ? productionSource(
+                                recalculationClock, productionPolicy.orElseThrow())
+                        : null;
+        DiminishingStrengthNormalizer productionNormalizer = productionPolicy
+                .map(ProductionStrengthPolicyVersion::policy)
+                .map(policy -> new DiminishingStrengthNormalizer(
+                        policy.fullStrengthScaleMinorUnits()))
+                .orElse(null);
         for (var stored : database.registeredNations()) {
             NationId nationId = new NationId(stored.nationId());
             var population = populations.calculate(nationId, recalculatedAt);
@@ -190,13 +179,12 @@ public final class NationalStrengthSnapshotBuilder {
             MintComplianceAssessment compliance = complianceSource.assess(
                     nationId, complianceStart, recalculatedAtEpochMillis);
             RollingProductionMarginalReturnAssessment production =
-                    productionScoringAvailable
+                    productionSource != null
                             ? productionSource.assess(nationId, recalculatedAt)
-                            : productionCalculator.assess(
-                                    nationId, List.of(), recalculatedAt);
+                            : unavailableProductionAssessment(nationId, recalculatedAtEpochMillis);
             EnumSet<NationalStrengthComponent> anomalies =
                     EnumSet.noneOf(NationalStrengthComponent.class);
-            if (!productionScoringAvailable) {
+            if (productionSource == null) {
                 anomalies.add(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
             }
             if (!production.healthy()) {
@@ -210,7 +198,10 @@ public final class NationalStrengthSnapshotBuilder {
             }
             NationalStrengthComponents conservativeInputs = new NationalStrengthComponents(
                     effectiveCitizenNormalizer.normalize(population.populationEquivalent()),
-                    productionNormalizer.normalize(production.finalValueMinorUnits()),
+                    productionNormalizer == null
+                            ? 0
+                            : productionNormalizer.normalize(
+                                    production.finalValueMinorUnits()),
                     0,
                     effectiveTerritoryNormalizer.normalize(
                             territory.effectiveClaimCount()),
@@ -228,5 +219,43 @@ public final class NationalStrengthSnapshotBuilder {
                             conservativeInputs));
         }
         return new NationalStrengthSnapshot(recalculatedAtEpochMillis, recalculations);
+    }
+
+    private RollingProductionMarginalReturnRegistry productionSource(
+            Clock recalculationClock, ProductionStrengthPolicyVersion policy) {
+        RollingProductionMarginalReturnCalculator calculator =
+                new RollingProductionMarginalReturnCalculator(
+                        policy.policy().observationWindow(),
+                        policy.policy().fullWeightWindow());
+        return new RollingProductionMarginalReturnRegistry(
+                database,
+                new ProductionMarginalReturnContributionRegistry(
+                        database,
+                        new ProductionValueAddedCalculator(
+                                new GlobalReferencePriceRegistry(
+                                        database, recalculationClock)),
+                        new ProductionIndustryAssignmentRegistry(
+                                database, recalculationClock),
+                        new ProductionMarginalReturnPolicyRegistry(
+                                database, recalculationClock),
+                        recalculationClock),
+                calculator);
+    }
+
+    private static RollingProductionMarginalReturnAssessment
+            unavailableProductionAssessment(NationId nationId, long recalculatedAtEpochMillis) {
+        return new RollingProductionMarginalReturnAssessment(
+                nationId,
+                0L,
+                recalculatedAtEpochMillis,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0L,
+                0,
+                0,
+                List.of());
     }
 }

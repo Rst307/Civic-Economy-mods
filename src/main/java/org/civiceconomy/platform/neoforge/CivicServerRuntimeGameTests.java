@@ -132,9 +132,12 @@ import org.civiceconomy.production.ProductionIndustryAssignmentRegistry;
 import org.civiceconomy.production.ProductionIndustryId;
 import org.civiceconomy.production.ProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
+import org.civiceconomy.production.ProductionStrengthPolicy;
+import org.civiceconomy.production.ProductionStrengthPolicyRegistry;
 import org.civiceconomy.production.ScheduleGlobalReferencePrice;
 import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
+import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.mint.MintBatch;
 
@@ -1837,17 +1840,27 @@ public final class CivicServerRuntimeGameTests {
                                             100_000L, 5_000, 500_000L, 2_500),
                                     productionPolicyEffectiveAt,
                                     "Real Create marginal-return policy"));
+                    new ProductionStrengthPolicyRegistry(database, setupClock)
+                            .schedule(new ScheduleProductionStrengthPolicy(
+                                    setupService,
+                                    "facility-command-strength-policy-" + UUID.randomUUID(),
+                                    "civic-gametest",
+                                    new ProductionStrengthPolicy(
+                                            Duration.ofDays(30),
+                                            Duration.ofDays(7),
+                                            100_000L),
+                                    productionPolicyEffectiveAt,
+                                    "Real Create Production Strength policy"));
                     return nation.nationId();
                 })
-                .whenComplete((registeredNation, setupFailure) ->
-                        helper.getLevel().getServer().execute(() -> {
-                            if (setupFailure != null) {
-                                asyncFailure.set(setupFailure);
-                            } else {
-                                productionNation.set(registeredNation);
-                                setupReady.set(true);
-                            }
-                        }));
+                .whenComplete((registeredNation, setupFailure) -> {
+                    if (setupFailure != null) {
+                        asyncFailure.set(setupFailure);
+                    } else {
+                        productionNation.set(registeredNation);
+                        setupReady.set(true);
+                    }
+                });
 
         helper.startSequence()
                 .thenWaitUntil(() -> {
@@ -2733,6 +2746,9 @@ public final class CivicServerRuntimeGameTests {
         String marginalReturnRequestId = "marginal-return-command-" + UUID.randomUUID();
         String unauthorizedMarginalReturnRequestId =
                 "marginal-return-unauthorized-" + UUID.randomUUID();
+        String strengthPolicyRequestId = "production-strength-policy-command-" + UUID.randomUUID();
+        String unauthorizedStrengthPolicyRequestId =
+                "production-strength-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2768,6 +2784,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Production Marginal Return policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin production strength-policy schedule 2592000000 604800000 100000 "
+                        + effectiveAt + " " + strengthPolicyRequestId
+                        + " GameTest Production Strength policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2788,6 +2809,11 @@ public final class CivicServerRuntimeGameTests {
                         + " Untrusted Production Marginal Return policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin production strength-policy schedule 1 1 1 "
+                        + effectiveAt + " " + unauthorizedStrengthPolicyRequestId
+                        + " Untrusted Production Strength policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
                         + effectiveAt + " " + unauthorizedIndustryRequestId
                         + " Untrusted Production Industry assignment");
@@ -2806,6 +2832,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, marginalReturnRequestId, effectiveAt);
             assertProductionMarginalReturnPolicyAbsent(
                     helper, databaseFile, unauthorizedMarginalReturnRequestId);
+            assertProductionStrengthPolicyScheduled(
+                    helper, databaseFile, strengthPolicyRequestId, effectiveAt);
+            assertProductionStrengthPolicyAbsent(
+                    helper, databaseFile, unauthorizedStrengthPolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -7822,7 +7852,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(81, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(82, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8110,6 +8140,72 @@ public final class CivicServerRuntimeGameTests {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Production Marginal Return policy",
                     failure);
+        }
+    }
+
+    private static void assertProductionStrengthPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, observation_window_millis,
+                               full_weight_window_millis,
+                               full_strength_scale_minor_units,
+                               effective_at_epoch_millis, reason
+                        FROM production_strength_policy
+                        WHERE service_identity = 'civiceconomy-production-strength-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Production Strength policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Production Strength administrator");
+                helper.assertValueEqual(
+                        2_592_000_000L, result.getLong(2), "production observation window");
+                helper.assertValueEqual(
+                        604_800_000L, result.getLong(3), "production full-weight window");
+                helper.assertValueEqual(
+                        100_000L, result.getLong(4), "production full-strength scale");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(5),
+                        "Production Strength policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Production Strength policy",
+                        result.getString(6),
+                        "Production Strength policy reason");
+                helper.assertFalse(result.next(), "duplicate Production Strength policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Production Strength policy command result", failure);
+        }
+    }
+
+    private static void assertProductionStrengthPolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM production_strength_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized strength policy count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Production Strength policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Production Strength policy", failure);
         }
     }
 

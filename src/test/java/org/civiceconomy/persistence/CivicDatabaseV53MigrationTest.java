@@ -64,7 +64,7 @@ class CivicDatabaseV53MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(81, migrated.schemaVersion());
+            assertEquals(82, migrated.schemaVersion());
             assertEquals(400L, migrated.cumulativeNetIssuanceMinorUnits());
             assertEquals(eventId,
                     migrated.monetarySupplyEvent("issuance-controller", "seed-400").eventId());

@@ -307,6 +307,8 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 /civic economy admin reference-price schedule <itemId> "<componentFingerprint>" <unitPriceMinorUnits> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin production marginal-return show
 /civic economy admin production marginal-return schedule <facilitySoftCapMinorUnits> <facilityExcessWeightBasisPoints> <industrySoftCapMinorUnits> <industryExcessWeightBasisPoints> <effectiveAtEpochMillis> <requestId> <reason>
+/civic economy admin production strength-policy show
+/civic economy admin production strength-policy schedule <observationWindowMillis> <fullWeightWindowMillis> <fullStrengthScaleMinorUnits> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin production industry show <createVersion> <recipeId>
 /civic economy admin production industry schedule <createVersion> <recipeId> <industryId> <effectiveAtEpochMillis> <requestId> <reason>
 ```
@@ -320,6 +322,8 @@ FTB Team 成员关系不是 Citizenship。国家激活时创建正式 Citizenshi
 领土政策命令仅允许 OP/控制台。免费额度与凸性扩张定价都必须安排在未来时刻生效，并持久化操作者、稳定 request ID、参数、理由和生效时间；在管理员安排首个版本前，两者均使用保守的零值默认，因此不会自动产生收费或免费扩张权。
 
 参考价命令同样只允许 OP/控制台。它按精确物品 ID 和组件指纹安排未来生效的全服统一参考价，服务端自动记录真实管理员身份、request ID、理由和时间；相同请求只能重放原版本，改变参数会失败。没有已生效版本的物品或组件身份返回零贡献。生产国力只接受从真实 Receipt、出口谱系、证据时刻价格、产业归类和边际策略形成的完整绑定，不接受设施所有者或玩家提交价格或评分。
+
+生产国力政策命令只允许 OP/控制台，并把滚动观察窗口、满权重区间和满分尺度安排为未来生效的全服版本。National Strength 在每次评估时读取当时生效的版本；没有版本时生产组件保守暂停且不持久化伪造评估，后续版本也不会改写旧生产证据绑定。
 
 单人集成服务器中，拥有作弊权限的世界所有者使用以下二次确认流程永久启用调试世界：
 

@@ -335,6 +335,7 @@ class ProductionMarginalReturnContributionRegistryTest {
                 temporaryDirectory.resolve("production-strength.sqlite3"))) {
             UUID exportId = persistAcceptedObservationAndExport(database);
             configuredRegistry(database).bindExport(exportId);
+            scheduleStrengthPolicy(database, "production-strength-policy", 60L);
 
             var recalculation = new NationalStrengthSnapshotBuilder(
                             database,
@@ -346,10 +347,7 @@ class ProductionMarginalReturnContributionRegistryTest {
                                     4,
                                     Duration.ofDays(30),
                                     Duration.ofDays(30),
-                                    10_000L,
-                                    Duration.ofDays(30),
-                                    Duration.ofDays(7),
-                                    60L),
+                                    10_000L),
                             Map.of(),
                             true)
                     .recalculateAll(assessedAt.toEpochMilli())
@@ -370,26 +368,87 @@ class ProductionMarginalReturnContributionRegistryTest {
     }
 
     @Test
+    void completeBindingWithoutStrengthPolicyKeepsProductionStrengthPaused() {
+        Instant assessedAt = OBSERVED_AT.plus(Duration.ofDays(3));
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("missing-production-strength-policy.sqlite3"))) {
+            UUID exportId = persistAcceptedObservationAndExport(database);
+            configuredRegistry(database).bindExport(exportId);
+
+            var recalculation = new NationalStrengthSnapshotBuilder(
+                            database,
+                            configuration(),
+                            Map.of(),
+                            true)
+                    .recalculateAll(assessedAt.toEpochMilli())
+                    .nations()
+                    .get(NATION);
+
+            assertEquals(
+                    NationalStrengthComponentState.PAUSED_ANOMALY,
+                    recalculation.assessment().componentState(
+                            NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE));
+            assertEquals(
+                    0,
+                    recalculation.assessment()
+                            .component(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE)
+                            .normalizedInputBasisPoints());
+            assertNull(database.rollingProductionMarginalReturnAssessment(NATION.value()));
+        }
+    }
+
+    @Test
+    void laterStrengthPolicyChangesOnlyLaterAssessmentWithoutRebindingEvidence() {
+        Instant firstAssessmentAt = OBSERVED_AT.plus(Duration.ofDays(1));
+        Instant secondPolicyAt = OBSERVED_AT.plus(Duration.ofDays(2));
+        Instant secondAssessmentAt = OBSERVED_AT.plus(Duration.ofDays(3));
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("versioned-production-strength-policy.sqlite3"))) {
+            UUID exportId = persistAcceptedObservationAndExport(database);
+            ProductionMarginalReturnContributionRegistry contributions = configuredRegistry(database);
+            BoundProductionMarginalReturnContribution original =
+                    contributions.bindExport(exportId).getFirst().binding().orElseThrow();
+            scheduleStrengthPolicy(
+                    database, "initial-production-strength-policy", 60L, EFFECTIVE_AT);
+            scheduleStrengthPolicy(
+                    database, "later-production-strength-policy", 240L, secondPolicyAt);
+
+            var first = new NationalStrengthSnapshotBuilder(
+                            database, configuration(), Map.of(), true)
+                    .recalculateAll(firstAssessmentAt.toEpochMilli())
+                    .nations()
+                    .get(NATION);
+            var second = new NationalStrengthSnapshotBuilder(
+                            database, configuration(), Map.of(), true)
+                    .recalculateAll(secondAssessmentAt.toEpochMilli())
+                    .nations()
+                    .get(NATION);
+
+            assertEquals(
+                    5_000,
+                    first.assessment()
+                            .component(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE)
+                            .normalizedInputBasisPoints());
+            assertEquals(
+                    2_500,
+                    second.assessment()
+                            .component(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE)
+                            .normalizedInputBasisPoints());
+            assertEquals(original, contributions.binding(OBSERVATION));
+        }
+    }
+
+    @Test
     void exportedIncludedObservationWithoutABindingKeepsProductionStrengthPaused() {
         Instant assessedAt = OBSERVED_AT.plus(Duration.ofDays(3));
         try (CivicDatabase database = database(
                 temporaryDirectory.resolve("unbound-production-strength.sqlite3"))) {
             persistAcceptedObservationAndExport(database);
+            scheduleStrengthPolicy(database, "unbound-production-strength-policy", 60L);
 
             var recalculation = new NationalStrengthSnapshotBuilder(
                             database,
-                            new NationalStrengthSnapshotConfiguration(
-                                    Duration.ofDays(7),
-                                    Duration.ofDays(60),
-                                    Duration.ofHours(8),
-                                    4,
-                                    4,
-                                    Duration.ofDays(30),
-                                    Duration.ofDays(30),
-                                    10_000L,
-                                    Duration.ofDays(30),
-                                    Duration.ofDays(7),
-                                    60L),
+                            configuration(),
                             Map.of(),
                             true)
                     .recalculateAll(assessedAt.toEpochMilli())
@@ -401,6 +460,42 @@ class ProductionMarginalReturnContributionRegistryTest {
                     recalculation.assessment().componentState(
                             NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE));
         }
+    }
+
+    private void scheduleStrengthPolicy(
+            CivicDatabase database, String requestId, long fullStrengthScaleMinorUnits) {
+        scheduleStrengthPolicy(
+                database, requestId, fullStrengthScaleMinorUnits, EFFECTIVE_AT);
+    }
+
+    private void scheduleStrengthPolicy(
+            CivicDatabase database,
+            String requestId,
+            long fullStrengthScaleMinorUnits,
+            Instant effectiveAt) {
+        new ProductionStrengthPolicyRegistry(database, CLOCK).schedule(
+                new ScheduleProductionStrengthPolicy(
+                        SERVICE,
+                        requestId,
+                        "civic-admin-console:test",
+                        new ProductionStrengthPolicy(
+                                Duration.ofDays(30),
+                                Duration.ofDays(7),
+                                fullStrengthScaleMinorUnits),
+                        effectiveAt,
+                        "Trusted rolling production strength policy"));
+    }
+
+    private static NationalStrengthSnapshotConfiguration configuration() {
+        return new NationalStrengthSnapshotConfiguration(
+                Duration.ofDays(7),
+                Duration.ofDays(60),
+                Duration.ofHours(8),
+                4,
+                4,
+                Duration.ofDays(30),
+                Duration.ofDays(30),
+                10_000L);
     }
 
     private ProductionMarginalReturnContributionRegistry configuredRegistry(

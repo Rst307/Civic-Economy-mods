@@ -44,9 +44,13 @@ import org.civiceconomy.production.ProductionIndustryId;
 import org.civiceconomy.production.ProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ProductionMarginalReturnPolicyRegistry;
 import org.civiceconomy.production.ProductionMarginalReturnPolicyVersion;
+import org.civiceconomy.production.ProductionStrengthPolicy;
+import org.civiceconomy.production.ProductionStrengthPolicyRegistry;
+import org.civiceconomy.production.ProductionStrengthPolicyVersion;
 import org.civiceconomy.production.ScheduleGlobalReferencePrice;
 import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
+import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -68,6 +72,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-reference-price");
     private static final ServiceIdentity PRODUCTION_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-production-policy");
+    private static final ServiceIdentity PRODUCTION_STRENGTH_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-production-strength-policy");
     private static final ServiceIdentity PRODUCTION_INDUSTRY_SERVICE =
             new ServiceIdentity("civiceconomy-production-industry");
 
@@ -674,7 +680,44 @@ public final class FiscalAdministrationCommands {
                                         context.getSource())))
                         .then(Commands.literal("schedule")
                                 .then(facilityCap)))
+                .then(productionStrengthPolicyCommand())
                 .then(productionIndustryCommand());
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            productionStrengthPolicyCommand() {
+        return Commands.literal("strength-policy")
+                .then(Commands.literal("show")
+                        .executes(context -> showProductionStrengthPolicy(
+                                context.getSource())))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument(
+                                        "observationWindowMillis",
+                                        LongArgumentType.longArg(1L))
+                                .then(Commands.argument(
+                                                "fullWeightWindowMillis",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "fullStrengthScaleMinorUnits",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleProductionStrengthPolicy(
+                                                                                        context.getSource(),
+                                                                                        LongArgumentType.getLong(context, "observationWindowMillis"),
+                                                                                        LongArgumentType.getLong(context, "fullWeightWindowMillis"),
+                                                                                        LongArgumentType.getLong(context, "fullStrengthScaleMinorUnits"),
+                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                        StringArgumentType.getString(context, "reason"))))))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -876,6 +919,81 @@ public final class FiscalAdministrationCommands {
                 + " industrySoftCapMinorUnits=" + policy.industrySoftCapMinorUnits()
                 + " industryExcessWeightBasisPoints="
                 + policy.industryExcessWeightBasisPoints()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showProductionStrengthPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new ProductionStrengthPolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Production Strength policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Production Strength policy is not configured; "
+                                                + "production scoring remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatProductionStrengthPolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production Strength policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleProductionStrengthPolicy(
+            CommandSourceStack source,
+            long observationWindowMillis,
+            long fullWeightWindowMillis,
+            long fullStrengthScaleMinorUnits,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new ProductionStrengthPolicyRegistry(database, clock)
+                        .schedule(new ScheduleProductionStrengthPolicy(
+                                PRODUCTION_STRENGTH_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new ProductionStrengthPolicy(
+                                        Duration.ofMillis(observationWindowMillis),
+                                        Duration.ofMillis(fullWeightWindowMillis),
+                                        fullStrengthScaleMinorUnits),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatProductionStrengthPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Production Strength policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Production Strength policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatProductionStrengthPolicy(
+            ProductionStrengthPolicyVersion version) {
+        ProductionStrengthPolicy policy = version.policy();
+        return "Production Strength policy " + version.policyId()
+                + " observationWindowMillis=" + policy.observationWindowMillis()
+                + " fullWeightWindowMillis=" + policy.fullWeightWindowMillis()
+                + " fullStrengthScaleMinorUnits="
+                + policy.fullStrengthScaleMinorUnits()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }
