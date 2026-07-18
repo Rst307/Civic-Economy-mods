@@ -291,3 +291,7 @@ _Avoid_: 普通箱子搬运、客户端销售声明、任意物流网络扫描
 **生产库存出口记录（Production Inventory Export Event）**:
 一次可信出口与对应库存消费的不可变、可重放审计记录，绑定真实玩家、核算接口、出口类型和服务器记录的物品身份；SALE、EXPORT 与 PUBLIC_WORKS 只表示出口边界，不自动创造货币。
 _Avoid_: 玩家收据、库存估值、自动付款
+
+**出口锚定生产链证据（Export-Anchored Production Chain Evidence）**:
+以可信生产库存出口记录的实际消费来源 Receipt 作为生产链证据来源；同一个来源 Receipt 被拆成多次出口时只形成一次生产贡献，缺少来源 Receipt 时不形成贡献。
+_Avoid_: 出口次数、机器次数、未绑定库存快照、自动推测跨设施运输

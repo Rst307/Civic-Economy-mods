@@ -3126,6 +3126,54 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredProductionInventoryExportLineage productionInventoryExportLineage(
+            UUID exportId) {
+        if (exportId == null) {
+            return null;
+        }
+        try (PreparedStatement exists = connection.prepareStatement("""
+                SELECT export_id FROM facility_production_inventory_export
+                WHERE export_id = ?
+                """)) {
+            exists.setString(1, exportId.toString());
+            try (ResultSet result = exists.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Export lineage", failure);
+        }
+
+        List<UUID> sourceReceiptIds = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT DISTINCT age.receipt_id
+                FROM facility_production_inventory_export export
+                JOIN facility_production_inventory_consumption_allocation allocation
+                    ON allocation.consumption_id = export.consumption_id
+                JOIN facility_production_inventory_age age
+                    ON age.batch_id = allocation.batch_id
+                WHERE export.export_id = ?
+                ORDER BY age.receipt_id
+                """)) {
+            query.setString(1, exportId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    sourceReceiptIds.add(UUID.fromString(result.getString(1)));
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Production Inventory Export lineage", failure);
+        }
+        if (sourceReceiptIds.isEmpty()) {
+            throw new IllegalStateException(
+                    "Production Inventory Export has no durable source Receipt lineage " + exportId);
+        }
+        return new StoredProductionInventoryExportLineage(exportId, sourceReceiptIds);
+    }
+
     private List<StoredProductionInventoryAgeBatch> productionInventoryAgeBatches(
             UUID interfaceId, String itemId, String componentFingerprint) {
         if (interfaceId == null) {

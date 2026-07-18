@@ -146,6 +146,40 @@ class ProductionInventoryAgeLedgerTest {
         }
     }
 
+    @Test
+    void durableExportLineageResolvesItsSourceReceipt() {
+        try (CivicDatabase database = database(
+                temporaryDirectory.resolve("inventory-export-lineage.sqlite3"))) {
+            registerInterface(database);
+            ProductionInventoryAgeLedger ledger = new ProductionInventoryAgeLedger(database, CLOCK);
+            ledger.recordReceipt(receipt(RECEIPT, CLOCK.millis(), 4));
+            ProductionInventoryExportCoordinator coordinator =
+                    new ProductionInventoryExportCoordinator(
+                            database,
+                            CLOCK,
+                            request -> new ProductionStack(
+                                    "create:wheat_flour", "components:{}", request.count()));
+            ProductionInventoryExport exported = coordinator.export(
+                    new ProductionInventoryExportRequest(
+                            SERVICE,
+                            "lineage-request",
+                            INTERFACE,
+                            ACTOR,
+                            4,
+                            2,
+                            ProductionInventoryExportKind.EXPORT,
+                            "trusted-export-terminal",
+                            CLOCK.millis() + 1_000L,
+                            "Export two produced goods"));
+
+            assertEquals(
+                    List.of(RECEIPT),
+                    new ProductionInventoryExportLineageRegistry(database)
+                            .lineage(exported.exportId())
+                            .sourceReceiptIds());
+        }
+    }
+
     private static FacilityAccountingReceipt receipt() {
         return receipt(RECEIPT, CLOCK.millis(), 1_000);
     }
