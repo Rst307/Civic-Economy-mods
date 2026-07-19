@@ -44,6 +44,7 @@ import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CancelNationApplication;
 import org.civiceconomy.nation.CandidateOnlineEvidencePolicyRegistry;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
+import org.civiceconomy.nation.CitizenshipPolicyRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.EffectiveCitizenPopulationPolicyRegistry;
 import org.civiceconomy.nation.CreateNationApplication;
@@ -53,6 +54,7 @@ import org.civiceconomy.nation.NationApplicationLifetimePolicyRegistry;
 import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationFoundingPolicy;
 import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicyRegistry;
+import org.civiceconomy.nation.NationFoundingPolicyResolver;
 import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
 import org.civiceconomy.nation.GrantNationFiscalPermission;
 import org.civiceconomy.nation.FtbTeamsNationProvider;
@@ -76,7 +78,6 @@ import org.slf4j.Logger;
 
 final class NationApplicationCommands {
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final ServiceIdentity FOUNDING_SERVICE =
             new ServiceIdentity("civiceconomy-founding");
     private static final ServiceIdentity GOVERNANCE_SERVICE =
@@ -2003,7 +2004,7 @@ final class NationApplicationCommands {
                 .orElseThrow(() -> new IllegalStateException(
                         "Your FTB Team is not bound to a Nation"));
         CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                database, CITIZENSHIP_TRANSFER_COOLDOWN, clock);
+                database, citizenshipTransferCooldown(database, clock), clock);
         FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
                 nations,
                 citizenships,
@@ -2115,7 +2116,7 @@ final class NationApplicationCommands {
     private static NationEffectiveCitizenPopulation calculatePopulation(
             CivicDatabase database, UUID playerId, Instant asOf, Clock queryClock) {
         CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                database, CITIZENSHIP_TRANSFER_COOLDOWN, queryClock);
+                database, citizenshipTransferCooldown(database, queryClock), queryClock);
         var citizenship = citizenships.current(playerId)
                 .orElseThrow(() -> new IllegalStateException(
                         "You do not have an active formal Citizenship"));
@@ -2271,13 +2272,9 @@ final class NationApplicationCommands {
                     NationApplication application = registry.findPendingByFtbTeam(team.teamId())
                             .orElseThrow(() -> new IllegalStateException(
                                     "Your FTB Team has no PENDING Nation Application"));
-                    Duration observationWindow = candidateEvidenceWindow(database, commandClock);
-                    int formalThreshold = formalFoundingThreshold(database, commandClock);
-                    NationFoundingPolicy policy = debugWorld
-                            ? NationFoundingPolicy.debugWorld(
-                                    formalThreshold, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN)
-                            : NationFoundingPolicy.formal(
-                                    formalThreshold, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN);
+                    NationFoundingPolicy policy =
+                            new NationFoundingPolicyResolver(database, commandClock)
+                                    .current(debugWorld);
                     return new NationActivationCoordinator(
                                     database, provisioner, policy, commandClock)
                             .activate(new ActivateNationApplication(
@@ -2309,6 +2306,15 @@ final class NationApplicationCommands {
                         "Formal Nation founding candidate threshold policy is not configured"))
                 .policy()
                 .minimumEffectiveCandidates();
+    }
+
+    private static Duration citizenshipTransferCooldown(CivicDatabase database, Clock clock) {
+        return new CitizenshipPolicyRegistry(database, clock)
+                .current(clock.instant())
+                .orElseThrow(() -> new SecurityException(
+                        "Citizenship policy is not configured"))
+                .policy()
+                .transferCooldown();
     }
 
     private static NationalTreasuryProvisioner serverThreadTreasuryProvisioner(
