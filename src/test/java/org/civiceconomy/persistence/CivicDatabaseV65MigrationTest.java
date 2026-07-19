@@ -112,7 +112,7 @@ class CivicDatabaseV65MigrationTest {
                                     ACTOR,
                                     "Cancel migrated procurement"));
 
-            assertEquals(95, migrated.schemaVersion());
+            assertEquals(96, migrated.schemaVersion());
             assertEquals("CANCELLED", cancelled.state());
             assertEquals(ACTOR, cancelled.cancelledByPlayerId());
             assertEquals("Cancel migrated procurement", cancelled.cancellationReason());

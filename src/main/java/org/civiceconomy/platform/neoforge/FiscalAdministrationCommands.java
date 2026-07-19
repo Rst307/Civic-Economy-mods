@@ -18,6 +18,10 @@ import net.minecraft.commands.arguments.UuidArgument;
 import net.minecraft.network.chat.Component;
 import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import org.civiceconomy.backup.OnlineDatabaseBackupPolicy;
+import org.civiceconomy.backup.OnlineDatabaseBackupPolicyRegistry;
+import org.civiceconomy.backup.OnlineDatabaseBackupPolicyVersion;
+import org.civiceconomy.backup.ScheduleOnlineDatabaseBackupPolicy;
 import org.civiceconomy.fiscal.AccountId;
 import org.civiceconomy.fiscal.BudgetDisbursementApprovalStatus;
 import org.civiceconomy.fiscal.BudgetDisbursementRecoveryStatus;
@@ -148,6 +152,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-nation-application-lifetime-policy");
     private static final ServiceIdentity NATION_FOUNDING_CANDIDATE_THRESHOLD_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-nation-founding-candidate-threshold-policy");
+    private static final ServiceIdentity ONLINE_DATABASE_BACKUP_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-online-database-backup-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -448,7 +454,46 @@ public final class FiscalAdministrationCommands {
                                                         context, "requestId"),
                                                 StringArgumentType.getString(
                                                         context, "reason"))))))
+                .then(databaseBackupPolicyCommand())
                 .then(databaseRestoreCommand());
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            databaseBackupPolicyCommand() {
+        return Commands.literal("policy")
+                .then(Commands.literal("show")
+                        .executes(context -> showOnlineDatabaseBackupPolicy(
+                                context.getSource())))
+                .then(Commands.literal("schedule")
+                        .then(Commands.argument("intervalMillis", LongArgumentType.longArg(1L))
+                                .then(Commands.argument("retention", IntegerArgumentType.integer(1))
+                                        .then(Commands.argument(
+                                                        "effectiveAtEpochMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleOnlineDatabaseBackupPolicy(
+                                                                                context.getSource(),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "intervalMillis"),
+                                                                                IntegerArgumentType.getInteger(
+                                                                                        context,
+                                                                                        "retention"),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "requestId"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "reason")))))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -2694,6 +2739,72 @@ public final class FiscalAdministrationCommands {
                     }
                 }));
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int showOnlineDatabaseBackupPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new OnlineDatabaseBackupPolicyRegistry(database, clock)
+                        .current(clock.instant()))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Online Database Backup policy query", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(policy
+                                        .map(FiscalAdministrationCommands::formatOnlineDatabaseBackupPolicy)
+                                        .orElse("Online Database Backup policy is not configured; scheduled backups and rotation are disabled")),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Online Database Backup policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleOnlineDatabaseBackupPolicy(
+            CommandSourceStack source,
+            long intervalMillis,
+            int retention,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new OnlineDatabaseBackupPolicyRegistry(database, clock)
+                        .schedule(new ScheduleOnlineDatabaseBackupPolicy(
+                                ONLINE_DATABASE_BACKUP_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new OnlineDatabaseBackupPolicy(
+                                        Duration.ofMillis(intervalMillis), retention),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Online Database Backup policy schedule", failure);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled "
+                                                + formatOnlineDatabaseBackupPolicy(policy)),
+                                true);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Online Database Backup policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatOnlineDatabaseBackupPolicy(
+            OnlineDatabaseBackupPolicyVersion policy) {
+        return "Online Database Backup policy " + policy.policyId()
+                + " intervalMillis=" + policy.policy().interval().toMillis()
+                + " retention=" + policy.policy().retention()
+                + " effectiveAt=" + policy.effectiveAt()
+                + " actor=" + policy.actorIdentity();
     }
 
     private static int databaseBackupStatus(CommandSourceStack source) {

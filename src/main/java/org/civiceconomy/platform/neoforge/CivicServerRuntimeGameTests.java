@@ -1456,11 +1456,17 @@ public final class CivicServerRuntimeGameTests {
                         .collect(Collectors.toSet()),
                 "read-only Budget Disbursement recovery actions");
         helper.assertValueEqual(
-                Set.of("status", "trigger", "restore"),
+                Set.of("status", "trigger", "policy", "restore"),
                 backup.getChildren().stream()
                         .map(node -> node.getName())
                         .collect(Collectors.toSet()),
                 "trusted asynchronous database backup command actions");
+        helper.assertValueEqual(
+                Set.of("show", "schedule"),
+                backup.getChild("policy").getChildren().stream()
+                        .map(node -> node.getName())
+                        .collect(Collectors.toSet()),
+                "trusted Online Database Backup policy actions");
         helper.assertValueEqual(
                 Set.of("status", "stage", "cancel"),
                 backup.getChild("restore").getChildren().stream()
@@ -2804,6 +2810,10 @@ public final class CivicServerRuntimeGameTests {
                 "nation-founding-candidate-threshold-policy-command-" + UUID.randomUUID();
         String unauthorizedNationFoundingCandidateThresholdPolicyRequestId =
                 "nation-founding-candidate-threshold-policy-unauthorized-" + UUID.randomUUID();
+        String onlineDatabaseBackupPolicyRequestId =
+                "online-database-backup-policy-command-" + UUID.randomUUID();
+        String unauthorizedOnlineDatabaseBackupPolicyRequestId =
+                "online-database-backup-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2882,6 +2892,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin online-time policy schedule 60000 "
                         + effectiveAt + " " + onlineTimeObservationPolicyRequestId
                         + " GameTest Online Time Observation policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "civic economy admin backup policy schedule 7200000 12 "
+                        + effectiveAt + " " + onlineDatabaseBackupPolicyRequestId
+                        + " GameTest Online Database Backup policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
                 "civic economy admin nation-application expiry-policy schedule 60000 "
@@ -2967,6 +2982,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin online-time policy schedule 1 "
                         + effectiveAt + " " + unauthorizedOnlineTimeObservationPolicyRequestId
                         + " Untrusted Online Time Observation policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin backup policy schedule 1 1 "
+                        + effectiveAt + " " + unauthorizedOnlineDatabaseBackupPolicyRequestId
+                        + " Untrusted Online Database Backup policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin nation-application expiry-policy schedule 1 "
@@ -3056,6 +3076,12 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, onlineTimeObservationPolicyRequestId, effectiveAt);
             assertOnlineTimeObservationPolicyAbsent(
                     helper, databaseFile, unauthorizedOnlineTimeObservationPolicyRequestId);
+            assertOnlineDatabaseBackupPolicy(
+                    helper, databaseFile, onlineDatabaseBackupPolicyRequestId,
+                    effectiveAt, 1L);
+            assertOnlineDatabaseBackupPolicy(
+                    helper, databaseFile, unauthorizedOnlineDatabaseBackupPolicyRequestId,
+                    effectiveAt, 0L);
             assertNationApplicationExpiryPolicy(
                     helper, databaseFile, nationApplicationExpiryPolicyRequestId, effectiveAt, 1L);
             assertNationApplicationExpiryPolicy(
@@ -8148,7 +8174,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(95, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(96, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8986,6 +9012,45 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Online Time Observation policy", failure);
+        }
+    }
+
+    private static void assertOnlineDatabaseBackupPolicy(
+            GameTestHelper helper, Path databaseFile, String requestId,
+            long effectiveAtEpochMillis, long expectedCount) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, interval_millis, retention,
+                               effective_at_epoch_millis, reason
+                        FROM online_database_backup_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                if (expectedCount == 0L) {
+                    helper.assertFalse(result.next(),
+                            "non-OP cannot schedule Online Database Backup policy");
+                    return;
+                }
+                helper.assertTrue(result.next(),
+                        "persistent Online Database Backup policy");
+                helper.assertTrue(result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Online Database Backup administrator");
+                helper.assertValueEqual(7_200_000L, result.getLong(2),
+                        "online database backup interval");
+                helper.assertValueEqual(12, result.getInt(3),
+                        "online database backup retention");
+                helper.assertValueEqual(effectiveAtEpochMillis, result.getLong(4),
+                        "Online Database Backup policy effective time");
+                helper.assertValueEqual("GameTest Online Database Backup policy",
+                        result.getString(5), "Online Database Backup policy reason");
+                helper.assertFalse(result.next(),
+                        "duplicate Online Database Backup policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Online Database Backup policy", failure);
         }
     }
 

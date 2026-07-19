@@ -40,6 +40,7 @@ import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.civiceconomy.CivicEconomy;
+import org.civiceconomy.backup.OnlineDatabaseBackupPolicyRegistry;
 import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.Budget;
 import org.civiceconomy.fiscal.BudgetDraftExpiryProcessor;
@@ -118,6 +119,7 @@ import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.DatabaseIdentity;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
+import org.civiceconomy.persistence.StoredOnlineDatabaseBackupPolicy;
 import org.civiceconomy.production.EffectiveTerritoryFacilityAuthority;
 import org.civiceconomy.production.CreateMachineKind;
 import org.civiceconomy.production.CreateRecipeCompletion;
@@ -243,8 +245,7 @@ public final class CivicServerRuntime {
     private static final int TERRITORY_MAINTENANCE_ASSESSMENT_INTERVAL_TICKS = 20 * 60;
     private static final int REGISTERED_FACILITY_TERRITORY_INTERVAL_TICKS = 20 * 60;
     private static final int NATIONAL_STRENGTH_RECALCULATION_INTERVAL_TICKS = 20 * 60;
-    private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
-    private static final int DATABASE_BACKUP_RETENTION = 8;
+    private static final long DATABASE_BACKUP_POLICY_DISCOVERY_INTERVAL_TICKS = 20L * 60L;
     private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
             Duration.ofSeconds(5);
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
@@ -337,6 +338,7 @@ public final class CivicServerRuntime {
         seedGameTestNationApplicationLifetimePolicy(database, server, clock);
         seedGameTestNationFoundingCandidateThresholdPolicy(database, server, clock);
         seedGameTestEffectiveCitizenPopulationPolicy(database, server, clock);
+        seedGameTestOnlineDatabaseBackupPolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -349,8 +351,7 @@ public final class CivicServerRuntime {
         OnlineDatabaseBackupManager backups = new OnlineDatabaseBackupManager(
                 database,
                 databaseDirectory.resolve("backups"),
-                clock,
-                DATABASE_BACKUP_RETENTION);
+                clock);
         OnlineDatabaseRestoreManager restores =
                 new OnlineDatabaseRestoreManager(database, databaseDirectory, clock);
         state = new RuntimeState(
@@ -488,9 +489,9 @@ public final class CivicServerRuntime {
             scheduleRegisteredFacilityTerritoryReconciliation(current);
         }
         current.ticksSinceDatabaseBackup++;
-        if (current.ticksSinceDatabaseBackup >= DATABASE_BACKUP_INTERVAL_TICKS) {
+        if (current.ticksSinceDatabaseBackup >= current.databaseBackupIntervalTicks) {
             current.ticksSinceDatabaseBackup = 0;
-            scheduleLifecycleDatabaseBackup(current, "scheduled");
+            scheduleGovernedDatabaseBackup(current);
         }
         current.ticksSinceNationalStrengthRecalculation++;
         if (current.ticksSinceNationalStrengthRecalculation
@@ -694,8 +695,14 @@ public final class CivicServerRuntime {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("Civic server runtime is not active"));
         }
-        return current.writer.submitDatabase(ignored ->
-                current.backups.create(administratorIdentity, requestId, reason));
+        return current.writer.submitDatabase(database -> {
+            StoredOnlineDatabaseBackupPolicy policy =
+                    database.currentOnlineDatabaseBackupPolicy(clock.millis());
+            if (policy != null) {
+                current.backups.configureRetention(policy.retention());
+            }
+            return current.backups.create(administratorIdentity, requestId, reason);
+        });
     }
 
     CompletableFuture<List<StoredDatabaseBackupOperation>> databaseBackups() {
@@ -2582,16 +2589,28 @@ public final class CivicServerRuntime {
         }
         current.writer
                 .submitDatabase(ignored -> {
+                    StoredOnlineDatabaseBackupPolicy policy =
+                            ignored.currentOnlineDatabaseBackupPolicy(clock.millis());
+                    if (policy != null) {
+                        current.backups.configureRetention(policy.retention());
+                        current.databaseBackupIntervalTicks =
+                                intervalTicks(policy.intervalMillis());
+                    }
                     int recovered = current.backups.recoverPending().size();
                     StoredDatabaseBackupOperation startup = current.backups.create(
                             "civic-backup-lifecycle",
                             "startup-" + current.startedAtEpochMillis,
                             "Lifecycle startup database backup");
-                    return new DatabaseBackupLifecycleResult(recovered, startup);
+                    return new DatabaseBackupLifecycleResult(recovered, startup, policy);
                 })
                 .whenComplete((result, failure) -> {
                     current.databaseBackupQueued.set(false);
                     if (failure == null) {
+                        if (result.policy() == null) {
+                            reportMissingDatabaseBackupPolicy(current);
+                        } else {
+                            current.databaseBackupPolicyMissingLogged.set(false);
+                        }
                         LOGGER.info(
                                 "Civic database backup lifecycle recovered {} operation(s) and published {}",
                                 result.recovered(),
@@ -2604,34 +2623,63 @@ public final class CivicServerRuntime {
                 });
     }
 
-    private void scheduleLifecycleDatabaseBackup(RuntimeState current, String kind) {
+    private void scheduleGovernedDatabaseBackup(RuntimeState current) {
         if (!current.databaseBackupQueued.compareAndSet(false, true)) {
             return;
         }
-        long interval = Math.floorDiv(clock.millis(), Duration.ofMinutes(30).toMillis());
+        long asOfEpochMillis = clock.millis();
         current.writer
-                .submitDatabase(ignored -> current.backups.create(
-                        "civic-backup-lifecycle",
-                        kind + "-" + interval,
-                        "Lifecycle scheduled database backup"))
-                .whenComplete((backup, failure) -> {
+                .submitDatabase(database -> {
+                    StoredOnlineDatabaseBackupPolicy policy =
+                            database.currentOnlineDatabaseBackupPolicy(asOfEpochMillis);
+                    if (policy == null) {
+                        return new GovernedDatabaseBackupResult(null, null);
+                    }
+                    current.backups.configureRetention(policy.retention());
+                    long interval = Math.floorDiv(asOfEpochMillis, policy.intervalMillis());
+                    StoredDatabaseBackupOperation backup = current.backups.create(
+                            "civic-backup-lifecycle",
+                            "scheduled-" + policy.policyId() + "-" + interval,
+                            "Lifecycle scheduled database backup");
+                    return new GovernedDatabaseBackupResult(policy, backup);
+                })
+                .whenComplete((result, failure) -> current.server.execute(() -> {
                     current.databaseBackupQueued.set(false);
-                    if (failure == null) {
-                        LOGGER.info("Civic lifecycle database backup published {}", backup.fileName());
-                    } else {
+                    if (failure != null) {
                         LOGGER.error(
                                 "Civic lifecycle database backup failed; the durable operation remains recoverable",
                                 failure);
+                        return;
                     }
-                });
+                    if (result.policy() == null) {
+                        current.databaseBackupIntervalTicks =
+                                DATABASE_BACKUP_POLICY_DISCOVERY_INTERVAL_TICKS;
+                        reportMissingDatabaseBackupPolicy(current);
+                        return;
+                    }
+                    current.databaseBackupPolicyMissingLogged.set(false);
+                    current.databaseBackupIntervalTicks =
+                            intervalTicks(result.policy().intervalMillis());
+                    LOGGER.info(
+                            "Civic lifecycle database backup published {} under policy {}",
+                            result.backup().fileName(),
+                            result.policy().policyId());
+                }));
     }
 
     private void queueShutdownDatabaseBackup(RuntimeState current) {
         current.writer
-                .submitDatabase(ignored -> current.backups.create(
-                        "civic-backup-lifecycle",
-                        "shutdown-" + current.startedAtEpochMillis,
-                        "Lifecycle shutdown database backup"))
+                .submitDatabase(database -> {
+                    StoredOnlineDatabaseBackupPolicy policy =
+                            database.currentOnlineDatabaseBackupPolicy(clock.millis());
+                    if (policy != null) {
+                        current.backups.configureRetention(policy.retention());
+                    }
+                    return current.backups.create(
+                            "civic-backup-lifecycle",
+                            "shutdown-" + current.startedAtEpochMillis,
+                            "Lifecycle shutdown database backup");
+                })
                 .whenComplete((backup, failure) -> {
                     if (failure == null) {
                         LOGGER.info("Civic shutdown database backup published {}", backup.fileName());
@@ -4471,6 +4519,13 @@ public final class CivicServerRuntime {
         }
     }
 
+    private static void reportMissingDatabaseBackupPolicy(RuntimeState current) {
+        if (current.databaseBackupPolicyMissingLogged.compareAndSet(false, true)) {
+            LOGGER.warn(
+                    "Online Database Backup policy is not configured; scheduled online backups and rotation remain disabled until an OP schedules an effective policy, while startup recovery and shutdown snapshots remain enabled");
+        }
+    }
+
     private static void seedGameTestCitizenshipPolicy(
             CivicDatabase database, MinecraftServer server, Clock clock) {
         if (!server.getClass().getName().equals(
@@ -4639,6 +4694,25 @@ public final class CivicServerRuntime {
                 Duration.ofHours(8).toMillis(),
                 Math.max(0L, clock.millis() - 1L),
                 "Explicit GameTest Effective Citizen population policy fixture",
+                clock.millis());
+    }
+
+    private static void seedGameTestOnlineDatabaseBackupPolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentOnlineDatabaseBackupPolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleOnlineDatabaseBackupPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "online-database-backup-policy-bootstrap",
+                "civic-gametest-server",
+                Duration.ofMinutes(30).toMillis(),
+                8,
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest Online Database Backup policy fixture",
                 clock.millis());
     }
 
@@ -4850,6 +4924,7 @@ public final class CivicServerRuntime {
                 new AtomicBoolean();
         private final AtomicBoolean nationalStrengthRecalculationQueued = new AtomicBoolean();
         private final AtomicBoolean databaseBackupQueued = new AtomicBoolean();
+        private final AtomicBoolean databaseBackupPolicyMissingLogged = new AtomicBoolean();
         private volatile NationalStrengthSnapshot nationalStrengthSnapshot;
         private long ticksSinceCheckpoint;
         private volatile long onlineTimeCheckpointIntervalTicks =
@@ -4869,6 +4944,8 @@ public final class CivicServerRuntime {
         private int ticksSinceRegisteredFacilityTerritory;
         private int ticksSinceNationalStrengthRecalculation;
         private int ticksSinceDatabaseBackup;
+        private volatile long databaseBackupIntervalTicks =
+                DATABASE_BACKUP_POLICY_DISCOVERY_INTERVAL_TICKS;
         private boolean failureLogged;
 
         private RuntimeState(
@@ -5046,5 +5123,11 @@ public final class CivicServerRuntime {
             int nationCount, int fullyFunded, int partiallyFunded, int unfunded) {}
 
     private record DatabaseBackupLifecycleResult(
-            int recovered, StoredDatabaseBackupOperation backup) {}
+            int recovered,
+            StoredDatabaseBackupOperation backup,
+            StoredOnlineDatabaseBackupPolicy policy) {}
+
+    private record GovernedDatabaseBackupResult(
+            StoredOnlineDatabaseBackupPolicy policy,
+            StoredDatabaseBackupOperation backup) {}
 }

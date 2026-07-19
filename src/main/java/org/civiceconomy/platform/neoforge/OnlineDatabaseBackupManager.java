@@ -21,12 +21,18 @@ final class OnlineDatabaseBackupManager {
     private final CivicDatabase database;
     private final Path backupDirectory;
     private final Clock clock;
-    private final int retention;
     private final BackupSnapshotWriter snapshotWriter;
+    private volatile int retention;
+
+    OnlineDatabaseBackupManager(
+            CivicDatabase database, Path backupDirectory, Clock clock) {
+        this(database, backupDirectory, clock, CivicDatabase::backup);
+    }
 
     OnlineDatabaseBackupManager(
             CivicDatabase database, Path backupDirectory, Clock clock, int retention) {
-        this(database, backupDirectory, clock, retention, CivicDatabase::backup);
+        this(database, backupDirectory, clock, CivicDatabase::backup);
+        configureRetention(retention);
     }
 
     OnlineDatabaseBackupManager(
@@ -35,16 +41,28 @@ final class OnlineDatabaseBackupManager {
             Clock clock,
             int retention,
             BackupSnapshotWriter snapshotWriter) {
+        this(database, backupDirectory, clock, snapshotWriter);
+        configureRetention(retention);
+    }
+
+    private OnlineDatabaseBackupManager(
+            CivicDatabase database,
+            Path backupDirectory,
+            Clock clock,
+            BackupSnapshotWriter snapshotWriter) {
         this.database = Objects.requireNonNull(database, "database");
         this.backupDirectory = Objects.requireNonNull(backupDirectory, "backupDirectory")
                 .toAbsolutePath()
                 .normalize();
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.snapshotWriter = Objects.requireNonNull(snapshotWriter, "snapshotWriter");
+    }
+
+    void configureRetention(int retention) {
         if (retention < 1) {
             throw new IllegalArgumentException("Database backup retention must be positive");
         }
         this.retention = retention;
-        this.snapshotWriter = Objects.requireNonNull(snapshotWriter, "snapshotWriter");
     }
 
     StoredDatabaseBackupOperation create(
@@ -156,6 +174,10 @@ final class OnlineDatabaseBackupManager {
     }
 
     private void rotateCommittedBackups() {
+        int governedRetention = retention;
+        if (governedRetention == 0) {
+            return;
+        }
         List<StoredDatabaseBackupOperation> committed = database.committedDatabaseBackupOperations();
         var stagedRestore = database.pendingDatabaseRestoreOperation();
         UUID pinnedOperationId = stagedRestore == null
@@ -164,14 +186,14 @@ final class OnlineDatabaseBackupManager {
         List<StoredDatabaseBackupOperation> removable = committed.stream()
                 .filter(operation -> !operation.operationId().equals(pinnedOperationId))
                 .toList();
-        int removeCount = removable.size() - retention;
+        int removeCount = removable.size() - governedRetention;
         for (int index = 0; index < removeCount; index++) {
             StoredDatabaseBackupOperation old = removable.get(index);
             try {
                 Files.deleteIfExists(resolveFile(old.fileName()));
                 Files.deleteIfExists(resolveFile(old.fileName() + ".pending"));
                 database.retireDatabaseBackupOperation(
-                        old.operationId(), "Retention limit " + retention, clock.millis());
+                        old.operationId(), "Retention limit " + governedRetention, clock.millis());
             } catch (IOException | RuntimeException failure) {
                 database.recordDatabaseBackupFailure(
                         old.operationId(), "Rotation deferred: " + failure, clock.millis());

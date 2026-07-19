@@ -100,6 +100,32 @@ class OnlineDatabaseBackupManagerTest {
     }
 
     @Test
+    void retentionStaysDisabledUntilAGovernedPolicyIsApplied() {
+        Path backupDirectory = temporaryDirectory.resolve("governed-rotation");
+        try (CivicDatabase database = open("governed-rotation.sqlite3")) {
+            OnlineDatabaseBackupManager manager = new OnlineDatabaseBackupManager(
+                    database,
+                    backupDirectory,
+                    Clock.fixed(Instant.ofEpochMilli(1_000L), ZoneOffset.UTC));
+            StoredDatabaseBackupOperation first = manager.create(
+                    "lifecycle", "unconfigured-1", "Unconfigured backup");
+            StoredDatabaseBackupOperation second = manager.create(
+                    "lifecycle", "unconfigured-2", "Unconfigured backup");
+
+            assertTrue(Files.isRegularFile(backupDirectory.resolve(first.fileName())));
+            assertTrue(Files.isRegularFile(backupDirectory.resolve(second.fileName())));
+
+            manager.configureRetention(1);
+            StoredDatabaseBackupOperation governed = manager.create(
+                    "lifecycle", "governed-1", "Governed backup");
+
+            assertFalse(Files.exists(backupDirectory.resolve(first.fileName())));
+            assertFalse(Files.exists(backupDirectory.resolve(second.fileName())));
+            assertTrue(Files.isRegularFile(backupDirectory.resolve(governed.fileName())));
+        }
+    }
+
+    @Test
     void failedNewSnapshotDoesNotRotateTheLastGoodBackupAndIsRecoverable() {
         Path backupDirectory = temporaryDirectory.resolve("failure");
         try (CivicDatabase database = open("failure.sqlite3")) {

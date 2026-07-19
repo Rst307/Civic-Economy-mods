@@ -365,3 +365,9 @@ _Avoid_: 出口次数、机器次数、未绑定库存快照、自动推测跨�
 **跨设施出口交接（Cross-Facility Export Handoff）**:
 由服务器明确确认的一次 `EXPORT` 与另一座 Registered Facility 的 Facility Accounting Receipt 之间的运输事实；交接必须指向真实目标核算接口和能覆盖该批货物的真实后续 Receipt，不能由物品身份或时间邻近自动推断。
 _Avoid_: 同设施搬运、SALE 交接、客户端提交的目标字符串、相似物品猜测
+
+## 运维与恢复
+
+**在线数据库备份政策（Online Database Backup Policy）**:
+由受信任服务器治理安排、在未来时刻生效的 Civic SQLite 在线备份间隔和普通恢复点保留数量；它不代表完整 Minecraft 世界备份，也不关闭启动恢复或正常关服快照。
+_Avoid_: Minecraft 世界备份、数据库恢复政策、隐藏固定 30 分钟/8 份规则
