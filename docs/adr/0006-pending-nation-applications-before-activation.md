@@ -1,0 +1,3 @@
+# Pending Nation applications precede permanent Nation activation
+
+Civic records a persistent Nation Application bound to an unregistered FTB Team before creating a permanent Nation. Candidate Members accumulate recent, non-reusable online evidence during `PENDING`; only an eligible activation creates the NationId, Citizenship, Capital, and National Treasury. This avoids treating raw FTB membership as Citizenship or creating partially privileged Nations before the minimum-effective-citizen rule can be satisfied, at the cost of a distinct pre-Nation lifecycle and explicit cancellation/expiry evidence ownership.

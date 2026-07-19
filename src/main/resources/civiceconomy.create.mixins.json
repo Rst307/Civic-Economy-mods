@@ -1,0 +1,13 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "org.civiceconomy.mixin.create",
+  "plugin": "org.civiceconomy.mixin.create.CreateMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "MillstoneBlockEntityMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

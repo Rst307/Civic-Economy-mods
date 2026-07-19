@@ -1,0 +1,3 @@
+# Prepaid permits bridge fiscal work and synchronous claims
+
+FTB Chunks must decide `BEFORE_CLAIM` synchronously on the Minecraft server thread, while Civic cannot safely wait there for SQLite or LC. Civic therefore completes and verifies fiscal prepayment off-thread, persists a single-use Territory Claim Permit for one exact Nation, actor, and chunk, and exposes only an in-memory permit mirror to the synchronous claim hook; a missing or stale permit fails closed, and later reconciliation handles persistence or cross-mod failures through explicit states rather than claiming a shared atomic transaction.

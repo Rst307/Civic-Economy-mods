@@ -1,0 +1,3 @@
+# Quarantine ambiguous Mint issuance before Stock Correction
+
+When a real LC Mint credit or material consumption may already have occurred but Civic cannot reconcile the durable step, the Mint Batch remains in recovery, its quota remains reserved, and a persistent Mint Recovery Incident records the evidence. Civic does not automatically withdraw the National Treasury because the credited funds may already support later formal Reservations, and it does not cancel the Batch or release quota as if issuance had not happened; any proven monetary divergence must instead use a distinct server-level Monetary Stock Correction with evidence, a reason, and immutable audit rather than a normal payment or direct Batch retry.

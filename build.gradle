@@ -1,0 +1,232 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.141'
+    id 'idea'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+repositories {
+    maven { url = 'https://maven.ftb.dev/releases' }
+    maven { url = 'https://maven.architectury.dev' }
+    maven { url = 'https://api.modrinth.com/maven' }
+    mavenCentral()
+}
+
+neoForge {
+    version = project.neo_version
+
+    parchment {
+        mappingsVersion = project.parchment_mappings_version
+        minecraftVersion = project.parchment_minecraft_version
+    }
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
+        server {
+            server()
+            gameDirectory = project.file(providers.gradleProperty('includeCreate')
+                    .map(String::toBoolean)
+                    .getOrElse(false) ? 'run-server-create' : 'run-server')
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
+        gameTestServer {
+            type = 'gameTestServer'
+            gameDirectory = project.file(
+                    providers.gradleProperty('gameTestDirectory').getOrElse('run'))
+            def budgetDisbursementRestartDrill =
+                    providers.gradleProperty('budgetDisbursementRestartDrill').orNull
+            def treasuryWithdrawalRestartDrill =
+                    providers.gradleProperty('treasuryWithdrawalRestartDrill').orNull
+            def nationActivationRestartDrill =
+                    providers.gradleProperty('nationActivationRestartDrill').orNull
+            def permanentDestructionRestartDrill =
+                    providers.gradleProperty('permanentDestructionRestartDrill').orNull
+            def matchedWorldRollbackDrill =
+                    providers.gradleProperty('matchedWorldRollbackDrill').orNull
+            if ([budgetDisbursementRestartDrill,
+                    treasuryWithdrawalRestartDrill,
+                    nationActivationRestartDrill,
+                    permanentDestructionRestartDrill,
+                    matchedWorldRollbackDrill].count { it != null } > 1) {
+                throw new GradleException('Only one process restart drill may run at a time')
+            }
+            systemProperty 'neoforge.enabledGameTestNamespaces',
+                    budgetDisbursementRestartDrill != null
+                            ? "${project.mod_id}_budget_disbursement_restart"
+                            : treasuryWithdrawalRestartDrill != null
+                                    ? "${project.mod_id}_treasury_withdrawal_restart"
+                                    : nationActivationRestartDrill != null
+                                            ? "${project.mod_id}_nation_activation_restart"
+                                     : permanentDestructionRestartDrill != null
+                                             ? "${project.mod_id}_permanent_destruction_restart"
+                                     : matchedWorldRollbackDrill != null
+                                             ? "${project.mod_id}_matched_world_rollback"
+                                     : project.mod_id
+            providers.gradleProperty('mintRestartDrill').orNull?.with { mode ->
+                systemProperty 'civiceconomy.mintRestartDrill', mode
+            }
+            budgetDisbursementRestartDrill?.with { mode ->
+                systemProperty 'civiceconomy.budgetDisbursementRestartDrill', mode
+            }
+            treasuryWithdrawalRestartDrill?.with { mode ->
+                systemProperty 'civiceconomy.treasuryWithdrawalRestartDrill', mode
+            }
+            nationActivationRestartDrill?.with { mode ->
+                systemProperty 'civiceconomy.nationActivationRestartDrill', mode
+            }
+            permanentDestructionRestartDrill?.with { mode ->
+                systemProperty 'civiceconomy.permanentDestructionRestartDrill', mode
+            }
+            matchedWorldRollbackDrill?.with { mode ->
+                systemProperty 'civiceconomy.matchedWorldRollbackDrill', mode
+            }
+        }
+
+        configureEach {
+            logLevel = org.slf4j.event.Level.INFO
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+    testRuntimeClasspath.extendsFrom localRuntime
+}
+
+dependencies {
+    jarJar(implementation("org.xerial:sqlite-jdbc:${sqlite_jdbc_version}")) {
+        version {
+            strictly "[${sqlite_jdbc_version}]"
+            prefer sqlite_jdbc_version
+        }
+    }
+    additionalRuntimeClasspath "org.xerial:sqlite-jdbc:${sqlite_jdbc_version}"
+
+    compileOnly "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
+    compileOnly "dev.ftb.mods:ftb-library-neoforge:${ftb_library_version}"
+    compileOnly "dev.ftb.mods:ftb-teams-neoforge:${ftb_teams_version}"
+    compileOnly "dev.ftb.mods:ftb-chunks-neoforge:${ftb_chunks_version}"
+    localRuntime "maven.modrinth:lightmans-currency:${lightmans_currency_version}"
+    localRuntime "dev.ftb.mods:ftb-library-neoforge:${ftb_library_version}"
+    localRuntime "dev.ftb.mods:ftb-teams-neoforge:${ftb_teams_version}"
+    localRuntime "dev.ftb.mods:ftb-chunks-neoforge:${ftb_chunks_version}"
+
+    if (providers.gradleProperty('includeCreate').map(String::toBoolean).getOrElse(false)) {
+        localRuntime "maven.modrinth:create:${create_version}"
+    }
+
+    testImplementation platform('org.junit:junit-bom:5.12.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
+    systemProperty 'civic.test.createExpected',
+            providers.gradleProperty('includeCreate').map(String::toBoolean).getOrElse(false)
+}
+
+tasks.named('wrapper', Wrapper).configure {
+    distributionType = Wrapper.DistributionType.BIN
+}
+
+tasks.register('resolveRuntimeDependencies') {
+    def runtimeDependencies = configurations.localRuntime
+    inputs.files(runtimeDependencies)
+    doLast {
+        runtimeDependencies.files.each { println it }
+    }
+}
+
+var generateModMetadata = tasks.register('generateModMetadata', ProcessResources) {
+    var replaceProperties = [
+            minecraft_version          : minecraft_version,
+            minecraft_version_range    : minecraft_version_range,
+            neo_version                : neo_version,
+            loader_version_range       : loader_version_range,
+            mod_id                     : mod_id,
+            mod_name                   : mod_name,
+            mod_license                : mod_license,
+            mod_version                : mod_version,
+            lightmans_currency_version : lightmans_currency_version,
+            ftb_teams_version          : ftb_teams_version,
+            ftb_chunks_version         : ftb_chunks_version,
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from 'src/main/templates'
+    into 'build/generated/sources/modMetadata'
+}
+
+var generateGameTestStructures = tasks.register('generateGameTestStructures') {
+    inputs.file layout.projectDirectory.file('src/main/gametest/empty.nbt.b64')
+    def standardEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy/structure/empty.nbt')
+    def budgetRestartEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_budget_disbursement_restart/structure/empty.nbt')
+    def withdrawalRestartEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_treasury_withdrawal_restart/structure/empty.nbt')
+    def nationActivationRestartEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_nation_activation_restart/structure/empty.nbt')
+    def permanentDestructionRestartEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_permanent_destruction_restart/structure/empty.nbt')
+    def matchedWorldRollbackEmpty = layout.buildDirectory.file(
+            'generated/gametestResources/data/civiceconomy_matched_world_rollback/structure/empty.nbt')
+    outputs.files standardEmpty,
+            budgetRestartEmpty,
+            withdrawalRestartEmpty,
+            nationActivationRestartEmpty,
+            permanentDestructionRestartEmpty,
+            matchedWorldRollbackEmpty
+    doLast {
+        def decoded = Base64.decoder.decode(inputs.files.singleFile.text.trim())
+        [standardEmpty.get().asFile,
+                budgetRestartEmpty.get().asFile,
+                withdrawalRestartEmpty.get().asFile,
+                nationActivationRestartEmpty.get().asFile,
+                permanentDestructionRestartEmpty.get().asFile,
+                matchedWorldRollbackEmpty.get().asFile].each { outputFile ->
+            outputFile.parentFile.mkdirs()
+            outputFile.bytes = decoded
+        }
+    }
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+sourceSets.main.resources.srcDir layout.buildDirectory.dir('generated/gametestResources')
+tasks.named('processResources').configure { dependsOn generateGameTestStructures }
+
+tasks.register('restoreMatchedWorldRollbackDrill', JavaExec) {
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.civiceconomy.platform.neoforge.MatchedWorldRollbackRestoreMain'
+    args layout.projectDirectory.dir('run').asFile.absolutePath
+}
+neoForge.ideSyncTask generateModMetadata
+neoForge.ideSyncTask generateGameTestStructures
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

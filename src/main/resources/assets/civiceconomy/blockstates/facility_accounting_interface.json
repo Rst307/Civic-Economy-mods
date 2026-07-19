@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "civiceconomy:block/facility_accounting_interface"
+    }
+  }
+}
