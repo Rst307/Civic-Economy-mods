@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 94;
+    private static final int SCHEMA_VERSION = 95;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4600,6 +4600,20 @@ public final class CivicDatabase implements AutoCloseable {
             return readNationFoundingCandidateThresholdPolicy(query);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to read formal founding threshold policy request", failure);
+        }
+    }
+
+    public synchronized StoredEffectiveCitizenPopulationPolicy effectiveCitizenPopulationPolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM effective_citizen_population_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readEffectiveCitizenPopulationPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Effective Citizen population policy request", failure);
         }
     }
 
@@ -9946,6 +9960,22 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredEffectiveCitizenPopulationPolicy
+            currentEffectiveCitizenPopulationPolicy(long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM effective_citizen_population_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC, policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readEffectiveCitizenPopulationPolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read current Effective Citizen population policy", failure);
+        }
+    }
+
     public synchronized StoredEffectiveTerritoryStrengthPolicy
             currentEffectiveTerritoryStrengthPolicy(long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -10437,6 +10467,33 @@ public final class CivicDatabase implements AutoCloseable {
             return nationFoundingCandidateThresholdPolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to schedule formal founding threshold policy", failure);
+        }
+    }
+
+    public synchronized StoredEffectiveCitizenPopulationPolicy scheduleEffectiveCitizenPopulationPolicy(
+            UUID policyId, String serviceIdentity, String requestId, String actorIdentity,
+            long observationWindowMillis, long fullContributionTimeMillis,
+            long effectiveAtEpochMillis, String reason, long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO effective_citizen_population_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    observation_window_millis, full_contribution_time_millis,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setLong(5, observationWindowMillis);
+            insert.setLong(6, fullContributionTimeMillis);
+            insert.setLong(7, effectiveAtEpochMillis);
+            insert.setString(8, reason);
+            insert.setLong(9, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return effectiveCitizenPopulationPolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to schedule Effective Citizen population policy", failure);
         }
     }
 
@@ -18101,6 +18158,29 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 94");
             }
+            if (version < 95) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS effective_citizen_population_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL CHECK (length(trim(actor_identity)) > 0),
+                            observation_window_millis INTEGER NOT NULL CHECK (observation_window_millis > 0),
+                            full_contribution_time_millis INTEGER NOT NULL CHECK (full_contribution_time_millis > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS effective_citizen_population_policy_current
+                        ON effective_citizen_population_policy (
+                            effective_at_epoch_millis, recorded_at_epoch_millis, policy_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 95");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -18806,6 +18886,22 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("service_identity"), result.getString("request_id"),
                     result.getString("actor_identity"),
                     result.getInt("minimum_effective_candidates"),
+                    result.getLong("effective_at_epoch_millis"), result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredEffectiveCitizenPopulationPolicy readEffectiveCitizenPopulationPolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredEffectiveCitizenPopulationPolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"), result.getString("request_id"),
+                    result.getString("actor_identity"), result.getLong("observation_window_millis"),
+                    result.getLong("full_contribution_time_millis"),
                     result.getLong("effective_at_epoch_millis"), result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
         }

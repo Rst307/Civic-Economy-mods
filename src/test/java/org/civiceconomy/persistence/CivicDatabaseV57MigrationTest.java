@@ -60,7 +60,7 @@ class CivicDatabaseV57MigrationTest {
             StoredTreasuryWithdrawalApproval approval =
                     migrated.treasuryWithdrawalApproval(approvalId);
 
-            assertEquals(94, migrated.schemaVersion());
+            assertEquals(95, migrated.schemaVersion());
             assertEquals("APPROVED", approval.state());
             assertEquals(
                     NOW.plusSeconds(7L * 24L * 60L * 60L).toEpochMilli(),

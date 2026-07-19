@@ -220,6 +220,8 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 /civic economy admin nation-application lifetime-policy schedule <lifetimeMillis> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin nation-application candidate-threshold-policy show
 /civic economy admin nation-application candidate-threshold-policy schedule <minimumEffectiveCandidates> <effectiveAtEpochMillis> <requestId> <reason>
+/civic economy admin citizenship population-policy show
+/civic economy admin citizenship population-policy schedule <observationWindowMillis> <fullContributionTimeMillis> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
 激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。

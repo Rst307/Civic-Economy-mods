@@ -345,10 +345,11 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 - Raised SQLite to schema v92 with delayed, immutable and audited Candidate Online Evidence Policy versions. The policy controls only the recent online interval window used by later status, cancellation, activation and automatic-expiry evidence claims; it never changes an application's persisted deadline, releases or reassigns already claimed evidence, or permits one interval to support multiple applications. Missing policy fails those evidence-owning operations closed instead of retaining the removed hidden 60-day default. OP/console can inspect or schedule policy through `/civic economy admin nation-application candidate-evidence-policy show|schedule`; server-derived administrator identity, exact replay, changed-replay conflict and non-OP rejection are persisted and tested.
 - Raised SQLite to schema v93 with delayed, immutable and audited Nation Application Lifetime Policy versions. A new application reads only the policy effective at creation and permanently stores its calculated deadline; later policy changes cannot rewrite existing applications. Missing policy rejects new applications. OP/console can inspect or schedule policy through `/civic economy admin nation-application lifetime-policy show|schedule`; exact replay is idempotent, changed replay conflicts, and non-OP writes never reach persistence.
 - Raised SQLite to schema v94 with delayed, immutable and audited Nation Founding Candidate Threshold Policy versions. Formal status and activation read the currently effective threshold and fail closed without one. A permanently marked DEBUG WORLD may explicitly reduce the actual activation requirement to one candidate, while the activation audit still records the formal threshold and bypass flag. OP/console can inspect or schedule policy through `/civic economy admin nation-application candidate-threshold-policy show|schedule`; changed replay conflicts and non-OP writes never reach persistence.
+- Raised SQLite to schema v95 with delayed, immutable and audited Effective Citizen Population Policy versions. The policy governs both the observation window and full-contribution online time used by population display, free territory allocation, restoration, automatic maintenance and National Strength. Missing policy fails those dependent calculations closed instead of retaining hidden 60-day/eight-hour defaults. OP/console can inspect or schedule policy through `/civic economy admin citizenship population-policy show|schedule`; exact replay is idempotent, changed replay conflicts and non-OP writes never reach persistence.
 
 ## In progress
 
-- Prepare the next TDD slice to remove the remaining fixed Effective Citizen founding evidence values from the player command path without changing the separately governed Candidate Online Evidence window.
+- Complete and verify the Effective Citizen Population Policy/schema-v95 slice, then select the next unresolved v1 policy constant from the status audit.
 
 ## Not yet completed
 
@@ -868,7 +869,17 @@ This file distinguishes unit fixtures, artifact/source inspection, compilation, 
 
 ## Next step
 
-Remove the remaining fixed Effective Citizen founding evidence values from the player-facing path, keeping Candidate Online Evidence ownership, formal threshold policy and DEBUG WORLD bypass semantics unchanged.
+Audit the remaining production constants against the v1.1 configurable-parameter table and select the next independent fail-closed policy slice.
+
+## Latest checkpoint evidence: Effective Citizen Population Policy / schema v95
+
+- TDD proved future-effective selection, restart persistence, exact replay and changed-payload conflict against real SQLite. A genuine v94 database migrates to v95 with empty policy history and no invented 60-day/eight-hour default.
+- Population display, Territory Claim preparation, Restoration, automatic Maintenance assessment and National Strength now resolve the same policy at their calculation time. Missing policy fails each dependent calculation closed while preserving Citizenship, Correction Grace and online-time facts.
+- OP/console can show or schedule the policy under `/civic economy admin citizenship population-policy`; the shared real command GameTest verifies server-derived administrator identity and exact persisted fields, while a non-OP request writes no row. GameTest startup explicitly seeds the v1.1 60-day/eight-hour fixture; production worlds receive no hidden default.
+- `gradlew.bat clean build --no-daemon --console=plain` passed 553/553 JUnit and real-SQLite tests in 1m 48s.
+- Fresh isolated worlds passed all 61/61 required GameTests without Create in 15.07s and with real Create 6.0.6/Flywheel/Ponder in 12.99s. Both exercised the schema-v95 administrator command and dependent runtime paths.
+- Dedicated servers opened the schema-v95 runtime and reached `Done (4.714s)!` without Create and `Done (5.520s)!` with Create. Gradle did not forward `stop`, so task-owned processes were terminated after readiness; this remains startup rather than graceful-shutdown evidence.
+- Development JAR: `D:\ImportantFileFolder\Minecraft\AiMods\Civic Economy mods\build\libs\civiceconomy-0.1.0-probe.jar`, 16,215,591 bytes, SHA-256 `4D410ED2651BD9CFC7A0D2531B41E19E8A79BF562846585C097238DDCEC1034D`.
 
 ## Latest checkpoint evidence: Nation Application Lifetime Policy / schema v93
 

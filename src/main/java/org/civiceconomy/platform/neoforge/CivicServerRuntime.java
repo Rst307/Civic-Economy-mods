@@ -245,8 +245,6 @@ public final class CivicServerRuntime {
     private static final int NATIONAL_STRENGTH_RECALCULATION_INTERVAL_TICKS = 20 * 60;
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
     private static final int DATABASE_BACKUP_RETENTION = 8;
-    private static final Duration EFFECTIVE_CITIZEN_OBSERVATION_WINDOW = Duration.ofDays(60);
-    private static final Duration NATIONAL_STRENGTH_FULL_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
             Duration.ofSeconds(5);
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
@@ -338,6 +336,7 @@ public final class CivicServerRuntime {
         seedGameTestCandidateOnlineEvidencePolicy(database, server, clock);
         seedGameTestNationApplicationLifetimePolicy(database, server, clock);
         seedGameTestNationFoundingCandidateThresholdPolicy(database, server, clock);
+        seedGameTestEffectiveCitizenPopulationPolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -2699,13 +2698,14 @@ public final class CivicServerRuntime {
                         throw new SecurityException(
                                 "Free Claim actor does not belong to the exact Nation");
                     }
+                    var populationPolicy = effectiveCitizenPopulationPolicy(database, commandClock);
                     var population = new org.civiceconomy.nation.NationPopulationCalculator(
                                     citizenships,
                                     new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
                                             database, commandClock),
                                     new org.civiceconomy.nation.OnlineTimeLedger(database),
-                                    EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
-                                    Duration.ofHours(8))
+                                    populationPolicy.observationWindow(),
+                                    populationPolicy.fullContributionTime())
                             .calculate(nation.nationId(), commandTime);
                     var allocation = new TerritoryFreeAllocationPolicyRegistry(
                                     database,
@@ -2953,12 +2953,13 @@ public final class CivicServerRuntime {
                                 storedCapital.dimensionId(),
                                 storedCapital.chunkX(),
                                 storedCapital.chunkZ());
+                        var populationPolicy = effectiveCitizenPopulationPolicy(database, commandClock);
                         var population = new org.civiceconomy.nation.NationPopulationCalculator(
                                         citizenships,
                                         corrections,
                                         new org.civiceconomy.nation.OnlineTimeLedger(database),
-                                        EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
-                                        Duration.ofHours(8))
+                                        populationPolicy.observationWindow(),
+                                        populationPolicy.fullContributionTime())
                                 .calculate(nation.nationId(), commandTime);
                         TerritoryFreeAllocation allocation =
                                 new TerritoryFreeAllocationPolicyRegistry(
@@ -3995,12 +3996,13 @@ public final class CivicServerRuntime {
                 database, citizenshipTransferCooldown(database, scanClock), scanClock);
         var grace = new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
                 database, scanClock);
+        var populationPolicy = effectiveCitizenPopulationPolicy(database, scanClock);
         var populations = new org.civiceconomy.nation.NationPopulationCalculator(
                 citizenships,
                 grace,
                 new org.civiceconomy.nation.OnlineTimeLedger(database),
-                EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
-                Duration.ofHours(8));
+                populationPolicy.observationWindow(),
+                populationPolicy.fullContributionTime());
         var allocationPolicy = new TerritoryFreeAllocationPolicyRegistry(
                         database,
                         scanClock,
@@ -4420,10 +4422,20 @@ public final class CivicServerRuntime {
 
     private static NationalStrengthSnapshotConfiguration nationalStrengthConfiguration(
             CivicDatabase database, Clock clock) {
+        var populationPolicy = effectiveCitizenPopulationPolicy(database, clock);
         return new NationalStrengthSnapshotConfiguration(
                 citizenshipTransferCooldown(database, clock),
-                EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
-                NATIONAL_STRENGTH_FULL_CITIZEN_TIME);
+                populationPolicy.observationWindow(),
+                populationPolicy.fullContributionTime());
+    }
+
+    private static org.civiceconomy.nation.EffectiveCitizenPopulationPolicy
+            effectiveCitizenPopulationPolicy(CivicDatabase database, Clock clock) {
+        return new org.civiceconomy.nation.EffectiveCitizenPopulationPolicyRegistry(database, clock)
+                .current(clock.instant())
+                .orElseThrow(() -> new IllegalStateException(
+                        "Effective Citizen population policy is not configured"))
+                .policy();
     }
 
     private static Duration citizenshipCorrectionGrace(CivicDatabase database, Clock clock) {
@@ -4608,6 +4620,25 @@ public final class CivicServerRuntime {
                 2,
                 Math.max(0L, clock.millis() - 1L),
                 "Explicit GameTest formal Nation founding candidate threshold fixture",
+                clock.millis());
+    }
+
+    private static void seedGameTestEffectiveCitizenPopulationPolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentEffectiveCitizenPopulationPolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleEffectiveCitizenPopulationPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "effective-citizen-population-policy-bootstrap",
+                "civic-gametest-server",
+                Duration.ofDays(60).toMillis(),
+                Duration.ofHours(8).toMillis(),
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest Effective Citizen population policy fixture",
                 clock.millis());
     }
 

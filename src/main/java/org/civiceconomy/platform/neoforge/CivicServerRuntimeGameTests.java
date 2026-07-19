@@ -2780,6 +2780,10 @@ public final class CivicServerRuntimeGameTests {
                 "citizenship-policy-command-" + UUID.randomUUID();
         String unauthorizedCitizenshipPolicyRequestId =
                 "citizenship-policy-unauthorized-" + UUID.randomUUID();
+        String effectiveCitizenPopulationPolicyRequestId =
+                "effective-citizen-population-policy-command-" + UUID.randomUUID();
+        String unauthorizedEffectiveCitizenPopulationPolicyRequestId =
+                "effective-citizen-population-policy-unauthorized-" + UUID.randomUUID();
         String onlineTimeObservationPolicyRequestId =
                 "online-time-observation-policy-command-" + UUID.randomUUID();
         String unauthorizedOnlineTimeObservationPolicyRequestId =
@@ -2870,6 +2874,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Citizenship policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin citizenship population-policy schedule 3888000000 21600000 "
+                        + effectiveAt + " " + effectiveCitizenPopulationPolicyRequestId
+                        + " GameTest Effective Citizen population policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin online-time policy schedule 60000 "
                         + effectiveAt + " " + onlineTimeObservationPolicyRequestId
                         + " GameTest Online Time Observation policy");
@@ -2948,6 +2957,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin citizenship policy schedule 1 1 1 "
                         + effectiveAt + " " + unauthorizedCitizenshipPolicyRequestId
                         + " Untrusted Citizenship policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin citizenship population-policy schedule 1 1 "
+                        + effectiveAt + " " + unauthorizedEffectiveCitizenPopulationPolicyRequestId
+                        + " Untrusted Effective Citizen population policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin online-time policy schedule 1 "
@@ -3032,6 +3046,12 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, citizenshipPolicyRequestId, effectiveAt);
             assertCitizenshipPolicyAbsent(
                     helper, databaseFile, unauthorizedCitizenshipPolicyRequestId);
+            assertEffectiveCitizenPopulationPolicy(
+                    helper, databaseFile, effectiveCitizenPopulationPolicyRequestId,
+                    effectiveAt, 1L);
+            assertEffectiveCitizenPopulationPolicy(
+                    helper, databaseFile, unauthorizedEffectiveCitizenPopulationPolicyRequestId,
+                    effectiveAt, 0L);
             assertOnlineTimeObservationPolicyScheduled(
                     helper, databaseFile, onlineTimeObservationPolicyRequestId, effectiveAt);
             assertOnlineTimeObservationPolicyAbsent(
@@ -8128,7 +8148,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(94, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(95, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8867,6 +8887,44 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Citizenship policy", failure);
+        }
+    }
+
+    private static void assertEffectiveCitizenPopulationPolicy(
+            GameTestHelper helper, Path databaseFile, String requestId,
+            long effectiveAtEpochMillis, long expectedCount) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, observation_window_millis,
+                               full_contribution_time_millis,
+                               effective_at_epoch_millis, reason
+                        FROM effective_citizen_population_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                if (expectedCount == 0L) {
+                    helper.assertFalse(result.next(),
+                            "non-OP cannot schedule Effective Citizen population policy");
+                    return;
+                }
+                helper.assertTrue(result.next(), "persistent Effective Citizen population policy");
+                helper.assertTrue(result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Effective Citizen population administrator");
+                helper.assertValueEqual(3_888_000_000L, result.getLong(2),
+                        "Effective Citizen observation window");
+                helper.assertValueEqual(21_600_000L, result.getLong(3),
+                        "Effective Citizen full contribution time");
+                helper.assertValueEqual(effectiveAtEpochMillis, result.getLong(4),
+                        "Effective Citizen population policy effective time");
+                helper.assertValueEqual("GameTest Effective Citizen population policy",
+                        result.getString(5), "Effective Citizen population policy reason");
+                helper.assertFalse(result.next(), "duplicate Effective Citizen population policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Effective Citizen population policy", failure);
         }
     }
 

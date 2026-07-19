@@ -37,6 +37,9 @@ import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.nation.CitizenshipPolicy;
 import org.civiceconomy.nation.CitizenshipPolicyRegistry;
 import org.civiceconomy.nation.CitizenshipPolicyVersion;
+import org.civiceconomy.nation.EffectiveCitizenPopulationPolicy;
+import org.civiceconomy.nation.EffectiveCitizenPopulationPolicyRegistry;
+import org.civiceconomy.nation.EffectiveCitizenPopulationPolicyVersion;
 import org.civiceconomy.nation.CandidateOnlineEvidencePolicy;
 import org.civiceconomy.nation.CandidateOnlineEvidencePolicyRegistry;
 import org.civiceconomy.nation.CandidateOnlineEvidencePolicyVersion;
@@ -53,6 +56,7 @@ import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicy;
 import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicyRegistry;
 import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicyVersion;
 import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
+import org.civiceconomy.nation.ScheduleEffectiveCitizenPopulationPolicy;
 import org.civiceconomy.nation.ScheduleCandidateOnlineEvidencePolicy;
 import org.civiceconomy.nation.ScheduleOnlineTimeObservationPolicy;
 import org.civiceconomy.nation.ScheduleNationApplicationExpiryPolicy;
@@ -132,6 +136,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-registered-facility-scope-policy");
     private static final ServiceIdentity CITIZENSHIP_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-citizenship-policy");
+    private static final ServiceIdentity EFFECTIVE_CITIZEN_POPULATION_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-effective-citizen-population-policy");
     private static final ServiceIdentity ONLINE_TIME_OBSERVATION_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-online-time-observation-policy");
     private static final ServiceIdentity NATION_APPLICATION_EXPIRY_POLICY_SERVICE =
@@ -838,7 +844,35 @@ public final class FiscalAdministrationCommands {
                                                                                                 "requestId"),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
-                                                                                                "reason")))))))))));
+                                                                                                "reason")))))))))))
+                .then(Commands.literal("population-policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showEffectiveCitizenPopulationPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "observationWindowMillis",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "fullContributionTimeMillis",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleEffectiveCitizenPopulationPolicy(
+                                                                                        context.getSource(),
+                                                                                        LongArgumentType.getLong(context, "observationWindowMillis"),
+                                                                                        LongArgumentType.getLong(context, "fullContributionTimeMillis"),
+                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                                        StringArgumentType.getString(context, "reason"))))))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -1532,6 +1566,66 @@ public final class FiscalAdministrationCommands {
                 }));
         source.sendSuccess(() -> Component.literal("Citizenship policy query queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int showEffectiveCitizenPopulationPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new EffectiveCitizenPopulationPolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Effective Citizen population policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Effective Citizen population policy is not configured; dependent population, territory and strength calculations remain disabled"), false);
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatEffectiveCitizenPopulationPolicy(policy.orElseThrow())), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Effective Citizen population policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleEffectiveCitizenPopulationPolicy(
+            CommandSourceStack source, long observationWindowMillis,
+            long fullContributionTimeMillis, long effectiveAtEpochMillis,
+            String requestId, String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new EffectiveCitizenPopulationPolicyRegistry(database, clock)
+                        .schedule(new ScheduleEffectiveCitizenPopulationPolicy(
+                                EFFECTIVE_CITIZEN_POPULATION_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new EffectiveCitizenPopulationPolicy(
+                                        Duration.ofMillis(observationWindowMillis),
+                                        Duration.ofMillis(fullContributionTimeMillis)),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis), reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Scheduled " + formatEffectiveCitizenPopulationPolicy(policy)), true);
+                    } else {
+                        reportDatabaseFailure(source,
+                                "Effective Citizen population policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Effective Citizen population policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatEffectiveCitizenPopulationPolicy(
+            EffectiveCitizenPopulationPolicyVersion version) {
+        return "Effective Citizen population policy " + version.policyId()
+                + " observationWindowMillis=" + version.policy().observationWindow().toMillis()
+                + " fullContributionTimeMillis="
+                + version.policy().fullContributionTime().toMillis()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
     }
 
     private static int scheduleCitizenshipPolicy(

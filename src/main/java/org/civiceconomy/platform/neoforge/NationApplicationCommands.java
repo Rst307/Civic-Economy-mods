@@ -45,6 +45,7 @@ import org.civiceconomy.nation.CancelNationApplication;
 import org.civiceconomy.nation.CandidateOnlineEvidencePolicyRegistry;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
+import org.civiceconomy.nation.EffectiveCitizenPopulationPolicyRegistry;
 import org.civiceconomy.nation.CreateNationApplication;
 import org.civiceconomy.nation.NationApplication;
 import org.civiceconomy.nation.NationApplicationRegistry;
@@ -75,8 +76,6 @@ import org.slf4j.Logger;
 
 final class NationApplicationCommands {
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final Duration EFFECTIVE_CITIZEN_OBSERVATION_WINDOW = Duration.ofDays(60);
-    private static final Duration FULL_EFFECTIVE_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final ServiceIdentity FOUNDING_SERVICE =
             new ServiceIdentity("civiceconomy-founding");
@@ -2120,12 +2119,17 @@ final class NationApplicationCommands {
         var citizenship = citizenships.current(playerId)
                 .orElseThrow(() -> new IllegalStateException(
                         "You do not have an active formal Citizenship"));
+        var populationPolicy = new EffectiveCitizenPopulationPolicyRegistry(database, queryClock)
+                .current(asOf)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Effective Citizen population policy is not configured"))
+                .policy();
         return new NationPopulationCalculator(
                         citizenships,
                         new CitizenshipCorrectionGraceRegistry(database, queryClock),
                         new OnlineTimeLedger(database),
-                        EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
-                        FULL_EFFECTIVE_CITIZEN_TIME)
+                        populationPolicy.observationWindow(),
+                        populationPolicy.fullContributionTime())
                 .calculate(citizenship.nationId(), asOf);
     }
 

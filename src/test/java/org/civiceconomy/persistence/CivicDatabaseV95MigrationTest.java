@@ -9,25 +9,25 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class CivicDatabaseV91MigrationTest {
+class CivicDatabaseV95MigrationTest {
     @TempDir Path temporaryDirectory;
 
     @Test
-    void v90DatabaseAddsEmptyNationApplicationExpiryPolicyHistory() throws Exception {
-        Path file = temporaryDirectory.resolve("schema-v90.sqlite3");
+    void v94DatabaseAddsEmptyEffectiveCitizenPopulationPolicyHistory() throws Exception {
+        Path file = temporaryDirectory.resolve("schema-v94.sqlite3");
         DatabaseIdentity identity = new DatabaseIdentity(
-                UUID.fromString("1fb741eb-0032-455c-bb5c-25dfedfb913a"),
+                UUID.fromString("6ff7e646-ebf2-47ab-98de-193c30e9c33b"),
                 "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20");
         try (CivicDatabase ignored = CivicDatabase.open(file, identity)) {}
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file);
                 var statement = connection.createStatement()) {
-            statement.execute("DROP INDEX nation_application_expiry_policy_current");
-            statement.execute("DROP TABLE nation_application_expiry_policy");
-            statement.execute("PRAGMA user_version = 90");
+            statement.execute("DROP INDEX effective_citizen_population_policy_current");
+            statement.execute("DROP TABLE effective_citizen_population_policy");
+            statement.execute("PRAGMA user_version = 94");
         }
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
             assertEquals(95, migrated.schemaVersion());
-            assertNull(migrated.currentNationApplicationExpiryPolicy(Long.MAX_VALUE));
+            assertNull(migrated.currentEffectiveCitizenPopulationPolicy(Long.MAX_VALUE));
         }
     }
 }
