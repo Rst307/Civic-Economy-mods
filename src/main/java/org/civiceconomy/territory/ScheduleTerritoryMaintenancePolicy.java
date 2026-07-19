@@ -12,6 +12,7 @@ public record ScheduleTerritoryMaintenancePolicy(
         long baseMaintenancePerChargeableClaimMinorUnits,
         int enclaveAndCrossDimensionMultiplierBasisPoints,
         long forceLoadSurchargeMinorUnits,
+        Duration forceLoadGrace,
         long restorationFeeMinorUnits,
         Duration restorationCooldown,
         int destructionBasisPoints,
@@ -20,6 +21,7 @@ public record ScheduleTerritoryMaintenancePolicy(
     public ScheduleTerritoryMaintenancePolicy {
         if (serviceIdentity == null
                 || cycleDuration == null
+                || forceLoadGrace == null
                 || restorationCooldown == null
                 || effectiveAt == null) {
             throw new IllegalArgumentException(
@@ -34,6 +36,8 @@ public record ScheduleTerritoryMaintenancePolicy(
                 || baseMaintenancePerChargeableClaimMinorUnits < 0L
                 || enclaveAndCrossDimensionMultiplierBasisPoints < 10_000
                 || forceLoadSurchargeMinorUnits < 0L
+                || forceLoadGrace.isZero()
+                || forceLoadGrace.isNegative()
                 || restorationFeeMinorUnits < 0L
                 || restorationCooldown.isZero()
                 || restorationCooldown.isNegative()
@@ -50,6 +54,10 @@ public record ScheduleTerritoryMaintenancePolicy(
         if (restorationCooldown.toMillis() <= 0L) {
             throw new IllegalArgumentException(
                     "Territory Maintenance restoration cooldown must be at least one millisecond");
+        }
+        if (forceLoadGrace.toMillis() <= 0L) {
+            throw new IllegalArgumentException(
+                    "Territory Force-load grace must be at least one millisecond");
         }
     }
 }

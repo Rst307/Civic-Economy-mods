@@ -32,6 +32,7 @@ class CivicDatabaseV35MigrationTest {
                     75L,
                     15_000,
                     25L,
+                    21_600_000L,
                     75L,
                     604_800_000L,
                     6_000,
@@ -57,7 +58,7 @@ class CivicDatabaseV35MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(96, migrated.schemaVersion());
+            assertEquals(97, migrated.schemaVersion());
             assertEquals(
                     75L,
                     migrated.territoryMaintenancePolicy("migration", "maintenance-policy")

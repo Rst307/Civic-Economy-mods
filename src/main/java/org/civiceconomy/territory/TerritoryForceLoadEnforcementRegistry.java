@@ -1,7 +1,6 @@
 package org.civiceconomy.territory;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -12,8 +11,6 @@ import org.civiceconomy.persistence.CivicDatabase;
 import org.civiceconomy.persistence.StoredTerritoryForceLoadEnforcement;
 
 public final class TerritoryForceLoadEnforcementRegistry {
-    public static final Duration FORCE_LOAD_GRACE = Duration.ofHours(24);
-
     private final CivicDatabase database;
     private final Clock clock;
 

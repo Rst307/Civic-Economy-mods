@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.UUID;
@@ -38,12 +39,29 @@ class CivicDatabaseV42MigrationTest {
             NationId nationId = new NationId(
                     UUID.fromString("f0abe4e8-6a99-4280-9306-cf56794026dc"));
             UUID teamId = UUID.fromString("486b0fef-7eb2-4c56-a419-bf0388ca74f9");
+            UUID policyId = UUID.fromString("8187818e-a79b-4148-9762-3ac2e5d330ea");
             database.registerNation(nationId.value(), "migration", "nation", teamId, 1_000L);
+            database.scheduleTerritoryMaintenancePolicy(
+                    policyId,
+                    SERVICE.value(),
+                    "policy",
+                    "migration",
+                    Duration.ofDays(7).toMillis(),
+                    10L,
+                    15_000,
+                    5L,
+                    Duration.ofHours(24).toMillis(),
+                    10L,
+                    Duration.ofDays(7).toMillis(),
+                    6_000,
+                    1_000L,
+                    "Migration policy",
+                    500L);
             TerritoryMaintenanceRegistry maintenance =
                     new TerritoryMaintenanceRegistry(database);
             var cycle = maintenance.openCycle(new OpenTerritoryMaintenanceCycle(
                     SERVICE,
-                    "cycle",
+                    "automatic-maintenance:" + policyId + ":2000:cycle",
                     Instant.ofEpochMilli(2_000L),
                     Instant.ofEpochMilli(3_000L)));
             var assessment = maintenance.assess(new AssessTerritoryFiscalValidity(
@@ -86,7 +104,7 @@ class CivicDatabaseV42MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(96, migrated.schemaVersion());
+            assertEquals(97, migrated.schemaVersion());
             TerritoryForceLoadEnforcementRegistry registry =
                     new TerritoryForceLoadEnforcementRegistry(
                             migrated,

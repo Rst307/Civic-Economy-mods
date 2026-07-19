@@ -42,6 +42,7 @@ class TerritoryMaintenanceCycleScheduleTest {
                 100L,
                 15_000,
                 25L,
+                Duration.ofHours(6),
                 30L,
                 Duration.ofDays(14),
                 6_000,

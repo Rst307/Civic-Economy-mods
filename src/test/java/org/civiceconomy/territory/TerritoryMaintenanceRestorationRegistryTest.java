@@ -222,6 +222,7 @@ class TerritoryMaintenanceRestorationRegistryTest {
                 100L,
                 15_000,
                 20L,
+                Duration.ofHours(6).toMillis(),
                 30L,
                 Duration.ofDays(14).toMillis(),
                 6_000,

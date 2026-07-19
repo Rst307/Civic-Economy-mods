@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.nio.file.Path;
 import java.sql.DriverManager;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import org.civiceconomy.fiscal.ServiceIdentity;
@@ -38,12 +39,29 @@ class CivicDatabaseV41MigrationTest {
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             NationId nationId = new NationId(
                     UUID.fromString("04d40a3b-f90d-4f0b-a1f9-5524223cfb79"));
+            UUID policyId = UUID.fromString("a96b22b5-0f5c-4a33-9bf6-85d743d67251");
             database.registerNation(nationId.value(), "migration", "nation", teamId, 1_000L);
+            database.scheduleTerritoryMaintenancePolicy(
+                    policyId,
+                    SERVICE.value(),
+                    "policy",
+                    "migration",
+                    Duration.ofDays(7).toMillis(),
+                    10L,
+                    15_000,
+                    5L,
+                    Duration.ofHours(24).toMillis(),
+                    10L,
+                    Duration.ofDays(7).toMillis(),
+                    6_000,
+                    1_000L,
+                    "Migration policy",
+                    500L);
             TerritoryMaintenanceRegistry maintenance =
                     new TerritoryMaintenanceRegistry(database);
             var cycle = maintenance.openCycle(new OpenTerritoryMaintenanceCycle(
                     SERVICE,
-                    "cycle",
+                    "automatic-maintenance:" + policyId + ":2000:cycle",
                     Instant.ofEpochMilli(2_000L),
                     Instant.ofEpochMilli(3_000L)));
             assessmentId = maintenance.assess(new AssessTerritoryFiscalValidity(
@@ -75,7 +93,7 @@ class CivicDatabaseV41MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(96, migrated.schemaVersion());
+            assertEquals(97, migrated.schemaVersion());
             var enforcement = new TerritoryForceLoadEnforcementRegistry(migrated)
                     .prepare(SERVICE, "force-load", assessmentId, "Migration enforcement");
             assertEquals(TerritoryForceLoadEnforcementState.PREPARED, enforcement.state());

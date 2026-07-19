@@ -105,6 +105,7 @@ import org.civiceconomy.territory.AssessTerritoryFiscalValidity;
 import org.civiceconomy.territory.OpenTerritoryMaintenanceCycle;
 import org.civiceconomy.territory.SuspendTerritoryMaintenance;
 import org.civiceconomy.territory.TerritoryClaimPosition;
+import org.civiceconomy.territory.TerritoryForceLoadEnforcementRegistry;
 import org.civiceconomy.territory.TerritoryMaintenancePriority;
 import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 import org.civiceconomy.persistence.StoredMintRecipeIngredient;
@@ -2834,7 +2835,7 @@ public final class CivicServerRuntimeGameTests {
                         + " " + pricingRequestId + " GameTest territory pricing");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
-                "civic economy admin territory maintenance schedule 604800000 75 15000 25 30 1209600000 6000 "
+                "civic economy admin territory maintenance schedule 604800000 75 15000 25 21600000 30 1209600000 6000 "
                         + maintenanceEffectiveAt + " " + maintenanceRequestId
                         + " GameTest territory maintenance");
         server.getCommands().performPrefixedCommand(
@@ -6212,13 +6213,31 @@ public final class CivicServerRuntimeGameTests {
                             java.time.Instant.ofEpochMilli(suspendedStartMillis);
                     java.time.Instant suspendedCycleEnd = suspendedCycleStart.plusMillis(1L);
                     restoredCycleStart.set(suspendedCycleEnd.plusMillis(1L));
+                    UUID maintenancePolicyId = UUID.randomUUID();
+                    database.scheduleTerritoryMaintenancePolicy(
+                            maintenancePolicyId,
+                            maintenanceService.value(),
+                            "force-load-guard-policy-" + UUID.randomUUID(),
+                            "gametest",
+                            java.time.Duration.ofDays(7L).toMillis(),
+                            10L,
+                            15_000,
+                            5L,
+                            java.time.Duration.ofHours(6L).toMillis(),
+                            10L,
+                            java.time.Duration.ofDays(7L).toMillis(),
+                            6_000,
+                            suspendedCycleStart.minusMillis(1L).toEpochMilli(),
+                            "Force-load guard policy",
+                            suspendedCycleStart.minusMillis(2L).toEpochMilli());
                     var suspendedCycle = maintenance.openCycle(
                             new OpenTerritoryMaintenanceCycle(
                                     maintenanceService,
-                                    "force-load-guard-cycle-" + UUID.randomUUID(),
+                                    "automatic-maintenance:" + maintenancePolicyId + ":"
+                                            + suspendedCycleStart.toEpochMilli() + ":cycle",
                                     suspendedCycleStart,
                                     suspendedCycleEnd));
-                    maintenance.assess(new AssessTerritoryFiscalValidity(
+                    var suspendedAssessment = maintenance.assess(new AssessTerritoryFiscalValidity(
                             maintenanceService,
                             "force-load-guard-assessment-" + UUID.randomUUID(),
                             suspendedCycle.cycleId(),
@@ -6236,6 +6255,11 @@ public final class CivicServerRuntimeGameTests {
                             suspendedCycle.cycleId(),
                             nation.nationId(),
                             "Post-grace force-load guard GameTest"));
+                    new TerritoryForceLoadEnforcementRegistry(database).prepare(
+                            maintenanceService,
+                            "force-load-guard-enforcement-" + suspendedAssessment.assessmentId(),
+                            suspendedAssessment.assessmentId(),
+                            "Post-grace force-load guard GameTest");
                     return nation.nationId();
                 })
                 .whenComplete((ignored, setupFailure) ->
@@ -6488,6 +6512,7 @@ public final class CivicServerRuntimeGameTests {
                             100L,
                             15_000,
                             0L,
+                            java.time.Duration.ofHours(6L).toMillis(),
                             30L,
                             java.time.Duration.ofDays(14L).toMillis(),
                             6_000,
@@ -6505,6 +6530,7 @@ public final class CivicServerRuntimeGameTests {
                             100L,
                             15_000,
                             0L,
+                            java.time.Duration.ofHours(6L).toMillis(),
                             30L,
                             java.time.Duration.ofDays(14L).toMillis(),
                             6_000,
@@ -6530,11 +6556,31 @@ public final class CivicServerRuntimeGameTests {
                         }
                         break;
                     }
+                    UUID suspendedPolicyId = UUID.randomUUID();
+                    database.scheduleTerritoryMaintenancePolicy(
+                            suspendedPolicyId,
+                            org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                                    .SERVICE_IDENTITY
+                                    .value(),
+                            "player-restoration-suspended-policy-" + UUID.randomUUID(),
+                            "gametest",
+                            cycleDuration.toMillis(),
+                            100L,
+                            15_000,
+                            0L,
+                            java.time.Duration.ofHours(6L).toMillis(),
+                            30L,
+                            java.time.Duration.ofDays(14L).toMillis(),
+                            6_000,
+                            suspendedStartMillis - 1L,
+                            "Historical governed player Restoration policy",
+                            suspendedStartMillis - 2L);
                     var suspendedCycle = maintenance.openCycle(
                             new OpenTerritoryMaintenanceCycle(
                                     org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
                                             .SERVICE_IDENTITY,
-                                    "player-restoration-cycle-" + UUID.randomUUID(),
+                                    "automatic-maintenance:" + suspendedPolicyId + ":"
+                                            + suspendedStartMillis + ":cycle",
                                     java.time.Instant.ofEpochMilli(suspendedStartMillis),
                                     java.time.Instant.ofEpochMilli(suspendedStartMillis + 1L)));
                     database.assessTerritoryFiscalValidity(
@@ -6560,6 +6606,12 @@ public final class CivicServerRuntimeGameTests {
                             suspendedCycle.cycleId(),
                             nation.nationId(),
                             "Insufficient funds before player Restoration"));
+                    new TerritoryForceLoadEnforcementRegistry(database, setupClock).prepare(
+                            org.civiceconomy.territory.TerritoryFiscalServiceProvisioner
+                                    .SERVICE_IDENTITY,
+                            "player-restoration-enforcement-" + sourceAssessmentId,
+                            sourceAssessmentId,
+                            "Player Restoration restriction fixture");
                     long issuanceBefore = database.cumulativeNetIssuanceMinorUnits();
                     database.confirmMonetarySupplyChange(
                             UUID.randomUUID(),
@@ -8174,7 +8226,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(96, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(97, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -9269,6 +9321,7 @@ public final class CivicServerRuntimeGameTests {
                                base_maintenance_per_chargeable_claim_minor_units,
                                enclave_cross_dimension_multiplier_basis_points,
                                force_load_surcharge_minor_units,
+                               force_load_grace_millis,
                                restoration_fee_minor_units, restoration_cooldown_millis,
                                destruction_basis_points,
                                effective_at_epoch_millis, reason
@@ -9286,13 +9339,14 @@ public final class CivicServerRuntimeGameTests {
                 helper.assertValueEqual(75L, result.getLong(3), "base maintenance per claim");
                 helper.assertValueEqual(15_000, result.getInt(4), "enclave multiplier");
                 helper.assertValueEqual(25L, result.getLong(5), "force-load surcharge");
-                helper.assertValueEqual(30L, result.getLong(6), "restoration fee");
-                helper.assertValueEqual(1_209_600_000L, result.getLong(7), "restoration cooldown");
-                helper.assertValueEqual(6_000, result.getInt(8), "destruction basis points");
+                helper.assertValueEqual(21_600_000L, result.getLong(6), "force-load grace");
+                helper.assertValueEqual(30L, result.getLong(7), "restoration fee");
+                helper.assertValueEqual(1_209_600_000L, result.getLong(8), "restoration cooldown");
+                helper.assertValueEqual(6_000, result.getInt(9), "destruction basis points");
                 helper.assertValueEqual(
-                        effectiveAtEpochMillis, result.getLong(9), "maintenance policy effective time");
+                        effectiveAtEpochMillis, result.getLong(10), "maintenance policy effective time");
                 helper.assertValueEqual(
-                        "GameTest territory maintenance", result.getString(10), "maintenance policy reason");
+                        "GameTest territory maintenance", result.getString(11), "maintenance policy reason");
                 helper.assertFalse(result.next(), "duplicate Territory Maintenance policy");
             }
         } catch (SQLException failure) {

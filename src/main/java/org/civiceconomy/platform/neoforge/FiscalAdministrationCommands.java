@@ -612,36 +612,40 @@ public final class FiscalAdministrationCommands {
                                                                 "forceLoadSurcharge",
                                                                 LongArgumentType.longArg(0L))
                                                         .then(Commands.argument(
-                                                                        "restorationFee",
-                                                                        LongArgumentType.longArg(0L))
+                                                                        "forceLoadGraceMillis",
+                                                                        LongArgumentType.longArg(1L))
                                                                 .then(Commands.argument(
-                                                                                "restorationCooldownMillis",
-                                                                                LongArgumentType.longArg(1L))
+                                                                                "restorationFee",
+                                                                                LongArgumentType.longArg(0L))
                                                                         .then(Commands.argument(
-                                                                                        "destructionBasisPoints",
-                                                                                        IntegerArgumentType.integer(3_000, 8_000))
+                                                                                        "restorationCooldownMillis",
+                                                                                        LongArgumentType.longArg(1L))
                                                                                 .then(Commands.argument(
-                                                                                                "effectiveAtEpochMillis",
-                                                                                                LongArgumentType.longArg(0L))
+                                                                                                "destructionBasisPoints",
+                                                                                                IntegerArgumentType.integer(3_000, 8_000))
                                                                                         .then(Commands.argument(
-                                                                                                        "requestId",
-                                                                                                        StringArgumentType.word())
+                                                                                                        "effectiveAtEpochMillis",
+                                                                                                        LongArgumentType.longArg(0L))
                                                                                                 .then(Commands.argument(
-                                                                                                                "reason",
-                                                                                                                StringArgumentType.greedyString())
-                                                                                                        .executes(context ->
-                                                                                                                scheduleTerritoryMaintenancePolicy(
-                                                                                                                        context.getSource(),
-                                                                                                                        LongArgumentType.getLong(context, "cycleDurationMillis"),
-                                                                                                                        LongArgumentType.getLong(context, "baseMaintenancePerClaim"),
-                                                                                                                        IntegerArgumentType.getInteger(context, "enclaveMultiplierBasisPoints"),
-                                                                                                                        LongArgumentType.getLong(context, "forceLoadSurcharge"),
-                                                                                                                        LongArgumentType.getLong(context, "restorationFee"),
-                                                                                                                        LongArgumentType.getLong(context, "restorationCooldownMillis"),
-                                                                                                                        IntegerArgumentType.getInteger(context, "destructionBasisPoints"),
-                                                                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
-                                                                                                                        StringArgumentType.getString(context, "requestId"),
-                                                                                                                        StringArgumentType.getString(context, "reason"))))))))))))));
+                                                                                                                "requestId",
+                                                                                                                StringArgumentType.word())
+                                                                                                        .then(Commands.argument(
+                                                                                                                        "reason",
+                                                                                                                        StringArgumentType.greedyString())
+                                                                                                                .executes(context ->
+                                                                                                                        scheduleTerritoryMaintenancePolicy(
+                                                                                                                                context.getSource(),
+                                                                                                                                LongArgumentType.getLong(context, "cycleDurationMillis"),
+                                                                                                                                LongArgumentType.getLong(context, "baseMaintenancePerClaim"),
+                                                                                                                                IntegerArgumentType.getInteger(context, "enclaveMultiplierBasisPoints"),
+                                                                                                                                LongArgumentType.getLong(context, "forceLoadSurcharge"),
+                                                                                                                                LongArgumentType.getLong(context, "forceLoadGraceMillis"),
+                                                                                                                                LongArgumentType.getLong(context, "restorationFee"),
+                                                                                                                                LongArgumentType.getLong(context, "restorationCooldownMillis"),
+                                                                                                                                IntegerArgumentType.getInteger(context, "destructionBasisPoints"),
+                                                                                                                                LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                                                                                StringArgumentType.getString(context, "requestId"),
+                                                                                                                                StringArgumentType.getString(context, "reason")))))))))))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -2344,6 +2348,7 @@ public final class FiscalAdministrationCommands {
             long baseMaintenancePerClaim,
             int enclaveMultiplierBasisPoints,
             long forceLoadSurcharge,
+            long forceLoadGraceMillis,
             long restorationFee,
             long restorationCooldownMillis,
             int destructionBasisPoints,
@@ -2361,6 +2366,7 @@ public final class FiscalAdministrationCommands {
                                 baseMaintenancePerClaim,
                                 enclaveMultiplierBasisPoints,
                                 forceLoadSurcharge,
+                                Duration.ofMillis(forceLoadGraceMillis),
                                 restorationFee,
                                 Duration.ofMillis(restorationCooldownMillis),
                                 destructionBasisPoints,
@@ -2391,6 +2397,7 @@ public final class FiscalAdministrationCommands {
                 + " enclaveMultiplierBasisPoints="
                 + policy.enclaveAndCrossDimensionMultiplierBasisPoints()
                 + " forceLoadSurcharge=" + policy.forceLoadSurchargeMinorUnits()
+                + " forceLoadGraceMillis=" + policy.forceLoadGrace().toMillis()
                 + " restorationFee=" + policy.restorationFeeMinorUnits()
                 + " restorationCooldownMillis=" + policy.restorationCooldown().toMillis()
                 + " destructionBasisPoints=" + policy.destructionBasisPoints()

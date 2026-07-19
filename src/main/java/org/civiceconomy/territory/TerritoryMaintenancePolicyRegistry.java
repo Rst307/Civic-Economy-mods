@@ -49,6 +49,7 @@ public final class TerritoryMaintenancePolicyRegistry {
                 request.baseMaintenancePerChargeableClaimMinorUnits(),
                 request.enclaveAndCrossDimensionMultiplierBasisPoints(),
                 request.forceLoadSurchargeMinorUnits(),
+                request.forceLoadGrace().toMillis(),
                 request.restorationFeeMinorUnits(),
                 request.restorationCooldown().toMillis(),
                 request.destructionBasisPoints(),
@@ -62,6 +63,7 @@ public final class TerritoryMaintenancePolicyRegistry {
             throw new IllegalArgumentException("Territory Maintenance policy time cannot be null");
         }
         return Optional.ofNullable(database.currentTerritoryMaintenancePolicy(asOf.toEpochMilli()))
+                .filter(stored -> stored.forceLoadGraceMillis() != null)
                 .map(TerritoryMaintenancePolicyRegistry::toPolicy);
     }
 
@@ -71,6 +73,7 @@ public final class TerritoryMaintenancePolicyRegistry {
                     "Territory Maintenance policy ID cannot be null");
         }
         return Optional.ofNullable(database.territoryMaintenancePolicy(policyId))
+                .filter(stored -> stored.forceLoadGraceMillis() != null)
                 .map(TerritoryMaintenancePolicyRegistry::toPolicy);
     }
 
@@ -84,6 +87,8 @@ public final class TerritoryMaintenancePolicyRegistry {
                 || stored.enclaveAndCrossDimensionMultiplierBasisPoints()
                         != request.enclaveAndCrossDimensionMultiplierBasisPoints()
                 || stored.forceLoadSurchargeMinorUnits() != request.forceLoadSurchargeMinorUnits()
+                || !java.util.Objects.equals(
+                        stored.forceLoadGraceMillis(), request.forceLoadGrace().toMillis())
                 || stored.restorationFeeMinorUnits() != request.restorationFeeMinorUnits()
                 || stored.restorationCooldownMillis()
                         != request.restorationCooldown().toMillis()
@@ -103,6 +108,9 @@ public final class TerritoryMaintenancePolicyRegistry {
                 stored.baseMaintenancePerChargeableClaimMinorUnits(),
                 stored.enclaveAndCrossDimensionMultiplierBasisPoints(),
                 stored.forceLoadSurchargeMinorUnits(),
+                Duration.ofMillis(java.util.Objects.requireNonNull(
+                        stored.forceLoadGraceMillis(),
+                        "Territory Maintenance policy lacks Force-load grace")),
                 stored.restorationFeeMinorUnits(),
                 Duration.ofMillis(stored.restorationCooldownMillis()),
                 stored.destructionBasisPoints(),

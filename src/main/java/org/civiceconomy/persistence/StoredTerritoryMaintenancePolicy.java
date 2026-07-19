@@ -11,6 +11,7 @@ public record StoredTerritoryMaintenancePolicy(
         long baseMaintenancePerChargeableClaimMinorUnits,
         int enclaveAndCrossDimensionMultiplierBasisPoints,
         long forceLoadSurchargeMinorUnits,
+        Long forceLoadGraceMillis,
         long restorationFeeMinorUnits,
         long restorationCooldownMillis,
         int destructionBasisPoints,

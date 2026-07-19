@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -22,6 +23,7 @@ class TerritoryForceLoadEnforcementRegistryTest {
     private static final NationId NATION = new NationId(
             UUID.fromString("96e1f219-441a-4b5c-b7a5-6f00bc300a03"));
     private static final UUID TEAM = UUID.fromString("53dc3799-cbbc-4052-a9e0-5fa28e85f608");
+    private static final UUID POLICY = UUID.fromString("34e79d03-e98b-45bc-a7b7-65524a51d3f4");
 
     @TempDir Path temporaryDirectory;
 
@@ -48,12 +50,12 @@ class TerritoryForceLoadEnforcementRegistryTest {
             assertEquals(
                     new TerritoryClaimPosition("minecraft:overworld", 4, 5),
                     prepared.position());
-            assertEquals(Instant.ofEpochMilli(86_403_000L), prepared.notBefore());
+            assertEquals(Instant.ofEpochMilli(21_603_000L), prepared.notBefore());
             assertEquals(List.of(), registry.incomplete());
             assertThrows(
                     IllegalStateException.class,
                     () -> database.markTerritoryForceLoadExternalApplied(
-                            enforcementId, 86_402_999L));
+                            enforcementId, 21_602_999L));
             assertEquals(
                     TerritoryForceLoadEnforcementState.PREPARED,
                     registry.find(enforcementId).orElseThrow().state());
@@ -82,7 +84,7 @@ class TerritoryForceLoadEnforcementRegistryTest {
                     new TerritoryForceLoadEnforcementRegistry(
                             database,
                             Clock.fixed(
-                                    Instant.ofEpochMilli(86_403_000L),
+                                    Instant.ofEpochMilli(21_603_000L),
                                     ZoneOffset.UTC));
             assertEquals(
                     TerritoryForceLoadEnforcementState.PREPARED,
@@ -111,21 +113,26 @@ class TerritoryForceLoadEnforcementRegistryTest {
     @Test
     void restrictionUsesLatestConcludedAssessmentAndReleasesAfterEffectiveRestoration() {
         try (CivicDatabase database = database()) {
-            suspendedAssessment(database);
+            TerritoryFiscalAssessment suspended = suspendedAssessment(database);
+            new TerritoryForceLoadEnforcementRegistry(database).prepare(
+                    SERVICE,
+                    "force-load:" + suspended.assessmentId(),
+                    suspended.assessmentId(),
+                    "Disable force-load for suspended Territory");
 
             assertEquals(
                     List.of(),
                     new TerritoryForceLoadRestrictionRegistry(
                                     database,
                                     Clock.fixed(
-                                            Instant.ofEpochMilli(86_402_999L),
+                                            Instant.ofEpochMilli(21_602_999L),
                                             ZoneOffset.UTC))
                             .active());
             TerritoryForceLoadRestriction restriction =
                     new TerritoryForceLoadRestrictionRegistry(
                                     database,
                                     Clock.fixed(
-                                            Instant.ofEpochMilli(86_403_000L),
+                                            Instant.ofEpochMilli(21_603_000L),
                                             ZoneOffset.UTC))
                             .active()
                             .getFirst();
@@ -166,7 +173,7 @@ class TerritoryForceLoadEnforcementRegistryTest {
                     new TerritoryForceLoadRestrictionRegistry(
                                     database,
                                     Clock.fixed(
-                                            Instant.ofEpochMilli(86_403_000L),
+                                            Instant.ofEpochMilli(21_603_000L),
                                             ZoneOffset.UTC))
                             .active());
         }
@@ -174,11 +181,27 @@ class TerritoryForceLoadEnforcementRegistryTest {
 
     private TerritoryFiscalAssessment suspendedAssessment(CivicDatabase database) {
         database.registerNation(NATION.value(), "test", "nation", TEAM, 1_000L);
+        database.scheduleTerritoryMaintenancePolicy(
+                POLICY,
+                SERVICE.value(),
+                "force-load-policy",
+                "operator:test",
+                Duration.ofDays(7).toMillis(),
+                10L,
+                15_000,
+                5L,
+                Duration.ofHours(6).toMillis(),
+                10L,
+                Duration.ofDays(7).toMillis(),
+                6_000,
+                1_000L,
+                "Six-hour Force-load grace",
+                500L);
         TerritoryMaintenanceRegistry maintenance = new TerritoryMaintenanceRegistry(database);
         TerritoryMaintenanceCycle cycle = maintenance.openCycle(
                 new OpenTerritoryMaintenanceCycle(
                         SERVICE,
-                        "force-load-cycle",
+                        "automatic-maintenance:" + POLICY + ":2000:cycle",
                         Instant.ofEpochMilli(2_000L),
                         Instant.ofEpochMilli(3_000L)));
         TerritoryFiscalAssessment assessment = maintenance.assess(

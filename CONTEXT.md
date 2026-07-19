@@ -242,11 +242,11 @@ _Avoid_: FTB 所有权、付款交易、有效性结论
 _Avoid_: 单区块付款、FTB 所有权变更、调用方声明的成功
 
 **领土强制加载执行（Territory Force-load Enforcement）**:
-一条 Territory Fiscal Assessment 结论为 SUSPENDED 并经过固定 24 小时短宽限后，Civic 对该评估持久化的精确 FTB Team、维度和区块执行的服务端强制加载关闭；它只取消 force-load，不删除、转移或重新声明底层 FTB Claim，并以 PREPARED、EXTERNAL_APPLIED、CIVIC_COMMITTED 三阶段恢复到精确一次的 Civic 结论。
+一条 Territory Fiscal Assessment 结论为 SUSPENDED 并经过该周期适用的 Territory Force-load Grace 后，Civic 对该评估绑定的精确 FTB Team、维度和区块执行的服务端强制加载关闭；它只取消 force-load，不删除、转移或重新声明底层 FTB Claim，并形成可恢复到唯一 Civic 结论的持久化执行。
 _Avoid_: 取消领土、调用方提供目标、批量关闭其他 Team 区块
 
 **领土强制加载限制（Territory Force-load Restriction）**:
-固定 24 小时短宽限结束后，由一个精确 FTB Team、维度和区块的最新已结论 Territory Fiscal Assessment 派生的服务端限制；最新结论为 SUSPENDED 时阻止新的 FTB force-load 请求，较新的 EFFECTIVE 结论解除该限制，但 Civic 不自动重新启用外部 force-load 状态。运行时只读取异步刷新的权威镜像，不在 FTB 事件线程同步查询 SQLite。
+Territory Force-load Grace 结束后，由一个精确 FTB Team、维度和区块的最新已结论 Territory Fiscal Assessment 派生的服务端限制；最新结论为 SUSPENDED 时阻止新的 FTB force-load 请求，较新的 EFFECTIVE 结论解除该限制，但 Civic 不自动重新启用外部 force-load 状态。
 _Avoid_: 全服 force-load 开关、调用方声明的财政状态、恢复后自动 force-load
 
 **领土恢复（Territory Maintenance Restoration）**:
@@ -262,8 +262,12 @@ _Avoid_: 虚拟余额、现金退款、全国家通用抵扣、调用方声明�
 _Avoid_: FTB 占领权限、区块遍历顺序、部分付款比例
 
 **领土维护政策（Territory Maintenance Policy）**:
-由受信任管理员延迟生效并公开审计的全服周期、维护费、飞地或跨维度倍率、强制加载附加费、恢复费、恢复冷却和销毁比例规则；未配置时不能自动产生维护结论。
+由受信任管理员延迟生效并公开审计的全服周期、维护费、飞地或跨维度倍率、强制加载附加费、Territory Force-load Grace、恢复费、恢复冷却和销毁比例规则；未配置完整规则时不能自动产生维护结论。
 _Avoid_: 单国费率、硬编码默认费率、自动税率
+
+**领土强制加载宽限（Territory Force-load Grace）**:
+从 Territory Maintenance Cycle 结束到欠费区块必须关闭并限制 force-load 之间、由该周期适用的 Territory Maintenance Policy 明确规定的短暂时间；宽限不恢复 SUSPENDED 区块的财政有效性，也不免除维护义务。
+_Avoid_: 固定 24 小时、恢复冷却、付款延期、有效领土期限
 
 **领土维护抵扣额（Territory Maintenance Credit）**:
 主动放弃领土后形成、只能抵扣后续领土维护而不能提取为货币的财政权益。

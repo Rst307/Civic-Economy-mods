@@ -27,8 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 96;
-    private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
+    private static final int SCHEMA_VERSION = 97;
 
     private final Connection connection;
 
@@ -6465,27 +6464,27 @@ public final class CivicDatabase implements AutoCloseable {
                     WHERE assessment.validity IN ('EFFECTIVE', 'SUSPENDED')
                       AND cycle.ends_at_epoch_millis <= ?
                 )
-                SELECT assessment_id, nation_id, ftb_team_id, dimension_id,
-                       chunk_x, chunk_z,
-                       ends_at_epoch_millis + ? AS restricted_at_epoch_millis
+                SELECT concluded.assessment_id, concluded.nation_id,
+                       concluded.ftb_team_id, concluded.dimension_id,
+                       concluded.chunk_x, concluded.chunk_z,
+                       enforcement.not_before_epoch_millis AS restricted_at_epoch_millis
                 FROM concluded
+                JOIN territory_force_load_enforcement enforcement
+                  ON enforcement.assessment_id = concluded.assessment_id
                 WHERE current_rank = 1
                   AND validity = 'SUSPENDED'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM territory_maintenance_restoration restoration
-                      WHERE restoration.source_suspended_assessment_id = assessment_id
+                      WHERE restoration.source_suspended_assessment_id = concluded.assessment_id
                         AND restoration.state = 'CIVIC_COMMITTED'
                   )
-                  AND ends_at_epoch_millis <= 9223372036854775807 - ?
-                  AND ends_at_epoch_millis + ? <= ?
-                ORDER BY ftb_team_id, dimension_id, chunk_x, chunk_z, assessment_id
+                  AND enforcement.not_before_epoch_millis <= ?
+                ORDER BY concluded.ftb_team_id, concluded.dimension_id,
+                         concluded.chunk_x, concluded.chunk_z, concluded.assessment_id
                 """)) {
             query.setLong(1, nowEpochMillis);
-            query.setLong(2, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
-            query.setLong(3, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
-            query.setLong(4, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
-            query.setLong(5, nowEpochMillis);
+            query.setLong(2, nowEpochMillis);
             try (ResultSet result = query.executeQuery()) {
                 while (result.next()) {
                     restrictions.add(new StoredTerritoryForceLoadRestriction(
@@ -6524,23 +6523,28 @@ public final class CivicDatabase implements AutoCloseable {
                 SELECT ?, assessment.service_identity, ?, assessment.assessment_id,
                        assessment.ftb_team_id, assessment.dimension_id,
                        assessment.chunk_x, assessment.chunk_z, 'PREPARED', ?,
-                       cycle.ends_at_epoch_millis + ?, ?, NULL, NULL
+                       cycle.ends_at_epoch_millis + policy.force_load_grace_millis,
+                       ?, NULL, NULL
                 FROM territory_fiscal_assessment assessment
                 JOIN territory_maintenance_cycle cycle
                   ON cycle.cycle_id = assessment.cycle_id
+                JOIN territory_maintenance_policy policy
+                  ON cycle.request_id = 'automatic-maintenance:'
+                        || policy.policy_id || ':'
+                        || cycle.starts_at_epoch_millis || ':cycle'
                 WHERE assessment.assessment_id = ?
                   AND assessment.service_identity = ?
                   AND assessment.validity = 'SUSPENDED'
-                  AND cycle.ends_at_epoch_millis <= 9223372036854775807 - ?
+                  AND policy.force_load_grace_millis IS NOT NULL
+                  AND cycle.ends_at_epoch_millis
+                        <= 9223372036854775807 - policy.force_load_grace_millis
                 """)) {
             insert.setString(1, enforcementId.toString());
             insert.setString(2, requestId);
             insert.setString(3, reason);
-            insert.setLong(4, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
-            insert.setLong(5, preparedAtEpochMillis);
-            insert.setString(6, assessmentId.toString());
-            insert.setString(7, serviceIdentity);
-            insert.setLong(8, TERRITORY_FORCE_LOAD_GRACE_MILLIS);
+            insert.setLong(4, preparedAtEpochMillis);
+            insert.setString(5, assessmentId.toString());
+            insert.setString(6, serviceIdentity);
             if (insert.executeUpdate() != 1) {
                 throw new SecurityException(
                         "Force-load Enforcement requires the exact suspended Assessment service identity");
@@ -10143,6 +10147,7 @@ public final class CivicDatabase implements AutoCloseable {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM territory_maintenance_policy
                 WHERE effective_at_epoch_millis <= ?
+                  AND force_load_grace_millis IS NOT NULL
                 ORDER BY effective_at_epoch_millis DESC,
                          recorded_at_epoch_millis DESC,
                          policy_id DESC
@@ -10165,6 +10170,7 @@ public final class CivicDatabase implements AutoCloseable {
             long baseMaintenancePerChargeableClaimMinorUnits,
             int enclaveAndCrossDimensionMultiplierBasisPoints,
             long forceLoadSurchargeMinorUnits,
+            long forceLoadGraceMillis,
             long restorationFeeMinorUnits,
             long restorationCooldownMillis,
             int destructionBasisPoints,
@@ -10178,10 +10184,11 @@ public final class CivicDatabase implements AutoCloseable {
                     base_maintenance_per_chargeable_claim_minor_units,
                     enclave_cross_dimension_multiplier_basis_points,
                     force_load_surcharge_minor_units,
+                    force_load_grace_millis,
                     restoration_fee_minor_units, restoration_cooldown_millis,
                     destruction_basis_points,
                     effective_at_epoch_millis, reason, recorded_at_epoch_millis
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             insert.setString(1, policyId.toString());
             insert.setString(2, serviceIdentity);
@@ -10191,12 +10198,13 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setLong(6, baseMaintenancePerChargeableClaimMinorUnits);
             insert.setInt(7, enclaveAndCrossDimensionMultiplierBasisPoints);
             insert.setLong(8, forceLoadSurchargeMinorUnits);
-            insert.setLong(9, restorationFeeMinorUnits);
-            insert.setLong(10, restorationCooldownMillis);
-            insert.setInt(11, destructionBasisPoints);
-            insert.setLong(12, effectiveAtEpochMillis);
-            insert.setString(13, reason);
-            insert.setLong(14, recordedAtEpochMillis);
+            insert.setLong(9, forceLoadGraceMillis);
+            insert.setLong(10, restorationFeeMinorUnits);
+            insert.setLong(11, restorationCooldownMillis);
+            insert.setInt(12, destructionBasisPoints);
+            insert.setLong(13, effectiveAtEpochMillis);
+            insert.setString(14, reason);
+            insert.setLong(15, recordedAtEpochMillis);
             insert.executeUpdate();
             return territoryMaintenancePolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
@@ -18264,6 +18272,14 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 96");
             }
+            if (version < 97) {
+                addColumnIfMissing(
+                        statement,
+                        "territory_maintenance_policy",
+                        "force_load_grace_millis",
+                        "INTEGER CHECK (force_load_grace_millis > 0)");
+                statement.execute("PRAGMA user_version = 97");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -18799,6 +18815,7 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getLong("base_maintenance_per_chargeable_claim_minor_units"),
                     result.getInt("enclave_cross_dimension_multiplier_basis_points"),
                     result.getLong("force_load_surcharge_minor_units"),
+                    optionalLong(result, "force_load_grace_millis"),
                     result.getLong("restoration_fee_minor_units"),
                     result.getLong("restoration_cooldown_millis"),
                     result.getInt("destruction_basis_points"),
