@@ -2749,6 +2749,10 @@ public final class CivicServerRuntimeGameTests {
                 "effective-citizen-strength-policy-command-" + UUID.randomUUID();
         String unauthorizedEffectiveCitizenStrengthPolicyRequestId =
                 "effective-citizen-strength-policy-unauthorized-" + UUID.randomUUID();
+        String effectiveTerritoryStrengthPolicyRequestId =
+                "effective-territory-strength-policy-command-" + UUID.randomUUID();
+        String unauthorizedEffectiveTerritoryStrengthPolicyRequestId =
+                "effective-territory-strength-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2794,6 +2798,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Effective Citizen Strength policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin strength effective-territory schedule 4 "
+                        + effectiveAt + " " + effectiveTerritoryStrengthPolicyRequestId
+                        + " GameTest Effective Territory Strength policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2822,6 +2831,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin strength effective-citizen schedule 1 "
                         + effectiveAt + " " + unauthorizedEffectiveCitizenStrengthPolicyRequestId
                         + " Untrusted Effective Citizen Strength policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin strength effective-territory schedule 1 "
+                        + effectiveAt + " " + unauthorizedEffectiveTerritoryStrengthPolicyRequestId
+                        + " Untrusted Effective Territory Strength policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -2855,6 +2869,15 @@ public final class CivicServerRuntimeGameTests {
                     helper,
                     databaseFile,
                     unauthorizedEffectiveCitizenStrengthPolicyRequestId);
+            assertEffectiveTerritoryStrengthPolicyScheduled(
+                    helper,
+                    databaseFile,
+                    effectiveTerritoryStrengthPolicyRequestId,
+                    effectiveAt);
+            assertEffectiveTerritoryStrengthPolicyAbsent(
+                    helper,
+                    databaseFile,
+                    unauthorizedEffectiveTerritoryStrengthPolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -7921,7 +7944,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(83, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(84, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8337,6 +8360,70 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Effective Citizen Strength policy", failure);
+        }
+    }
+
+    private static void assertEffectiveTerritoryStrengthPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity,
+                               full_strength_scale_effective_claims,
+                               effective_at_epoch_millis, reason
+                        FROM effective_territory_strength_policy
+                        WHERE service_identity =
+                                'civiceconomy-effective-territory-strength-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Effective Territory Strength policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Effective Territory Strength administrator");
+                helper.assertValueEqual(
+                        4, result.getInt(2), "Effective Territory full-strength scale");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(3),
+                        "Effective Territory Strength policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Effective Territory Strength policy",
+                        result.getString(4),
+                        "Effective Territory Strength policy reason");
+                helper.assertFalse(result.next(), "duplicate Effective Territory Strength policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Effective Territory Strength policy command result",
+                    failure);
+        }
+    }
+
+    private static void assertEffectiveTerritoryStrengthPolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM effective_territory_strength_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized territory strength policy count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Effective Territory Strength policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Effective Territory Strength policy",
+                    failure);
         }
     }
 

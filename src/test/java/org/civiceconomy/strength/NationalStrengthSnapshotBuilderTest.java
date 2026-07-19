@@ -270,7 +270,7 @@ class NationalStrengthSnapshotBuilderTest {
     }
 
     @Test
-    void scoresOnlyCurrentClaimsWithLatestEffectiveFiscalConclusion() {
+    void preservesTerritoryFactsButPausesScoringWithoutPolicy() {
         NationId nationId = new NationId(
                 UUID.fromString("55555555-5555-5555-5555-555555555555"));
         UUID teamId = UUID.fromString("66666666-6666-6666-6666-666666666666");
@@ -339,7 +339,6 @@ class NationalStrengthSnapshotBuilderTest {
                                             Duration.ofDays(7),
                                             Duration.ofDays(60),
                                             Duration.ofHours(8),
-                                            4,
                                             Duration.ofDays(30),
                                             Duration.ofDays(30),
                                             10_000L),
@@ -353,15 +352,61 @@ class NationalStrengthSnapshotBuilderTest {
             assertEquals(1, recalculation.effectiveTerritory().suspendedClaimCount());
             assertEquals(0, recalculation.effectiveTerritory().unassessedClaimCount());
             assertEquals(
-                    5_000,
+                    0,
                     recalculation.assessment()
                             .component(NationalStrengthComponent.EFFECTIVE_TERRITORY)
                             .normalizedInputBasisPoints());
             assertEquals(
-                    NationalStrengthComponentState.ACTIVE,
+                    NationalStrengthComponentState.PAUSED_ANOMALY,
                     recalculation.assessment().componentState(
                             NationalStrengthComponent.EFFECTIVE_TERRITORY));
             assertTrue(recalculation.assessment().newMintAllocationPaused());
+
+            Instant firstPolicyAt = RECALCULATED_AT.plusSeconds(1L);
+            scheduleEffectiveTerritoryStrengthPolicy(
+                    database, "territory-scale-four", 4, firstPolicyAt);
+            NationalStrengthRecalculation firstPolicy =
+                    new NationalStrengthSnapshotBuilder(
+                                    database,
+                                    new NationalStrengthSnapshotConfiguration(
+                                            Duration.ofDays(7),
+                                            Duration.ofDays(60),
+                                            Duration.ofHours(8),
+                                            Duration.ofDays(30),
+                                            Duration.ofDays(30),
+                                            10_000L),
+                                    Map.of(teamId, List.of(effective, suspended)))
+                            .recalculateAll(firstPolicyAt.toEpochMilli())
+                            .nations()
+                            .get(nationId);
+            assertEquals(5_000, firstPolicy.assessment()
+                    .component(NationalStrengthComponent.EFFECTIVE_TERRITORY)
+                    .normalizedInputBasisPoints());
+            assertEquals(NationalStrengthComponentState.ACTIVE,
+                    firstPolicy.assessment().componentState(
+                            NationalStrengthComponent.EFFECTIVE_TERRITORY));
+
+            Instant secondPolicyAt = firstPolicyAt.plusSeconds(1L);
+            scheduleEffectiveTerritoryStrengthPolicy(
+                    database, "territory-scale-sixteen", 16, secondPolicyAt);
+            NationalStrengthRecalculation secondPolicy =
+                    new NationalStrengthSnapshotBuilder(
+                                    database,
+                                    new NationalStrengthSnapshotConfiguration(
+                                            Duration.ofDays(7),
+                                            Duration.ofDays(60),
+                                            Duration.ofHours(8),
+                                            Duration.ofDays(30),
+                                            Duration.ofDays(30),
+                                            10_000L),
+                                    Map.of(teamId, List.of(effective, suspended)))
+                            .recalculateAll(secondPolicyAt.toEpochMilli())
+                            .nations()
+                            .get(nationId);
+            assertEquals(2_500, secondPolicy.assessment()
+                    .component(NationalStrengthComponent.EFFECTIVE_TERRITORY)
+                    .normalizedInputBasisPoints());
+            assertEquals(firstPolicy.effectiveTerritory(), secondPolicy.effectiveTerritory());
         }
     }
 
@@ -392,5 +437,23 @@ class NationalStrengthSnapshotBuilderTest {
                                 fullStrengthScaleCitizenEquivalents),
                         effectiveAt,
                         "Trusted Effective Citizen Strength policy"));
+    }
+
+    private static void scheduleEffectiveTerritoryStrengthPolicy(
+            CivicDatabase database,
+            String requestId,
+            int fullStrengthScaleEffectiveClaims,
+            Instant effectiveAt) {
+        Clock clock = Clock.fixed(effectiveAt.minusMillis(1L), ZoneOffset.UTC);
+        new EffectiveTerritoryStrengthPolicyRegistry(database, clock)
+                .schedule(new ScheduleEffectiveTerritoryStrengthPolicy(
+                        new ServiceIdentity(
+                                "civiceconomy-effective-territory-strength-policy"),
+                        requestId,
+                        "civic-admin-console:test",
+                        new EffectiveTerritoryStrengthPolicy(
+                                fullStrengthScaleEffectiveClaims),
+                        effectiveAt,
+                        "Trusted Effective Territory Strength policy"));
     }
 }

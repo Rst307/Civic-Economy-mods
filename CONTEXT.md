@@ -296,6 +296,10 @@ _Avoid_: Production Marginal Return Policy、硬编码生产窗口、证据时�
 由受信任服务器治理安排、在未来时刻生效的全服 Effective Citizen 国力满分尺度；它按 National Strength 评估时刻解释人口当量，不改写 Citizenship、在线区间或历史人口证据。
 _Avoid_: 建国人数门槛、FTB Team 成员上限、硬编码人口满分值
 
+**有效领土国力政策（Effective Territory Strength Policy）**:
+由受信任服务器治理安排、在未来时刻生效的全服 Effective Territory 国力满分尺度；它按 National Strength 评估时刻解释 Effective Claim 数，不改写 FTB Claim、Territory Fiscal Assessment、Settlement、Restoration 或历史领土证据。
+_Avoid_: 免费领土额度、领土维护政策、硬编码领土满分值
+
 **滚动生产边际回报评估（Rolling Production Marginal Return Assessment）**:
 一个 Nation 在统一滚动窗口内，把证据时刻绑定的生产贡献按近期权重、单设施和单产业累计用量得出的可解释结论；策略换版不会重置同一窗口内已经使用的软上限。
 _Avoid_: 策略版本分桶、永久生产总分、当前策略重算、设施计数

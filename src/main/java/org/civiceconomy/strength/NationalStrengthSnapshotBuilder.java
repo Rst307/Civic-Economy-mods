@@ -37,7 +37,6 @@ public final class NationalStrengthSnapshotBuilder {
     private final Duration effectiveCitizenObservationWindow;
     private final Duration fullCitizenContributionTime;
     private final Duration complianceWindow;
-    private final DiminishingStrengthNormalizer effectiveTerritoryNormalizer;
     private final boolean productionScoringAvailable;
     private final Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam;
 
@@ -63,7 +62,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.effectiveCitizenObservationWindow = effectiveCitizenObservationWindow;
         this.fullCitizenContributionTime = fullCitizenContributionTime;
         this.complianceWindow = Duration.ofMillis(activityWindowMillis);
-        this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(100D);
         this.productionScoringAvailable = false;
         this.currentClaimsByTeam = Map.of();
         this.recalculator = new NationalStrengthRecalculator(
@@ -94,8 +92,6 @@ public final class NationalStrengthSnapshotBuilder {
                 configuration.effectiveCitizenObservationWindow();
         this.fullCitizenContributionTime = configuration.fullCitizenContributionTime();
         this.complianceWindow = configuration.complianceWindow();
-        this.effectiveTerritoryNormalizer = new DiminishingStrengthNormalizer(
-                configuration.effectiveTerritoryFullStrengthScale());
         this.productionScoringAvailable = productionScoringAvailable;
         this.currentClaimsByTeam = currentClaimsByTeam.entrySet().stream()
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -131,6 +127,14 @@ public final class NationalStrengthSnapshotBuilder {
                 .map(EffectiveCitizenStrengthPolicyVersion::policy)
                 .map(policy -> new DiminishingStrengthNormalizer(
                         policy.fullStrengthScaleCitizenEquivalents()))
+                .orElse(null);
+        Optional<EffectiveTerritoryStrengthPolicyVersion> effectiveTerritoryPolicy =
+                new EffectiveTerritoryStrengthPolicyRegistry(database, recalculationClock)
+                        .current(recalculatedAt);
+        DiminishingStrengthNormalizer effectiveTerritoryNormalizer = effectiveTerritoryPolicy
+                .map(EffectiveTerritoryStrengthPolicyVersion::policy)
+                .map(policy -> new DiminishingStrengthNormalizer(
+                        policy.fullStrengthScaleEffectiveClaims()))
                 .orElse(null);
         Optional<ProductionStrengthPolicyVersion> productionPolicy =
                 new ProductionStrengthPolicyRegistry(database, recalculationClock)
@@ -195,7 +199,7 @@ public final class NationalStrengthSnapshotBuilder {
             if (!production.healthy()) {
                 anomalies.add(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
             }
-            if (territory.anomalous()) {
+            if (effectiveTerritoryNormalizer == null || territory.anomalous()) {
                 anomalies.add(NationalStrengthComponent.EFFECTIVE_TERRITORY);
             }
             if (compliance.anomalous()) {
@@ -211,8 +215,10 @@ public final class NationalStrengthSnapshotBuilder {
                             : productionNormalizer.normalize(
                                     production.finalValueMinorUnits()),
                     0,
-                    effectiveTerritoryNormalizer.normalize(
-                            territory.effectiveClaimCount()),
+                    effectiveTerritoryNormalizer == null
+                            ? 0
+                            : effectiveTerritoryNormalizer.normalize(
+                                    territory.effectiveClaimCount()),
                     compliance.normalizedBasisPoints(),
                     anomalies);
             recalculations.put(

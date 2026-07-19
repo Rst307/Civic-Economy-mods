@@ -54,7 +54,11 @@ import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicy;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyRegistry;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyVersion;
+import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicy;
+import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicyRegistry;
+import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicyVersion;
 import org.civiceconomy.strength.ScheduleEffectiveCitizenStrengthPolicy;
+import org.civiceconomy.strength.ScheduleEffectiveTerritoryStrengthPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -82,6 +86,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-production-industry");
     private static final ServiceIdentity EFFECTIVE_CITIZEN_STRENGTH_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-effective-citizen-strength-policy");
+    private static final ServiceIdentity EFFECTIVE_TERRITORY_STRENGTH_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-effective-territory-strength-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -725,6 +731,38 @@ public final class FiscalAdministrationCommands {
                                                                                         "requestId"),
                                                                                 StringArgumentType.getString(
                                                                                         context,
+                                                                                        "reason")))))))))
+                .then(Commands.literal("effective-territory")
+                        .then(Commands.literal("show")
+                                .executes(context -> showEffectiveTerritoryStrengthPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "fullStrengthScaleEffectiveClaims",
+                                                IntegerArgumentType.integer(1))
+                                        .then(Commands.argument(
+                                                        "effectiveAtEpochMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleEffectiveTerritoryStrengthPolicy(
+                                                                                context.getSource(),
+                                                                                IntegerArgumentType.getInteger(
+                                                                                        context,
+                                                                                        "fullStrengthScaleEffectiveClaims"),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "requestId"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
                                                                                         "reason")))))))));
     }
 
@@ -1111,6 +1149,79 @@ public final class FiscalAdministrationCommands {
         return "Effective Citizen Strength policy " + version.policyId()
                 + " fullStrengthScaleCitizenEquivalents="
                 + version.policy().fullStrengthScaleCitizenEquivalents()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showEffectiveTerritoryStrengthPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new EffectiveTerritoryStrengthPolicyRegistry(
+                                database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Effective Territory Strength policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Effective Territory Strength policy is not configured; "
+                                                + "the territory component remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatEffectiveTerritoryStrengthPolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Effective Territory Strength policy query queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleEffectiveTerritoryStrengthPolicy(
+            CommandSourceStack source,
+            int fullStrengthScaleEffectiveClaims,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new EffectiveTerritoryStrengthPolicyRegistry(
+                                database, clock)
+                        .schedule(new ScheduleEffectiveTerritoryStrengthPolicy(
+                                EFFECTIVE_TERRITORY_STRENGTH_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new EffectiveTerritoryStrengthPolicy(
+                                        fullStrengthScaleEffectiveClaims),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Scheduled "
+                                        + formatEffectiveTerritoryStrengthPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Effective Territory Strength policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Effective Territory Strength policy schedule queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatEffectiveTerritoryStrengthPolicy(
+            EffectiveTerritoryStrengthPolicyVersion version) {
+        return "Effective Territory Strength policy " + version.policyId()
+                + " fullStrengthScaleEffectiveClaims="
+                + version.policy().fullStrengthScaleEffectiveClaims()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

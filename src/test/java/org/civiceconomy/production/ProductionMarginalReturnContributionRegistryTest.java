@@ -343,7 +343,6 @@ class ProductionMarginalReturnContributionRegistryTest {
                                     Duration.ofDays(7),
                                     Duration.ofDays(60),
                                     Duration.ofHours(8),
-                                    4,
                                     Duration.ofDays(30),
                                     Duration.ofDays(30),
                                     10_000L),
@@ -490,7 +489,6 @@ class ProductionMarginalReturnContributionRegistryTest {
                 Duration.ofDays(7),
                 Duration.ofDays(60),
                 Duration.ofHours(8),
-                4,
                 Duration.ofDays(30),
                 Duration.ofDays(30),
                 10_000L);
