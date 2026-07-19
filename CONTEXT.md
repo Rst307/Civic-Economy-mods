@@ -54,6 +54,10 @@ _Avoid_: 成员、累计登录玩家、小号
 正式 Citizen 暂时不在其国家绑定 FTB Team 时的限时不一致状态；宽限期间 Citizenship 尚未结束，但财政权限和人口贡献立即暂停，回归后恢复，截止时仍不一致才转为无国籍。
 _Avoid_: 临时退籍、离队即转籍、有效公民
 
+**国籍政策（Citizenship Policy）**:
+由受信任服务器治理安排、在未来时刻生效的全服国籍纠错宽限时长与转籍冷却时长规则；它解释操作时刻的新协调和新入籍决定，不改写既有 Citizenship、已开始的宽限期限或历史离籍事实。
+_Avoid_: FTB Team 配置、即时改写国籍、按国家单独冷却
+
 **国籍协调（Citizenship Reconciliation）**:
 把正式 Citizenship 与绑定 FTB Team 的当前成员事实进行服务端校验的过程；它可以启动或解除国籍纠错宽限，但不会把新 Team 成员自动登记为 Citizen。
 _Avoid_: FTB 成员同步、自动入籍、团队即国家

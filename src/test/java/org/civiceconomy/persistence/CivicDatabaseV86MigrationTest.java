@@ -29,7 +29,7 @@ class CivicDatabaseV86MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(87, migrated.schemaVersion());
+            assertEquals(88, migrated.schemaVersion());
             assertNull(migrated.currentAuditableEconomicActivityPolicy(Long.MAX_VALUE));
         }
     }

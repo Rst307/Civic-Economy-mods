@@ -57,7 +57,7 @@ class CivicDatabaseV63MigrationTest {
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
             StoredBudgetCancellationAudit audit = migrated.budgetCancellationAudit(budgetId);
 
-            assertEquals(87, migrated.schemaVersion());
+            assertEquals(88, migrated.schemaVersion());
             assertEquals("legacy-budget-service", audit.serviceIdentity());
             assertEquals("legacy-budget-release", audit.requestId());
             assertEquals(
