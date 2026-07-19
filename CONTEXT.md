@@ -28,6 +28,10 @@ _Avoid_: Application creation, automatic team promotion
 
 **Nation Application Expiry Policy**:
 A future-effective, audited server rule for how often Civic discovers already-expired Nation Applications. It never changes an Application's persisted expiry deadline or restores expired Candidate Online Evidence.
+
+**Candidate Online Evidence Policy**:
+A future-effective, audited server rule defining the recent observation window used when a Nation Application claims Candidate Online Evidence. It never reassigns or releases an already claimed online interval, changes an Application expiry deadline, or permits one interval to support multiple applications.
+_Avoid_: Effective Citizen population window, application lifetime, reusable online time
 _Avoid_: application lifetime, expiry extension, candidate evidence reset
 
 Civic Economy 是多国家 Minecraft 服务器的财政与货币领域。它以统一实体货币为基础，区分国家政治身份、财政控制、可审计经济活动与自由现金活动。

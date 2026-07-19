@@ -42,6 +42,7 @@ import org.civiceconomy.nation.ActivateNationApplication;
 import org.civiceconomy.nation.ActivatedNation;
 import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CancelNationApplication;
+import org.civiceconomy.nation.CandidateOnlineEvidencePolicyRegistry;
 import org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry;
 import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.CreateNationApplication;
@@ -73,7 +74,7 @@ import org.slf4j.Logger;
 final class NationApplicationCommands {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Duration APPLICATION_LIFETIME = Duration.ofDays(7);
-    private static final Duration EVIDENCE_WINDOW = Duration.ofDays(60);
+    private static final Duration EFFECTIVE_CITIZEN_OBSERVATION_WINDOW = Duration.ofDays(60);
     private static final Duration FULL_EFFECTIVE_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final ServiceIdentity FOUNDING_SERVICE =
@@ -2115,7 +2116,7 @@ final class NationApplicationCommands {
                         citizenships,
                         new CitizenshipCorrectionGraceRegistry(database, queryClock),
                         new OnlineTimeLedger(database),
-                        EVIDENCE_WINDOW,
+                        EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
                         FULL_EFFECTIVE_CITIZEN_TIME)
                 .calculate(citizenship.nationId(), asOf);
     }
@@ -2151,8 +2152,9 @@ final class NationApplicationCommands {
                         return Optional.<NationApplicationStatus>empty();
                     }
                     NationApplication pending = application.orElseThrow();
+                    Duration observationWindow = candidateEvidenceWindow(database, commandClock);
                     int effectiveCandidates = (int) registry.claimCandidateEvidence(
-                                    pending.applicationId(), EVIDENCE_WINDOW)
+                                    pending.applicationId(), observationWindow)
                             .stream()
                             .filter(evidence -> evidence.attributedMillis() > 0L)
                             .count();
@@ -2202,12 +2204,13 @@ final class NationApplicationCommands {
                     NationApplication application = registry.findPendingByFtbTeam(team.teamId())
                             .orElseThrow(() -> new IllegalStateException(
                                     "Your FTB Team has no PENDING Nation Application"));
+                    Duration observationWindow = candidateEvidenceWindow(database, commandClock);
                     return registry.cancel(new CancelNationApplication(
                             FOUNDING_SERVICE,
                             "player-cancel:" + UUID.randomUUID(),
                             application.applicationId(),
                             player.getUUID(),
-                            EVIDENCE_WINDOW,
+                            observationWindow,
                             reason));
                 })
                 .whenComplete((application, failure) -> source.getServer().execute(() -> {
@@ -2245,11 +2248,7 @@ final class NationApplicationCommands {
                 player.level().dimension().location().toString(),
                 capitalChunk.x,
                 capitalChunk.z);
-        NationFoundingPolicy policy = CivicDebugWorldData.get(source.getServer()).enabled()
-                ? NationFoundingPolicy.debugWorld(
-                        2, EVIDENCE_WINDOW, CITIZENSHIP_TRANSFER_COOLDOWN)
-                : NationFoundingPolicy.formal(
-                        2, EVIDENCE_WINDOW, CITIZENSHIP_TRANSFER_COOLDOWN);
+        boolean debugWorld = CivicDebugWorldData.get(source.getServer()).enabled();
         NationalTreasuryProvisioner provisioner = serverThreadTreasuryProvisioner(source);
 
         CivicServerRuntime.current()
@@ -2259,6 +2258,12 @@ final class NationApplicationCommands {
                     NationApplication application = registry.findPendingByFtbTeam(team.teamId())
                             .orElseThrow(() -> new IllegalStateException(
                                     "Your FTB Team has no PENDING Nation Application"));
+                    Duration observationWindow = candidateEvidenceWindow(database, commandClock);
+                    NationFoundingPolicy policy = debugWorld
+                            ? NationFoundingPolicy.debugWorld(
+                                    2, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN)
+                            : NationFoundingPolicy.formal(
+                                    2, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN);
                     return new NationActivationCoordinator(
                                     database, provisioner, policy, commandClock)
                             .activate(new ActivateNationApplication(
@@ -2272,6 +2277,15 @@ final class NationApplicationCommands {
                         reportActivation(source, activated, failure)));
         source.sendSuccess(() -> Component.literal("Nation activation queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static Duration candidateEvidenceWindow(CivicDatabase database, Clock clock) {
+        return new CandidateOnlineEvidencePolicyRegistry(database, clock)
+                .current(clock.instant())
+                .orElseThrow(() -> new IllegalStateException(
+                        "Candidate Online Evidence policy is not configured"))
+                .policy()
+                .observationWindow();
     }
 
     private static NationalTreasuryProvisioner serverThreadTreasuryProvisioner(

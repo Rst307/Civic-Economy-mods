@@ -51,10 +51,17 @@ class NationApplicationExpiryProcessorTest {
                     futureTeam,
                     futureHead,
                     NOW.plus(Duration.ofDays(1))));
+            database.scheduleCandidateOnlineEvidencePolicy(
+                    UUID.randomUUID(),
+                    "civiceconomy-test",
+                    "candidate-window",
+                    "civic-test",
+                    Duration.ofDays(60).toMillis(),
+                    NOW.minusMillis(1L).toEpochMilli(),
+                    "Test Candidate Online Evidence policy",
+                    NOW.minusMillis(2L).toEpochMilli());
             NationApplicationExpiryProcessor processor = new NationApplicationExpiryProcessor(
-                    database,
-                    Clock.fixed(NOW, ZoneOffset.UTC),
-                    Duration.ofDays(60));
+                    database, Clock.fixed(NOW, ZoneOffset.UTC));
 
             assertEquals(Set.of(due.applicationId()), processor.expireDue().stream()
                     .map(NationApplication::applicationId)
@@ -68,6 +75,35 @@ class NationApplicationExpiryProcessorTest {
             assertNotNull(database.nationApplicationTransitionRegistration(
                     NationApplicationExpiryProcessor.SERVICE.value(),
                     NationApplicationExpiryProcessor.requestId(due.applicationId())));
+        }
+    }
+
+    @Test
+    void missingCandidateEvidencePolicyFailsClosedWithoutExpiringApplication() {
+        UUID teamId = UUID.fromString("45dc5dbd-049b-4e98-bba5-76da4767842a");
+        UUID headId = UUID.fromString("2fa0db83-b627-42cf-b160-f5b5e4c6e693");
+        NationTeamDirectory teams = teams(Map.of(
+                teamId, new NationTeam(teamId, headId, Set.of(headId))));
+
+        try (CivicDatabase database = database()) {
+            NationApplicationRegistry registry = new NationApplicationRegistry(
+                    database, teams, Clock.fixed(APPLIED_AT, ZoneOffset.UTC));
+            NationApplication due = registry.create(new CreateNationApplication(
+                    new ServiceIdentity("civiceconomy-founding"),
+                    "apply-without-candidate-policy",
+                    teamId,
+                    headId,
+                    NOW));
+
+            assertEquals(
+                    0,
+                    new NationApplicationExpiryProcessor(
+                                    database, Clock.fixed(NOW, ZoneOffset.UTC))
+                            .expireDue()
+                            .size());
+            assertEquals(
+                    NationApplicationState.PENDING,
+                    registry.find(due.applicationId()).orElseThrow().state());
         }
     }
 

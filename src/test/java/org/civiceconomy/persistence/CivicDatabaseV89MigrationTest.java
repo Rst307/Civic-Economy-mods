@@ -58,7 +58,7 @@ class CivicDatabaseV89MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(91, migrated.schemaVersion());
+            assertEquals(92, migrated.schemaVersion());
             assertNull(migrated.currentCitizenshipPolicy(Long.MAX_VALUE));
         }
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file);

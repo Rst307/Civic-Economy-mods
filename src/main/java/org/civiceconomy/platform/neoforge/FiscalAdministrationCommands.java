@@ -37,6 +37,9 @@ import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.nation.CitizenshipPolicy;
 import org.civiceconomy.nation.CitizenshipPolicyRegistry;
 import org.civiceconomy.nation.CitizenshipPolicyVersion;
+import org.civiceconomy.nation.CandidateOnlineEvidencePolicy;
+import org.civiceconomy.nation.CandidateOnlineEvidencePolicyRegistry;
+import org.civiceconomy.nation.CandidateOnlineEvidencePolicyVersion;
 import org.civiceconomy.nation.OnlineTimeObservationPolicy;
 import org.civiceconomy.nation.OnlineTimeObservationPolicyRegistry;
 import org.civiceconomy.nation.OnlineTimeObservationPolicyVersion;
@@ -44,6 +47,7 @@ import org.civiceconomy.nation.NationApplicationExpiryPolicy;
 import org.civiceconomy.nation.NationApplicationExpiryPolicyRegistry;
 import org.civiceconomy.nation.NationApplicationExpiryPolicyVersion;
 import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
+import org.civiceconomy.nation.ScheduleCandidateOnlineEvidencePolicy;
 import org.civiceconomy.nation.ScheduleOnlineTimeObservationPolicy;
 import org.civiceconomy.nation.ScheduleNationApplicationExpiryPolicy;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
@@ -124,6 +128,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-online-time-observation-policy");
     private static final ServiceIdentity NATION_APPLICATION_EXPIRY_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-nation-application-expiry-policy");
+    private static final ServiceIdentity CANDIDATE_ONLINE_EVIDENCE_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-candidate-online-evidence-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -1007,22 +1013,58 @@ public final class FiscalAdministrationCommands {
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             nationApplicationExpiryPolicyCommand() {
+        var expirySchedule = Commands.literal("schedule")
+                .then(Commands.argument("scanIntervalMillis", LongArgumentType.longArg(1L))
+                        .then(Commands.argument(
+                                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason", StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        scheduleNationApplicationExpiryPolicy(
+                                                                context.getSource(),
+                                                                LongArgumentType.getLong(
+                                                                        context,
+                                                                        "scanIntervalMillis"),
+                                                                LongArgumentType.getLong(
+                                                                        context,
+                                                                        "effectiveAtEpochMillis"),
+                                                                StringArgumentType.getString(
+                                                                        context, "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context, "reason")))))));
+        var candidateSchedule = Commands.literal("schedule")
+                .then(Commands.argument(
+                                "observationWindowMillis", LongArgumentType.longArg(1L))
+                        .then(Commands.argument(
+                                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason", StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        scheduleCandidateOnlineEvidencePolicy(
+                                                                context.getSource(),
+                                                                LongArgumentType.getLong(
+                                                                        context,
+                                                                        "observationWindowMillis"),
+                                                                LongArgumentType.getLong(
+                                                                        context,
+                                                                        "effectiveAtEpochMillis"),
+                                                                StringArgumentType.getString(
+                                                                        context, "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context, "reason")))))));
         return Commands.literal("nation-application")
                 .then(Commands.literal("expiry-policy")
                         .then(Commands.literal("show")
                                 .executes(context -> showNationApplicationExpiryPolicy(
                                         context.getSource())))
-                        .then(Commands.literal("schedule")
-                                .then(Commands.argument("scanIntervalMillis", LongArgumentType.longArg(1L))
-                                        .then(Commands.argument("effectiveAtEpochMillis", LongArgumentType.longArg(0L))
-                                                .then(Commands.argument("requestId", StringArgumentType.word())
-                                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                                                .executes(context -> scheduleNationApplicationExpiryPolicy(
-                                                                        context.getSource(),
-                                                                        LongArgumentType.getLong(context, "scanIntervalMillis"),
-                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
-                                                                        StringArgumentType.getString(context, "requestId"),
-                                                                        StringArgumentType.getString(context, "reason")))))))));
+                        .then(expirySchedule))
+                .then(Commands.literal("candidate-evidence-policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showCandidateOnlineEvidencePolicy(
+                                        context.getSource())))
+                        .then(candidateSchedule));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -1560,6 +1602,68 @@ public final class FiscalAdministrationCommands {
             NationApplicationExpiryPolicyVersion version) {
         return "Nation Application expiry policy " + version.policyId()
                 + " scanIntervalMillis=" + version.policy().scanInterval().toMillis()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showCandidateOnlineEvidencePolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new CandidateOnlineEvidencePolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Candidate Online Evidence policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Candidate Online Evidence policy is not configured; founding evidence operations remain disabled"), false);
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatCandidateOnlineEvidencePolicy(policy.orElseThrow())), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Candidate Online Evidence policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleCandidateOnlineEvidencePolicy(
+            CommandSourceStack source,
+            long observationWindowMillis,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new CandidateOnlineEvidencePolicyRegistry(database, clock)
+                        .schedule(new ScheduleCandidateOnlineEvidencePolicy(
+                                CANDIDATE_ONLINE_EVIDENCE_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new CandidateOnlineEvidencePolicy(
+                                        Duration.ofMillis(observationWindowMillis)),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Scheduled " + formatCandidateOnlineEvidencePolicy(policy)), true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Candidate Online Evidence policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Candidate Online Evidence policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatCandidateOnlineEvidencePolicy(
+            CandidateOnlineEvidencePolicyVersion version) {
+        return "Candidate Online Evidence policy " + version.policyId()
+                + " observationWindowMillis="
+                + version.policy().observationWindow().toMillis()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

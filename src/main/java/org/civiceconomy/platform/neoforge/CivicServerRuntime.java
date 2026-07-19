@@ -245,7 +245,7 @@ public final class CivicServerRuntime {
     private static final int NATIONAL_STRENGTH_RECALCULATION_INTERVAL_TICKS = 20 * 60;
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
     private static final int DATABASE_BACKUP_RETENTION = 8;
-    private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
+    private static final Duration EFFECTIVE_CITIZEN_OBSERVATION_WINDOW = Duration.ofDays(60);
     private static final Duration NATIONAL_STRENGTH_FULL_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
             Duration.ofSeconds(5);
@@ -335,6 +335,7 @@ public final class CivicServerRuntime {
         seedGameTestCitizenshipPolicy(database, server, clock);
         seedGameTestOnlineTimeObservationPolicy(database, server, clock);
         seedGameTestNationApplicationExpiryPolicy(database, server, clock);
+        seedGameTestCandidateOnlineEvidencePolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -2701,7 +2702,7 @@ public final class CivicServerRuntime {
                                     new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
                                             database, commandClock),
                                     new org.civiceconomy.nation.OnlineTimeLedger(database),
-                                    NATION_APPLICATION_EVIDENCE_WINDOW,
+                                    EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
                                     Duration.ofHours(8))
                             .calculate(nation.nationId(), commandTime);
                     var allocation = new TerritoryFreeAllocationPolicyRegistry(
@@ -2954,7 +2955,7 @@ public final class CivicServerRuntime {
                                         citizenships,
                                         corrections,
                                         new org.civiceconomy.nation.OnlineTimeLedger(database),
-                                        NATION_APPLICATION_EVIDENCE_WINDOW,
+                                        EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
                                         Duration.ofHours(8))
                                 .calculate(nation.nationId(), commandTime);
                         TerritoryFreeAllocation allocation =
@@ -3200,7 +3201,7 @@ public final class CivicServerRuntime {
         }
         Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         current.writer.submitDatabase(database -> new NationApplicationExpiryProcessor(
-                        database, scanClock, NATION_APPLICATION_EVIDENCE_WINDOW)
+                        database, scanClock)
                 .expireDue())
                 .whenComplete((expired, failure) -> {
                     current.nationApplicationExpiryQueued.set(false);
@@ -3996,7 +3997,7 @@ public final class CivicServerRuntime {
                 citizenships,
                 grace,
                 new org.civiceconomy.nation.OnlineTimeLedger(database),
-                NATION_APPLICATION_EVIDENCE_WINDOW,
+                EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
                 Duration.ofHours(8));
         var allocationPolicy = new TerritoryFreeAllocationPolicyRegistry(
                         database,
@@ -4419,7 +4420,7 @@ public final class CivicServerRuntime {
             CivicDatabase database, Clock clock) {
         return new NationalStrengthSnapshotConfiguration(
                 citizenshipTransferCooldown(database, clock),
-                NATION_APPLICATION_EVIDENCE_WINDOW,
+                EFFECTIVE_CITIZEN_OBSERVATION_WINDOW,
                 NATIONAL_STRENGTH_FULL_CITIZEN_TIME);
     }
 
@@ -4551,6 +4552,24 @@ public final class CivicServerRuntime {
                 Duration.ofMinutes(1).toMillis(),
                 Math.max(0L, clock.millis() - 1L),
                 "Explicit GameTest Nation Application expiry policy fixture",
+                clock.millis());
+    }
+
+    private static void seedGameTestCandidateOnlineEvidencePolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentCandidateOnlineEvidencePolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleCandidateOnlineEvidencePolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "candidate-online-evidence-policy-bootstrap",
+                "civic-gametest-server",
+                Duration.ofDays(60).toMillis(),
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest Candidate Online Evidence policy fixture",
                 clock.millis());
     }
 

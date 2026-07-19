@@ -1,7 +1,7 @@
 package org.civiceconomy.nation;
 
 import java.time.Clock;
-import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -26,29 +26,29 @@ public final class NationApplicationExpiryProcessor {
 
     private final CivicDatabase database;
     private final Clock clock;
-    private final Duration observationWindow;
-
-    public NationApplicationExpiryProcessor(
-            CivicDatabase database, Clock clock, Duration observationWindow) {
-        if (database == null || clock == null || observationWindow == null
-                || observationWindow.isZero() || observationWindow.isNegative()) {
+    public NationApplicationExpiryProcessor(CivicDatabase database, Clock clock) {
+        if (database == null || clock == null) {
             throw new IllegalArgumentException(
-                    "Nation Application expiry dependencies and positive window are required");
+                    "Nation Application expiry dependencies are required");
         }
         this.database = database;
         this.clock = clock;
-        this.observationWindow = observationWindow;
     }
 
     public List<NationApplication> expireDue() {
+        Instant asOf = clock.instant();
+        var policy = new CandidateOnlineEvidencePolicyRegistry(database, clock).current(asOf);
+        if (policy.isEmpty()) {
+            return List.of();
+        }
         NationApplicationRegistry registry =
                 new NationApplicationRegistry(database, NO_TEAM_LOOKUPS, clock);
-        return registry.pendingExpiringAtOrBefore(clock.instant()).stream()
+        return registry.pendingExpiringAtOrBefore(asOf).stream()
                 .map(application -> registry.expire(new ExpireNationApplication(
                         SERVICE,
                         requestId(application.applicationId()),
                         application.applicationId(),
-                        observationWindow,
+                        policy.orElseThrow().policy().observationWindow(),
                         REASON)))
                 .toList();
     }
