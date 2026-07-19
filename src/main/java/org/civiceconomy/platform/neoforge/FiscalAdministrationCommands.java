@@ -52,6 +52,9 @@ import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicy;
+import org.civiceconomy.strength.AuditableEconomicActivityPolicy;
+import org.civiceconomy.strength.AuditableEconomicActivityPolicyRegistry;
+import org.civiceconomy.strength.AuditableEconomicActivityPolicyVersion;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyRegistry;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyVersion;
 import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicy;
@@ -61,6 +64,7 @@ import org.civiceconomy.strength.MintCompliancePolicy;
 import org.civiceconomy.strength.MintCompliancePolicyRegistry;
 import org.civiceconomy.strength.MintCompliancePolicyVersion;
 import org.civiceconomy.strength.ScheduleEffectiveCitizenStrengthPolicy;
+import org.civiceconomy.strength.ScheduleAuditableEconomicActivityPolicy;
 import org.civiceconomy.strength.ScheduleEffectiveTerritoryStrengthPolicy;
 import org.civiceconomy.strength.ScheduleMintCompliancePolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
@@ -94,6 +98,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-effective-territory-strength-policy");
     private static final ServiceIdentity MINT_COMPLIANCE_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-mint-compliance-policy");
+    private static final ServiceIdentity AUDITABLE_ECONOMIC_ACTIVITY_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-auditable-economic-activity-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -807,6 +813,44 @@ public final class FiscalAdministrationCommands {
                                                                                                 "requestId"),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
+                                                                                                "reason"))))))))))
+                .then(Commands.literal("auditable-activity")
+                        .then(Commands.literal("show")
+                                .executes(context -> showAuditableEconomicActivityPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "observationWindowMillis",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "fullStrengthScaleMinorUnits",
+                                                        LongArgumentType.longArg(1L))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleAuditableEconomicActivityPolicy(
+                                                                                        context.getSource(),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "observationWindowMillis"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "fullStrengthScaleMinorUnits"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "requestId"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
                                                                                                 "reason"))))))))));
     }
 
@@ -1334,6 +1378,83 @@ public final class FiscalAdministrationCommands {
                 + " observationWindow=" + version.policy().observationWindow()
                 + " recoveredCommitBasisPoints="
                 + version.policy().recoveredCommitBasisPoints()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showAuditableEconomicActivityPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new AuditableEconomicActivityPolicyRegistry(
+                                database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Auditable Economic Activity policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Auditable Economic Activity policy is not configured; the activity component remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatAuditableEconomicActivityPolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal(
+                        "Auditable Economic Activity policy query queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleAuditableEconomicActivityPolicy(
+            CommandSourceStack source,
+            long observationWindowMillis,
+            long fullStrengthScaleMinorUnits,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new AuditableEconomicActivityPolicyRegistry(
+                                database, clock)
+                        .schedule(new ScheduleAuditableEconomicActivityPolicy(
+                                AUDITABLE_ECONOMIC_ACTIVITY_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new AuditableEconomicActivityPolicy(
+                                        Duration.ofMillis(observationWindowMillis),
+                                        fullStrengthScaleMinorUnits),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Scheduled "
+                                        + formatAuditableEconomicActivityPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Auditable Economic Activity policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal(
+                        "Auditable Economic Activity policy schedule queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatAuditableEconomicActivityPolicy(
+            AuditableEconomicActivityPolicyVersion version) {
+        return "Auditable Economic Activity policy " + version.policyId()
+                + " observationWindow=" + version.policy().observationWindow()
+                + " fullStrengthScaleMinorUnits="
+                + version.policy().fullStrengthScaleMinorUnits()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

@@ -73,7 +73,7 @@ class CivicDatabaseV32MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(85, migrated.schemaVersion());
+            assertEquals(86, migrated.schemaVersion());
             assertEquals(
                     "ORDINARY",
                     migrated.territoryFiscalAssessment("migration", "assessment").priority());

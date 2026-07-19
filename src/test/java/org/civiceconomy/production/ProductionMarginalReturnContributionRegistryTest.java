@@ -342,9 +342,7 @@ class ProductionMarginalReturnContributionRegistryTest {
                             new NationalStrengthSnapshotConfiguration(
                                     Duration.ofDays(7),
                                     Duration.ofDays(60),
-                                    Duration.ofHours(8),
-                                    Duration.ofDays(30),
-                                    10_000L),
+                                    Duration.ofHours(8)),
                             Map.of(),
                             true)
                     .recalculateAll(assessedAt.toEpochMilli())
@@ -487,9 +485,7 @@ class ProductionMarginalReturnContributionRegistryTest {
         return new NationalStrengthSnapshotConfiguration(
                 Duration.ofDays(7),
                 Duration.ofDays(60),
-                Duration.ofHours(8),
-                Duration.ofDays(30),
-                10_000L);
+                Duration.ofHours(8));
     }
 
     private ProductionMarginalReturnContributionRegistry configuredRegistry(

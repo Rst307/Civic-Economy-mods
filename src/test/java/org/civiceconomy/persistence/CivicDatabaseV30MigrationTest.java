@@ -65,7 +65,7 @@ class CivicDatabaseV30MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(85, migrated.schemaVersion());
+            assertEquals(86, migrated.schemaVersion());
             assertNotNull(migrated.fiscalCapabilityGrant(grantId));
             assertNotNull(migrated.fiscalCapabilityRevocation(grantId));
             assertNotNull(migrated.grantFiscalCapability(

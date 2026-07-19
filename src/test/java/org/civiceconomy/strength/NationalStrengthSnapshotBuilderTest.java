@@ -65,8 +65,32 @@ class NationalStrengthSnapshotBuilderTest {
             assertEquals(3_000L, snapshot.recalculatedAtEpochMillis());
             assertEquals(2, snapshot.nations().size());
             assertEquals(
-                    NationalStrengthComponentState.ACTIVE,
+                    NationalStrengthComponentState.PAUSED_ANOMALY,
                     snapshot.nations().get(first).assessment().componentState(
+                            NationalStrengthComponent.AUDITABLE_ECONOMIC_ACTIVITY));
+            Instant activityPolicyAt = Instant.ofEpochMilli(3_001L);
+            new AuditableEconomicActivityPolicyRegistry(
+                            database,
+                            Clock.fixed(Instant.ofEpochMilli(3_000L), ZoneOffset.UTC))
+                    .schedule(new ScheduleAuditableEconomicActivityPolicy(
+                            new ServiceIdentity(
+                                    "civiceconomy-auditable-economic-activity-policy"),
+                            "snapshot-activity-policy",
+                            "civic-admin-console:test",
+                            new AuditableEconomicActivityPolicy(Duration.ofDays(30), 10_000L),
+                            activityPolicyAt,
+                            "Snapshot activity policy"));
+            NationalStrengthSnapshot configured = new NationalStrengthSnapshotBuilder(
+                            database,
+                            Duration.ofDays(7),
+                            Duration.ofDays(60),
+                            Duration.ofHours(8),
+                            1L,
+                            1L)
+                    .recalculateAll(activityPolicyAt.toEpochMilli());
+            assertEquals(
+                    NationalStrengthComponentState.ACTIVE,
+                    configured.nations().get(first).assessment().componentState(
                             NationalStrengthComponent.AUDITABLE_ECONOMIC_ACTIVITY));
             assertTrue(snapshot.nations().get(second).assessment().newMintAllocationPaused());
             assertThrows(
@@ -338,9 +362,7 @@ class NationalStrengthSnapshotBuilderTest {
                                     new NationalStrengthSnapshotConfiguration(
                                             Duration.ofDays(7),
                                             Duration.ofDays(60),
-                                            Duration.ofHours(8),
-                                            Duration.ofDays(30),
-                                            10_000L),
+                                            Duration.ofHours(8)),
                                     Map.of(teamId, List.of(effective, suspended)))
                             .recalculateAll(RECALCULATED_AT.toEpochMilli())
                             .nations()
@@ -370,9 +392,7 @@ class NationalStrengthSnapshotBuilderTest {
                                     new NationalStrengthSnapshotConfiguration(
                                             Duration.ofDays(7),
                                             Duration.ofDays(60),
-                                            Duration.ofHours(8),
-                                            Duration.ofDays(30),
-                                            10_000L),
+                                            Duration.ofHours(8)),
                                     Map.of(teamId, List.of(effective, suspended)))
                             .recalculateAll(firstPolicyAt.toEpochMilli())
                             .nations()
@@ -393,9 +413,7 @@ class NationalStrengthSnapshotBuilderTest {
                                     new NationalStrengthSnapshotConfiguration(
                                             Duration.ofDays(7),
                                             Duration.ofDays(60),
-                                            Duration.ofHours(8),
-                                            Duration.ofDays(30),
-                                            10_000L),
+                                            Duration.ofHours(8)),
                                     Map.of(teamId, List.of(effective, suspended)))
                             .recalculateAll(secondPolicyAt.toEpochMilli())
                             .nations()

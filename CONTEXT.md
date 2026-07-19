@@ -301,6 +301,9 @@ _Avoid_: 建国人数门槛、FTB Team 成员上限、硬编码人口满分值
 
 **铸币合规政策（Mint Compliance Policy）**:
 由受信任服务器治理安排、在未来时刻生效的全服铸币合规解释规则；它规定评估时使用的观察窗口和 `RECOVERED_COMMIT` 权重，只决定哪些既有 Mint Compliance Observation 进入当前 National Strength 快照及其分值，不改写 Mint Batch、Mint Recovery Incident、Monetary Stock Correction 或历史观察证据。
+
+**可审计经济活动政策（Auditable Economic Activity Policy）**:
+由受信任服务器治理安排、在未来时刻生效的全服正式经济活动解释规则；它规定 National Strength 评估使用的观察窗口和满分所需 LC 小单位规模，只解释既有 Auditable Economic Activity Evidence，不改写 Payment、Refund、General Ledger 或历史分类证据。
 _Avoid_: 免费领土额度、领土维护政策、硬编码领土满分值
 
 **滚动生产边际回报评估（Rolling Production Marginal Return Assessment）**:

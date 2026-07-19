@@ -32,7 +32,6 @@ import org.civiceconomy.territory.TerritoryMaintenanceRegistry;
 
 public final class NationalStrengthSnapshotBuilder {
     private final CivicDatabase database;
-    private final NationalStrengthRecalculator recalculator;
     private final Duration citizenshipTransferCooldown;
     private final Duration effectiveCitizenObservationWindow;
     private final Duration fullCitizenContributionTime;
@@ -62,8 +61,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.fullCitizenContributionTime = fullCitizenContributionTime;
         this.productionScoringAvailable = false;
         this.currentClaimsByTeam = Map.of();
-        this.recalculator = new NationalStrengthRecalculator(
-                database, activityWindowMillis, activityFullStrengthScale);
     }
 
     public NationalStrengthSnapshotBuilder(
@@ -93,10 +90,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.currentClaimsByTeam = currentClaimsByTeam.entrySet().stream()
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(
                         Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
-        this.recalculator = new NationalStrengthRecalculator(
-                database,
-                configuration.activityWindow().toMillis(),
-                configuration.activityFullStrengthScale());
     }
 
     public NationalStrengthSnapshot recalculateAll(long recalculatedAtEpochMillis) {
@@ -120,6 +113,16 @@ public final class NationalStrengthSnapshotBuilder {
         Optional<MintCompliancePolicyVersion> mintCompliancePolicy =
                 new MintCompliancePolicyRegistry(database, recalculationClock)
                         .current(recalculatedAt);
+        Optional<AuditableEconomicActivityPolicyVersion> activityPolicy =
+                new AuditableEconomicActivityPolicyRegistry(database, recalculationClock)
+                        .current(recalculatedAt);
+        NationalStrengthRecalculator activityRecalculator = activityPolicy
+                .map(AuditableEconomicActivityPolicyVersion::policy)
+                .map(policy -> new NationalStrengthRecalculator(
+                        database,
+                        policy.observationWindow().toMillis(),
+                        policy.fullStrengthScaleMinorUnits()))
+                .orElseGet(() -> new NationalStrengthRecalculator(database, 1L, 1L));
         Optional<EffectiveCitizenStrengthPolicyVersion> effectiveCitizenPolicy =
                 new EffectiveCitizenStrengthPolicyRegistry(database, recalculationClock)
                         .current(recalculatedAt);
@@ -208,6 +211,9 @@ public final class NationalStrengthSnapshotBuilder {
             if (effectiveCitizenNormalizer == null) {
                 anomalies.add(NationalStrengthComponent.EFFECTIVE_CITIZENS);
             }
+            if (activityPolicy.isEmpty()) {
+                anomalies.add(NationalStrengthComponent.AUDITABLE_ECONOMIC_ACTIVITY);
+            }
             if (productionSource == null) {
                 anomalies.add(NationalStrengthComponent.PRODUCTION_AND_INFRASTRUCTURE);
             }
@@ -238,7 +244,7 @@ public final class NationalStrengthSnapshotBuilder {
                     anomalies);
             recalculations.put(
                     nationId,
-                    recalculator.recalculate(
+                    activityRecalculator.recalculate(
                             nationId,
                             recalculatedAtEpochMillis,
                             population,
