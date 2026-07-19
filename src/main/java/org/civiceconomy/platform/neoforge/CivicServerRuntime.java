@@ -3413,11 +3413,20 @@ public final class CivicServerRuntime {
             return;
         }
         Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
-        current.writer.submitDatabase(database ->
-                        new NationRegistry(database, NO_TEAM_LOOKUPS).registeredNations())
+        current.writer.submitDatabase(database -> {
+                    if (database.currentCitizenshipPolicy(scanClock.millis()) == null) {
+                        return null;
+                    }
+                    return new NationRegistry(database, NO_TEAM_LOOKUPS).registeredNations();
+                })
                 .whenComplete((nations, listFailure) -> {
                     if (listFailure != null) {
                         finishCitizenshipReconciliation(current, null, listFailure);
+                        return;
+                    }
+                    if (nations == null) {
+                        reportMissingCitizenshipPolicy(current);
+                        current.citizenshipReconciliationQueued.set(false);
                         return;
                     }
                     current.server.execute(() -> {
@@ -4244,28 +4253,38 @@ public final class CivicServerRuntime {
         }
         long recalculatedAt = clock.millis();
         current.writer
-                .submitDatabase(database -> database.registeredNations().stream()
-                        .map(org.civiceconomy.persistence.StoredNation::ftbTeamId)
-                        .distinct()
-                        .toList())
-                .thenCompose(teamIds -> onServer(
-                        current, () -> snapshotNationalStrengthClaims(teamIds)))
-                .thenCompose(currentClaims -> current.writer.submitDatabase(database ->
-                        new NationalStrengthSnapshotBuilder(
-                                        database,
-                                        nationalStrengthConfiguration(
+                .submitDatabase(database -> {
+                    if (database.currentCitizenshipPolicy(recalculatedAt) == null) {
+                        return null;
+                    }
+                    return database.registeredNations().stream()
+                            .map(org.civiceconomy.persistence.StoredNation::ftbTeamId)
+                            .distinct()
+                            .toList();
+                })
+                .thenCompose(teamIds -> teamIds == null
+                        ? CompletableFuture.completedFuture(null)
+                        : onServer(current, () -> snapshotNationalStrengthClaims(teamIds)))
+                .thenCompose(currentClaims -> currentClaims == null
+                        ? CompletableFuture.completedFuture(null)
+                        : current.writer.submitDatabase(database ->
+                                new NationalStrengthSnapshotBuilder(
                                                 database,
-                                                Clock.fixed(
-                                                        Instant.ofEpochMilli(recalculatedAt),
-                                                        ZoneOffset.UTC)),
-                                        currentClaims,
-                                        CivicEconomy.compatibilityReport()
-                                                .productionScoringEnabled())
-                                .recalculateAll(recalculatedAt)))
+                                                nationalStrengthConfiguration(
+                                                        database,
+                                                        Clock.fixed(
+                                                                Instant.ofEpochMilli(recalculatedAt),
+                                                                ZoneOffset.UTC)),
+                                                currentClaims,
+                                                CivicEconomy.compatibilityReport()
+                                                        .productionScoringEnabled())
+                                        .recalculateAll(recalculatedAt)))
                 .whenComplete((snapshot, failure) -> {
                     current.nationalStrengthRecalculationQueued.set(false);
                     if (failure != null) {
                         LOGGER.error("Automatic National Strength recalculation failed closed", failure);
+                    } else if (snapshot == null) {
+                        reportMissingCitizenshipPolicy(current);
                     } else if (state == current) {
                         current.nationalStrengthSnapshot = snapshot;
                     }
@@ -4400,6 +4419,13 @@ public final class CivicServerRuntime {
                         "Registered Facility Scope policy is not configured"))
                 .policy()
                 .maxScopeChunks();
+    }
+
+    private static void reportMissingCitizenshipPolicy(RuntimeState current) {
+        if (current.citizenshipPolicyMissingLogged.compareAndSet(false, true)) {
+            LOGGER.warn(
+                    "Citizenship policy is not configured; Citizenship writes, reconciliation and dependent National Strength results remain disabled until an OP schedules an effective policy");
+        }
     }
 
     private static void seedGameTestCitizenshipPolicy(
@@ -4614,6 +4640,7 @@ public final class CivicServerRuntime {
                 new AtomicBoolean();
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
+        private final AtomicBoolean citizenshipPolicyMissingLogged = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
         private final AtomicBoolean treasuryWithdrawalRecoveryQueued = new AtomicBoolean();
