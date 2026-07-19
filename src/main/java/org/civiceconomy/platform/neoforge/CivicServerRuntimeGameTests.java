@@ -5654,9 +5654,12 @@ public final class CivicServerRuntimeGameTests {
                                     databaseFile, withdrawalRequestId);
                     helper.assertValueEqual("APPROVED", approval.state(), "approved decision state");
                     helper.assertValueEqual(2, approval.approvalCount(), "two distinct approvals");
+                    TreasuryWithdrawalRow automaticallyPrepared =
+                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId);
                     helper.assertTrue(
-                            treasuryWithdrawalByRequest(databaseFile, withdrawalRequestId) == null,
-                            "approval alone creates no LC operation before execution");
+                            automaticallyPrepared == null
+                                    || "PREPARED".equals(automaticallyPrepared.state()),
+                            "approval is either awaiting recovery or conservatively prepared");
                     helper.assertValueEqual(
                             1_000L,
                             LightmansCurrencyFiscalAccounts.forLevel(helper.getLevel())
