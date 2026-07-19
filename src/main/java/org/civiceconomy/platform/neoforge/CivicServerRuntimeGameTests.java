@@ -2780,6 +2780,10 @@ public final class CivicServerRuntimeGameTests {
                 "citizenship-policy-command-" + UUID.randomUUID();
         String unauthorizedCitizenshipPolicyRequestId =
                 "citizenship-policy-unauthorized-" + UUID.randomUUID();
+        String onlineTimeObservationPolicyRequestId =
+                "online-time-observation-policy-command-" + UUID.randomUUID();
+        String unauthorizedOnlineTimeObservationPolicyRequestId =
+                "online-time-observation-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2850,6 +2854,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Citizenship policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin online-time policy schedule 60000 "
+                        + effectiveAt + " " + onlineTimeObservationPolicyRequestId
+                        + " GameTest Online Time Observation policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2903,6 +2912,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin citizenship policy schedule 1 1 1 "
                         + effectiveAt + " " + unauthorizedCitizenshipPolicyRequestId
                         + " Untrusted Citizenship policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin online-time policy schedule 1 "
+                        + effectiveAt + " " + unauthorizedOnlineTimeObservationPolicyRequestId
+                        + " Untrusted Online Time Observation policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -2961,6 +2975,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, citizenshipPolicyRequestId, effectiveAt);
             assertCitizenshipPolicyAbsent(
                     helper, databaseFile, unauthorizedCitizenshipPolicyRequestId);
+            assertOnlineTimeObservationPolicyScheduled(
+                    helper, databaseFile, onlineTimeObservationPolicyRequestId, effectiveAt);
+            assertOnlineTimeObservationPolicyAbsent(
+                    helper, databaseFile, unauthorizedOnlineTimeObservationPolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -8030,7 +8048,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(89, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(90, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8769,6 +8787,67 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Citizenship policy", failure);
+        }
+    }
+
+    private static void assertOnlineTimeObservationPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, checkpoint_interval_millis,
+                               effective_at_epoch_millis, reason
+                        FROM online_time_observation_policy
+                        WHERE service_identity = 'civiceconomy-online-time-observation-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Online Time Observation policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Online Time Observation administrator");
+                helper.assertValueEqual(
+                        60_000L, result.getLong(2), "online-time checkpoint interval");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(3),
+                        "Online Time Observation policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Online Time Observation policy",
+                        result.getString(4),
+                        "Online Time Observation policy reason");
+                helper.assertFalse(result.next(), "duplicate Online Time Observation policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Online Time Observation policy", failure);
+        }
+    }
+
+    private static void assertOnlineTimeObservationPolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM online_time_observation_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(
+                        result.next(), "unauthorized Online Time Observation policy count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Online Time Observation policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Online Time Observation policy", failure);
         }
     }
 

@@ -33,7 +33,7 @@ class CivicDatabaseV81MigrationTest {
 
         UUID nationId = UUID.fromString("a7acd3c4-0a84-4123-971d-f8ee6c3cc37a");
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(89, migrated.schemaVersion());
+            assertEquals(90, migrated.schemaVersion());
             assertNull(migrated.rollingProductionMarginalReturnAssessment(nationId));
             assertEquals(
                     java.util.List.of(),

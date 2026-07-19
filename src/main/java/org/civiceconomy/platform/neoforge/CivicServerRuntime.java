@@ -101,6 +101,7 @@ import org.civiceconomy.fiscal.WithdrawalApprovalPolicyVersion;
 import org.civiceconomy.fiscal.WithdrawalApprovalTier;
 import org.civiceconomy.integration.lightmanscurrency.TerritoryMaintenancePaymentCoordinator;
 import org.civiceconomy.nation.OnlineSessionAccumulator;
+import org.civiceconomy.nation.OnlineTimeObservationPolicyRegistry;
 import org.civiceconomy.nation.RecordOnlineTime;
 import org.civiceconomy.nation.NationApplicationExpiryProcessor;
 import org.civiceconomy.integration.ftb.FtbNationTeamDirectory;
@@ -231,7 +232,7 @@ import org.slf4j.Logger;
 
 public final class CivicServerRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final int CHECKPOINT_INTERVAL_TICKS = 20 * 60;
+    private static final long ONLINE_TIME_POLICY_DISCOVERY_INTERVAL_TICKS = 20L * 60L;
     private static final int FISCAL_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final long CITIZENSHIP_POLICY_DISCOVERY_INTERVAL_TICKS = 20L * 60L;
@@ -332,6 +333,7 @@ public final class CivicServerRuntime {
                         activation.rollbackFileName()));
         CivicDatabase database = CivicDatabase.open(databaseDirectory.resolve("civic.sqlite3"), identity);
         seedGameTestCitizenshipPolicy(database, server, clock);
+        seedGameTestOnlineTimeObservationPolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -423,9 +425,9 @@ public final class CivicServerRuntime {
             return;
         }
         current.ticksSinceCheckpoint++;
-        if (current.ticksSinceCheckpoint >= CHECKPOINT_INTERVAL_TICKS) {
+        if (current.ticksSinceCheckpoint >= current.onlineTimeCheckpointIntervalTicks) {
             current.ticksSinceCheckpoint = 0;
-            current.writer.submit(current.sessions.checkpoint(clock.millis()));
+            scheduleOnlineTimeCheckpoint(current);
         }
         current.ticksSinceFiscalExpiry++;
         if (current.ticksSinceFiscalExpiry >= FISCAL_EXPIRY_INTERVAL_TICKS) {
@@ -4460,6 +4462,59 @@ public final class CivicServerRuntime {
         return 1L + ((intervalMillis - 1L) / 50L);
     }
 
+    private void scheduleOnlineTimeCheckpoint(RuntimeState current) {
+        if (!current.onlineTimeCheckpointQueued.compareAndSet(false, true)) {
+            return;
+        }
+        long observedAtEpochMillis = clock.millis();
+        current.writer.submitDatabase(database -> database.currentOnlineTimeObservationPolicy(
+                        observedAtEpochMillis))
+                .whenComplete((policy, failure) -> current.server.execute(() -> {
+                    try {
+                        if (failure != null) {
+                            LOGGER.warn("Online Time Observation policy lookup failed", failure);
+                            return;
+                        }
+                        if (policy == null) {
+                            current.onlineTimeCheckpointIntervalTicks =
+                                    ONLINE_TIME_POLICY_DISCOVERY_INTERVAL_TICKS;
+                            return;
+                        }
+                        current.onlineTimeCheckpointIntervalTicks =
+                                intervalTicks(policy.checkpointIntervalMillis());
+                        current.writer.submit(
+                                current.sessions.checkpoint(observedAtEpochMillis));
+                    } finally {
+                        current.onlineTimeCheckpointQueued.set(false);
+                    }
+                }));
+    }
+
+    private static long intervalTicks(long intervalMillis) {
+        if (intervalMillis <= 0L) {
+            throw new IllegalArgumentException("Policy interval must be positive");
+        }
+        return 1L + ((intervalMillis - 1L) / 50L);
+    }
+
+    private static void seedGameTestOnlineTimeObservationPolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentOnlineTimeObservationPolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleOnlineTimeObservationPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "online-time-observation-policy-bootstrap",
+                "civic-gametest-server",
+                Duration.ofMinutes(1).toMillis(),
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest Online Time Observation policy fixture",
+                clock.millis());
+    }
+
     private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(
             List<UUID> teamIds) {
         FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
@@ -4653,6 +4708,7 @@ public final class CivicServerRuntime {
                 new AtomicBoolean();
         private final AtomicBoolean nationApplicationExpiryQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipReconciliationQueued = new AtomicBoolean();
+        private final AtomicBoolean onlineTimeCheckpointQueued = new AtomicBoolean();
         private final AtomicBoolean citizenshipPolicyMissingLogged = new AtomicBoolean();
         private final AtomicBoolean territoryPermitCompensationQueued = new AtomicBoolean();
         private final AtomicBoolean permanentDestructionRecoveryQueued = new AtomicBoolean();
@@ -4668,7 +4724,9 @@ public final class CivicServerRuntime {
         private final AtomicBoolean nationalStrengthRecalculationQueued = new AtomicBoolean();
         private final AtomicBoolean databaseBackupQueued = new AtomicBoolean();
         private volatile NationalStrengthSnapshot nationalStrengthSnapshot;
-        private int ticksSinceCheckpoint;
+        private long ticksSinceCheckpoint;
+        private volatile long onlineTimeCheckpointIntervalTicks =
+                ONLINE_TIME_POLICY_DISCOVERY_INTERVAL_TICKS;
         private int ticksSinceFiscalExpiry;
         private int ticksSinceNationApplicationExpiry;
         private long ticksSinceCitizenshipReconciliation;

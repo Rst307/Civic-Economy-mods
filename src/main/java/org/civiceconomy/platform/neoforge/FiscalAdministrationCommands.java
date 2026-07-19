@@ -37,7 +37,11 @@ import org.civiceconomy.monetary.MonetaryStockCorrection;
 import org.civiceconomy.nation.CitizenshipPolicy;
 import org.civiceconomy.nation.CitizenshipPolicyRegistry;
 import org.civiceconomy.nation.CitizenshipPolicyVersion;
+import org.civiceconomy.nation.OnlineTimeObservationPolicy;
+import org.civiceconomy.nation.OnlineTimeObservationPolicyRegistry;
+import org.civiceconomy.nation.OnlineTimeObservationPolicyVersion;
 import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
+import org.civiceconomy.nation.ScheduleOnlineTimeObservationPolicy;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
@@ -112,6 +116,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-registered-facility-scope-policy");
     private static final ServiceIdentity CITIZENSHIP_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-citizenship-policy");
+    private static final ServiceIdentity ONLINE_TIME_OBSERVATION_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-online-time-observation-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -156,6 +162,7 @@ public final class FiscalAdministrationCommands {
                 .then(productionPolicyCommand())
                 .then(facilityPolicyCommand())
                 .then(citizenshipPolicyCommand())
+                .then(onlineTimeObservationPolicyCommand())
                 .then(strengthPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
@@ -810,6 +817,43 @@ public final class FiscalAdministrationCommands {
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            onlineTimeObservationPolicyCommand() {
+        return Commands.literal("online-time")
+                .then(Commands.literal("policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showOnlineTimeObservationPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "checkpointIntervalMillis",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "effectiveAtEpochMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleOnlineTimeObservationPolicy(
+                                                                                context.getSource(),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "checkpointIntervalMillis"),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "requestId"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "reason")))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             strengthPolicyCommand() {
         return Commands.literal("strength")
                 .then(Commands.literal("effective-citizen")
@@ -1405,6 +1449,73 @@ public final class FiscalAdministrationCommands {
                 + " transferCooldownMillis=" + version.policy().transferCooldown().toMillis()
                 + " reconciliationIntervalMillis="
                 + version.policy().reconciliationInterval().toMillis()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showOnlineTimeObservationPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new OnlineTimeObservationPolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Online Time Observation policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Online Time Observation policy is not configured; periodic online-time checkpoints remain disabled"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatOnlineTimeObservationPolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Online Time Observation policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleOnlineTimeObservationPolicy(
+            CommandSourceStack source,
+            long checkpointIntervalMillis,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new OnlineTimeObservationPolicyRegistry(database, clock)
+                        .schedule(new ScheduleOnlineTimeObservationPolicy(
+                                ONLINE_TIME_OBSERVATION_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new OnlineTimeObservationPolicy(
+                                        java.time.Duration.ofMillis(checkpointIntervalMillis)),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatOnlineTimeObservationPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Online Time Observation policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Online Time Observation policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatOnlineTimeObservationPolicy(
+            OnlineTimeObservationPolicyVersion version) {
+        return "Online Time Observation policy " + version.policyId()
+                + " checkpointIntervalMillis="
+                + version.policy().checkpointInterval().toMillis()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

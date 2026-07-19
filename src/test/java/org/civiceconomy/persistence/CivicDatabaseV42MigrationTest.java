@@ -86,7 +86,7 @@ class CivicDatabaseV42MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(89, migrated.schemaVersion());
+            assertEquals(90, migrated.schemaVersion());
             TerritoryForceLoadEnforcementRegistry registry =
                     new TerritoryForceLoadEnforcementRegistry(
                             migrated,

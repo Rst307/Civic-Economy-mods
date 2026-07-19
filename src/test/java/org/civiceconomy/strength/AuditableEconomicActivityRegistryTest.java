@@ -93,7 +93,7 @@ class AuditableEconomicActivityRegistryTest {
                             100L,
                             "budget:rail-2026",
                             2_000L)));
-            assertEquals(89, database.schemaVersion());
+            assertEquals(90, database.schemaVersion());
         }
     }
 
