@@ -2776,6 +2776,10 @@ public final class CivicServerRuntimeGameTests {
                 "facility-scope-policy-command-" + UUID.randomUUID();
         String unauthorizedFacilityScopePolicyRequestId =
                 "facility-scope-policy-unauthorized-" + UUID.randomUUID();
+        String citizenshipPolicyRequestId =
+                "citizenship-policy-command-" + UUID.randomUUID();
+        String unauthorizedCitizenshipPolicyRequestId =
+                "citizenship-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2841,6 +2845,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Registered Facility Scope policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin citizenship policy schedule 172800000 604800000 "
+                        + effectiveAt + " " + citizenshipPolicyRequestId
+                        + " GameTest Citizenship policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2889,6 +2898,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin facility scope-policy schedule 1 "
                         + effectiveAt + " " + unauthorizedFacilityScopePolicyRequestId
                         + " Untrusted Registered Facility Scope policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin citizenship policy schedule 1 1 "
+                        + effectiveAt + " " + unauthorizedCitizenshipPolicyRequestId
+                        + " Untrusted Citizenship policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -2943,6 +2957,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, facilityScopePolicyRequestId, effectiveAt);
             assertRegisteredFacilityScopePolicyAbsent(
                     helper, databaseFile, unauthorizedFacilityScopePolicyRequestId);
+            assertCitizenshipPolicyScheduled(
+                    helper, databaseFile, citizenshipPolicyRequestId, effectiveAt);
+            assertCitizenshipPolicyAbsent(
+                    helper, databaseFile, unauthorizedCitizenshipPolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -8012,7 +8030,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(87, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(88, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8688,6 +8706,66 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Facility Scope policy", failure);
+        }
+    }
+
+    private static void assertCitizenshipPolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, correction_grace_millis,
+                               transfer_cooldown_millis,
+                               effective_at_epoch_millis, reason
+                        FROM citizenship_policy
+                        WHERE service_identity = 'civiceconomy-citizenship-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Citizenship policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Citizenship administrator");
+                helper.assertValueEqual(
+                        172_800_000L, result.getLong(2), "Citizenship correction grace");
+                helper.assertValueEqual(
+                        604_800_000L, result.getLong(3), "Citizenship transfer cooldown");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(4),
+                        "Citizenship policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Citizenship policy",
+                        result.getString(5),
+                        "Citizenship policy reason");
+                helper.assertFalse(result.next(), "duplicate Citizenship policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to inspect Citizenship policy", failure);
+        }
+    }
+
+    private static void assertCitizenshipPolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM citizenship_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized Citizenship policy count");
+                helper.assertValueEqual(
+                        0L, result.getLong(1), "non-OP cannot schedule Citizenship policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Citizenship policy", failure);
         }
     }
 

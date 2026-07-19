@@ -34,6 +34,10 @@ import org.civiceconomy.fiscal.ServiceIdentity;
 import org.civiceconomy.fiscal.TreasuryWithdrawalApprovalStatus;
 import org.civiceconomy.fiscal.TreasuryWithdrawalRecoveryStatus;
 import org.civiceconomy.monetary.MonetaryStockCorrection;
+import org.civiceconomy.nation.CitizenshipPolicy;
+import org.civiceconomy.nation.CitizenshipPolicyRegistry;
+import org.civiceconomy.nation.CitizenshipPolicyVersion;
+import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
@@ -106,6 +110,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-auditable-economic-activity-policy");
     private static final ServiceIdentity REGISTERED_FACILITY_SCOPE_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-registered-facility-scope-policy");
+    private static final ServiceIdentity CITIZENSHIP_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-citizenship-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -149,6 +155,7 @@ public final class FiscalAdministrationCommands {
                 .then(globalReferencePriceCommand())
                 .then(productionPolicyCommand())
                 .then(facilityPolicyCommand())
+                .then(citizenshipPolicyCommand())
                 .then(strengthPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
@@ -754,6 +761,49 @@ public final class FiscalAdministrationCommands {
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            citizenshipPolicyCommand() {
+        return Commands.literal("citizenship")
+                .then(Commands.literal("policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showCitizenshipPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "correctionGraceMillis",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "transferCooldownMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleCitizenshipPolicy(
+                                                                                        context.getSource(),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "correctionGraceMillis"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "transferCooldownMillis"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "requestId"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "reason"))))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             strengthPolicyCommand() {
         return Commands.literal("strength")
                 .then(Commands.literal("effective-citizen")
@@ -1278,6 +1328,72 @@ public final class FiscalAdministrationCommands {
             RegisteredFacilityScopePolicyVersion version) {
         return "Registered Facility Scope policy " + version.policyId()
                 + " maxScopeChunks=" + version.policy().maxScopeChunks()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showCitizenshipPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new CitizenshipPolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Citizenship policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Citizenship policy is not configured; Citizenship writes and reconciliation remain disabled"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatCitizenshipPolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal("Citizenship policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleCitizenshipPolicy(
+            CommandSourceStack source,
+            long correctionGraceMillis,
+            long transferCooldownMillis,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new CitizenshipPolicyRegistry(database, clock)
+                        .schedule(new ScheduleCitizenshipPolicy(
+                                CITIZENSHIP_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new CitizenshipPolicy(
+                                        java.time.Duration.ofMillis(correctionGraceMillis),
+                                        java.time.Duration.ofMillis(transferCooldownMillis)),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatCitizenshipPolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(source, "Citizenship policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Citizenship policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatCitizenshipPolicy(CitizenshipPolicyVersion version) {
+        return "Citizenship policy " + version.policyId()
+                + " correctionGraceMillis=" + version.policy().correctionGrace().toMillis()
+                + " transferCooldownMillis=" + version.policy().transferCooldown().toMillis()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

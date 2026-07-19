@@ -108,6 +108,7 @@ import org.civiceconomy.integration.ftb.FtbChunksAdapter;
 import org.civiceconomy.nation.Capital;
 import org.civiceconomy.nation.CitizenshipReconciler;
 import org.civiceconomy.nation.CitizenshipReconciliationResult;
+import org.civiceconomy.nation.CitizenshipPolicyRegistry;
 import org.civiceconomy.nation.NationRegistry;
 import org.civiceconomy.nation.NationTeam;
 import org.civiceconomy.nation.NationTeamDirectory;
@@ -244,8 +245,6 @@ public final class CivicServerRuntime {
     private static final int DATABASE_BACKUP_INTERVAL_TICKS = 20 * 60 * 30;
     private static final int DATABASE_BACKUP_RETENTION = 8;
     private static final Duration NATION_APPLICATION_EVIDENCE_WINDOW = Duration.ofDays(60);
-    private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
-    private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final Duration NATIONAL_STRENGTH_FULL_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
             Duration.ofSeconds(5);
@@ -332,6 +331,7 @@ public final class CivicServerRuntime {
                         activation.operationId(),
                         activation.rollbackFileName()));
         CivicDatabase database = CivicDatabase.open(databaseDirectory.resolve("civic.sqlite3"), identity);
+        seedGameTestCitizenshipPolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -773,7 +773,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -839,7 +839,7 @@ public final class CivicServerRuntime {
                     }
                     NationalStrengthSnapshot refreshed = new NationalStrengthSnapshotBuilder(
                                     database,
-                                    nationalStrengthConfiguration(),
+                                    nationalStrengthConfiguration(database, clock),
                                     context.currentClaimsByTeam(),
                                     CivicEconomy.compatibilityReport().productionScoringEnabled())
                             .recalculateAll(clock.millis());
@@ -875,7 +875,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -926,7 +926,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -988,7 +988,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     var nation = provider.findForCitizen(actorPlayerId)
@@ -1019,7 +1019,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     return new NationBudgetApprovalCoordinator(
@@ -1056,7 +1056,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     return new NationBudgetCancellationCoordinator(
@@ -1086,7 +1086,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     var authorities = new NationFiscalAuthorityRegistry(
@@ -1122,7 +1122,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     var authorities = new NationFiscalAuthorityRegistry(
@@ -1156,7 +1156,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     var authorities = new NationFiscalAuthorityRegistry(
@@ -1219,7 +1219,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -1429,7 +1429,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -1491,7 +1491,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -1614,7 +1614,7 @@ public final class CivicServerRuntime {
                     var provider = new FtbTeamsNationProvider(
                             nations,
                             new CitizenshipRegistry(
-                                    database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                                    database, citizenshipTransferCooldown(database, commandClock), commandClock),
                             new CitizenshipCorrectionGraceRegistry(database, commandClock),
                             teams);
                     new NationFiscalAuthorityRegistry(database, provider, commandClock)
@@ -1780,7 +1780,7 @@ public final class CivicServerRuntime {
                             Map.of(snapshot.team().teamId(), snapshot.team()));
                     NationRegistry nations = new NationRegistry(database, teams);
                     CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                            database, citizenshipTransferCooldown(database, commandClock), commandClock);
                     CitizenshipCorrectionGraceRegistry corrections =
                             new CitizenshipCorrectionGraceRegistry(database, commandClock);
                     FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
@@ -1827,7 +1827,7 @@ public final class CivicServerRuntime {
                             Map.of(snapshot.team().teamId(), snapshot.team()));
                     NationRegistry nations = new NationRegistry(database, teams);
                     CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                            database, citizenshipTransferCooldown(database, commandClock), commandClock);
                     CitizenshipCorrectionGraceRegistry corrections =
                             new CitizenshipCorrectionGraceRegistry(database, commandClock);
                     FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
@@ -2132,7 +2132,7 @@ public final class CivicServerRuntime {
         NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
         NationRegistry nations = new NationRegistry(database, teams);
         CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                database, CITIZENSHIP_TRANSFER_COOLDOWN, operationClock);
+                database, citizenshipTransferCooldown(database, operationClock), operationClock);
         CitizenshipCorrectionGraceRegistry corrections =
                 new CitizenshipCorrectionGraceRegistry(database, operationClock);
         FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
@@ -2202,7 +2202,7 @@ public final class CivicServerRuntime {
         NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
         NationRegistry nations = new NationRegistry(database, teams);
         CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                database, CITIZENSHIP_TRANSFER_COOLDOWN, operationClock);
+                database, citizenshipTransferCooldown(database, operationClock), operationClock);
         CitizenshipCorrectionGraceRegistry corrections =
                 new CitizenshipCorrectionGraceRegistry(database, operationClock);
         FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
@@ -2533,7 +2533,7 @@ public final class CivicServerRuntime {
         NationTeamDirectory teams = snapshotDirectory(Map.of(team.teamId(), team));
         NationRegistry nations = new NationRegistry(database, teams);
         CitizenshipRegistry citizenships = new CitizenshipRegistry(
-                database, CITIZENSHIP_TRANSFER_COOLDOWN, operationClock);
+                database, citizenshipTransferCooldown(database, operationClock), operationClock);
         CitizenshipCorrectionGraceRegistry corrections =
                 new CitizenshipCorrectionGraceRegistry(database, operationClock);
         FtbTeamsNationProvider provider = new FtbTeamsNationProvider(
@@ -2679,7 +2679,7 @@ public final class CivicServerRuntime {
                             .orElseThrow(() -> new SecurityException(
                                     "Your FTB Team is not bound to a formal Nation"));
                     var citizenships = new org.civiceconomy.nation.CitizenshipRegistry(
-                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                            database, citizenshipTransferCooldown(database, commandClock), commandClock);
                     var provider = new org.civiceconomy.nation.FtbTeamsNationProvider(
                             nations,
                             citizenships,
@@ -2890,7 +2890,7 @@ public final class CivicServerRuntime {
                             .orElseThrow(() -> new SecurityException(
                                     "Your FTB Team is not bound to a formal Nation"));
                     var citizenships = new org.civiceconomy.nation.CitizenshipRegistry(
-                            database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock);
+                            database, citizenshipTransferCooldown(database, commandClock), commandClock);
                     var corrections =
                             new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
                                     database, commandClock);
@@ -3460,8 +3460,8 @@ public final class CivicServerRuntime {
                     CitizenshipReconciler reconciler = new CitizenshipReconciler(
                             database,
                             snapshotDirectory,
-                            CITIZENSHIP_CORRECTION_GRACE,
-                            CITIZENSHIP_TRANSFER_COOLDOWN,
+                            citizenshipCorrectionGrace(database, scanClock),
+                            citizenshipTransferCooldown(database, scanClock),
                             scanClock);
                     for (RegisteredNation nation : nations) {
                         if (!snapshots.containsKey(nation.ftbTeamId())) {
@@ -3952,7 +3952,7 @@ public final class CivicServerRuntime {
             }
         }
         var citizenships = new org.civiceconomy.nation.CitizenshipRegistry(
-                database, CITIZENSHIP_TRANSFER_COOLDOWN, scanClock);
+                database, citizenshipTransferCooldown(database, scanClock), scanClock);
         var grace = new org.civiceconomy.nation.CitizenshipCorrectionGraceRegistry(
                 database, scanClock);
         var populations = new org.civiceconomy.nation.NationPopulationCalculator(
@@ -4253,7 +4253,11 @@ public final class CivicServerRuntime {
                 .thenCompose(currentClaims -> current.writer.submitDatabase(database ->
                         new NationalStrengthSnapshotBuilder(
                                         database,
-                                        nationalStrengthConfiguration(),
+                                        nationalStrengthConfiguration(
+                                                database,
+                                                Clock.fixed(
+                                                        Instant.ofEpochMilli(recalculatedAt),
+                                                        ZoneOffset.UTC)),
                                         currentClaims,
                                         CivicEconomy.compatibilityReport()
                                                 .productionScoringEnabled())
@@ -4364,11 +4368,29 @@ public final class CivicServerRuntime {
         return Map.copyOf(ownership);
     }
 
-    private static NationalStrengthSnapshotConfiguration nationalStrengthConfiguration() {
+    private static NationalStrengthSnapshotConfiguration nationalStrengthConfiguration(
+            CivicDatabase database, Clock clock) {
         return new NationalStrengthSnapshotConfiguration(
-                CITIZENSHIP_TRANSFER_COOLDOWN,
+                citizenshipTransferCooldown(database, clock),
                 NATION_APPLICATION_EVIDENCE_WINDOW,
                 NATIONAL_STRENGTH_FULL_CITIZEN_TIME);
+    }
+
+    private static Duration citizenshipCorrectionGrace(CivicDatabase database, Clock clock) {
+        return citizenshipPolicy(database, clock).correctionGrace();
+    }
+
+    private static Duration citizenshipTransferCooldown(CivicDatabase database, Clock clock) {
+        return citizenshipPolicy(database, clock).transferCooldown();
+    }
+
+    private static org.civiceconomy.nation.CitizenshipPolicy citizenshipPolicy(
+            CivicDatabase database, Clock clock) {
+        return new CitizenshipPolicyRegistry(database, clock)
+                .current(clock.instant())
+                .orElseThrow(() -> new SecurityException(
+                        "Citizenship policy is not configured"))
+                .policy();
     }
 
     private static int registeredFacilityMaxScope(CivicDatabase database, Clock clock) {
@@ -4378,6 +4400,25 @@ public final class CivicServerRuntime {
                         "Registered Facility Scope policy is not configured"))
                 .policy()
                 .maxScopeChunks();
+    }
+
+    private static void seedGameTestCitizenshipPolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentCitizenshipPolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleCitizenshipPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "citizenship-policy-bootstrap",
+                "civic-gametest-server",
+                Duration.ofDays(2).toMillis(),
+                Duration.ofDays(7).toMillis(),
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest Citizenship policy fixture",
+                clock.millis());
     }
 
     private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(
@@ -4492,7 +4533,7 @@ public final class CivicServerRuntime {
         var provider = new FtbTeamsNationProvider(
                 nations,
                 new CitizenshipRegistry(
-                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                        database, citizenshipTransferCooldown(database, commandClock), commandClock),
                 new CitizenshipCorrectionGraceRegistry(database, commandClock),
                 teams);
         return new TreasuryWithdrawalInspection(
@@ -4510,7 +4551,7 @@ public final class CivicServerRuntime {
         var provider = new FtbTeamsNationProvider(
                 nations,
                 new CitizenshipRegistry(
-                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                        database, citizenshipTransferCooldown(database, commandClock), commandClock),
                 new CitizenshipCorrectionGraceRegistry(database, commandClock),
                 teams);
         return new BudgetDisbursementInspection(
@@ -4528,7 +4569,7 @@ public final class CivicServerRuntime {
         var provider = new FtbTeamsNationProvider(
                 nations,
                 new CitizenshipRegistry(
-                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                        database, citizenshipTransferCooldown(database, commandClock), commandClock),
                 new CitizenshipCorrectionGraceRegistry(database, commandClock),
                 teams);
         return new NationFiscalBillInspection(
@@ -4544,7 +4585,7 @@ public final class CivicServerRuntime {
         var provider = new FtbTeamsNationProvider(
                 nations,
                 new CitizenshipRegistry(
-                        database, CITIZENSHIP_TRANSFER_COOLDOWN, commandClock),
+                        database, citizenshipTransferCooldown(database, commandClock), commandClock),
                 new CitizenshipCorrectionGraceRegistry(database, commandClock),
                 teams);
         return new NationBudgetInspection(
