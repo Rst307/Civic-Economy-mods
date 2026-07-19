@@ -2796,6 +2796,10 @@ public final class CivicServerRuntimeGameTests {
                 "nation-application-lifetime-policy-command-" + UUID.randomUUID();
         String unauthorizedNationApplicationLifetimePolicyRequestId =
                 "nation-application-lifetime-policy-unauthorized-" + UUID.randomUUID();
+        String nationFoundingCandidateThresholdPolicyRequestId =
+                "nation-founding-candidate-threshold-policy-command-" + UUID.randomUUID();
+        String unauthorizedNationFoundingCandidateThresholdPolicyRequestId =
+                "nation-founding-candidate-threshold-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2886,6 +2890,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Nation Application lifetime policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin nation-application candidate-threshold-policy schedule 3 "
+                        + effectiveAt + " " + nationFoundingCandidateThresholdPolicyRequestId
+                        + " GameTest formal Nation founding candidate threshold");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2959,6 +2968,12 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin nation-application lifetime-policy schedule 1 "
                         + effectiveAt + " " + unauthorizedNationApplicationLifetimePolicyRequestId
                         + " Untrusted Nation Application lifetime policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin nation-application candidate-threshold-policy schedule 1 "
+                        + effectiveAt + " "
+                        + unauthorizedNationFoundingCandidateThresholdPolicyRequestId
+                        + " Untrusted formal Nation founding candidate threshold");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -3036,6 +3051,13 @@ public final class CivicServerRuntimeGameTests {
                     effectiveAt, 1L);
             assertNationApplicationLifetimePolicy(
                     helper, databaseFile, unauthorizedNationApplicationLifetimePolicyRequestId,
+                    effectiveAt, 0L);
+            assertNationFoundingCandidateThresholdPolicy(
+                    helper, databaseFile, nationFoundingCandidateThresholdPolicyRequestId,
+                    effectiveAt, 1L);
+            assertNationFoundingCandidateThresholdPolicy(
+                    helper, databaseFile,
+                    unauthorizedNationFoundingCandidateThresholdPolicyRequestId,
                     effectiveAt, 0L);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
@@ -8106,7 +8128,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(93, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(94, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -9010,6 +9032,41 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect Nation Application lifetime policy", failure);
+        }
+    }
+
+    private static void assertNationFoundingCandidateThresholdPolicy(
+            GameTestHelper helper, Path databaseFile, String requestId,
+            long effectiveAtEpochMillis, long expectedCount) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, minimum_effective_candidates,
+                               effective_at_epoch_millis, reason
+                        FROM nation_founding_candidate_threshold_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                if (expectedCount == 0L) {
+                    helper.assertFalse(result.next(),
+                            "non-OP cannot schedule formal Nation founding threshold");
+                    return;
+                }
+                helper.assertTrue(result.next(), "persistent formal Nation founding threshold");
+                helper.assertTrue(result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived formal founding threshold administrator");
+                helper.assertValueEqual(3, result.getInt(2),
+                        "formal founding minimum effective candidates");
+                helper.assertValueEqual(effectiveAtEpochMillis, result.getLong(3),
+                        "formal founding threshold effective time");
+                helper.assertValueEqual("GameTest formal Nation founding candidate threshold",
+                        result.getString(4), "formal founding threshold reason");
+                helper.assertFalse(result.next(), "duplicate formal founding threshold policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect formal Nation founding threshold policy", failure);
         }
     }
 

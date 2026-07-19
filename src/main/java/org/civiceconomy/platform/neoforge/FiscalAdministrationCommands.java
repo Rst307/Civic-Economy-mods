@@ -49,11 +49,15 @@ import org.civiceconomy.nation.NationApplicationExpiryPolicyVersion;
 import org.civiceconomy.nation.NationApplicationLifetimePolicy;
 import org.civiceconomy.nation.NationApplicationLifetimePolicyRegistry;
 import org.civiceconomy.nation.NationApplicationLifetimePolicyVersion;
+import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicy;
+import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicyRegistry;
+import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicyVersion;
 import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
 import org.civiceconomy.nation.ScheduleCandidateOnlineEvidencePolicy;
 import org.civiceconomy.nation.ScheduleOnlineTimeObservationPolicy;
 import org.civiceconomy.nation.ScheduleNationApplicationExpiryPolicy;
 import org.civiceconomy.nation.ScheduleNationApplicationLifetimePolicy;
+import org.civiceconomy.nation.ScheduleNationFoundingCandidateThresholdPolicy;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
@@ -136,6 +140,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-candidate-online-evidence-policy");
     private static final ServiceIdentity NATION_APPLICATION_LIFETIME_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-nation-application-lifetime-policy");
+    private static final ServiceIdentity NATION_FOUNDING_CANDIDATE_THRESHOLD_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-nation-founding-candidate-threshold-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -1078,6 +1084,25 @@ public final class FiscalAdministrationCommands {
                                                                         context, "requestId"),
                                                                 StringArgumentType.getString(
                                                                         context, "reason")))))));
+        var thresholdSchedule = Commands.literal("schedule")
+                .then(Commands.argument(
+                                "minimumEffectiveCandidates", IntegerArgumentType.integer(1))
+                        .then(Commands.argument(
+                                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason", StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        scheduleNationFoundingCandidateThresholdPolicy(
+                                                                context.getSource(),
+                                                                IntegerArgumentType.getInteger(
+                                                                        context, "minimumEffectiveCandidates"),
+                                                                LongArgumentType.getLong(
+                                                                        context, "effectiveAtEpochMillis"),
+                                                                StringArgumentType.getString(
+                                                                        context, "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context, "reason")))))));
         return Commands.literal("nation-application")
                 .then(Commands.literal("expiry-policy")
                         .then(Commands.literal("show")
@@ -1093,7 +1118,12 @@ public final class FiscalAdministrationCommands {
                         .then(Commands.literal("show")
                                 .executes(context -> showNationApplicationLifetimePolicy(
                                         context.getSource())))
-                        .then(lifetimeSchedule));
+                        .then(lifetimeSchedule))
+                .then(Commands.literal("candidate-threshold-policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showNationFoundingCandidateThresholdPolicy(
+                                        context.getSource())))
+                        .then(thresholdSchedule));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -1748,6 +1778,65 @@ public final class FiscalAdministrationCommands {
             NationApplicationLifetimePolicyVersion version) {
         return "Nation Application lifetime policy " + version.policyId()
                 + " lifetimeMillis=" + version.policy().lifetime().toMillis()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showNationFoundingCandidateThresholdPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationFoundingCandidateThresholdPolicyRegistry(
+                                database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Formal Nation founding candidate threshold query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Formal Nation founding candidate threshold is not configured; formal activation remains disabled"), false);
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatNationFoundingCandidateThresholdPolicy(policy.orElseThrow())), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Formal Nation founding candidate threshold query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleNationFoundingCandidateThresholdPolicy(
+            CommandSourceStack source, int minimumEffectiveCandidates,
+            long effectiveAtEpochMillis, String requestId, String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationFoundingCandidateThresholdPolicyRegistry(
+                                database, clock)
+                        .schedule(new ScheduleNationFoundingCandidateThresholdPolicy(
+                                NATION_FOUNDING_CANDIDATE_THRESHOLD_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new NationFoundingCandidateThresholdPolicy(minimumEffectiveCandidates),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Scheduled " + formatNationFoundingCandidateThresholdPolicy(policy)), true);
+                    } else {
+                        reportDatabaseFailure(source,
+                                "Formal Nation founding candidate threshold schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Formal Nation founding candidate threshold schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatNationFoundingCandidateThresholdPolicy(
+            NationFoundingCandidateThresholdPolicyVersion version) {
+        return "Formal Nation founding candidate threshold policy " + version.policyId()
+                + " minimumEffectiveCandidates="
+                + version.policy().minimumEffectiveCandidates()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

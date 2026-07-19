@@ -30,7 +30,7 @@ class CivicDatabaseV78MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(93, migrated.schemaVersion());
+            assertEquals(94, migrated.schemaVersion());
             assertNull(migrated.currentProductionMarginalReturnPolicy(Long.MAX_VALUE));
 
             StoredProductionMarginalReturnPolicy scheduled =

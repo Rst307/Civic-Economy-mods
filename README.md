@@ -218,11 +218,13 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 /civic economy admin nation-application candidate-evidence-policy schedule <observationWindowMillis> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin nation-application lifetime-policy show
 /civic economy admin nation-application lifetime-policy schedule <lifetimeMillis> <effectiveAtEpochMillis> <requestId> <reason>
+/civic economy admin nation-application candidate-threshold-policy show
+/civic economy admin nation-application candidate-threshold-policy schedule <minimumEffectiveCandidates> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
 激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。
 
-`nation apply` 只使用创建时已经生效的 Nation Application Lifetime Policy，并把计算出的截止时间永久写入申请；没有生效规则时拒绝新申请，之后的规则换版不会移动旧申请的截止时间。`nation status` 会按照当时生效的 Candidate Online Evidence Policy 领取并显示当前申请可归属的 Candidate Online Evidence，报告有效候选人数、当前门槛、FORMAL/DEBUG WORLD 模式和到期时间。没有生效证据政策时，证据领取、取消、激活和自动到期处理失败关闭，不采用隐藏的 60 天默认值；已经归属的在线区间不会因后续政策换版被释放、重分配或供另一份申请重复使用。到期申请由后台 SQLite 处理器自动转换为 `EXPIRED`；常规服务器 tick 不执行数据库查询。
+`nation apply` 只使用创建时已经生效的 Nation Application Lifetime Policy，并把计算出的截止时间永久写入申请；没有生效规则时拒绝新申请，之后的规则换版不会移动旧申请的截止时间。正式世界的状态和激活必须读取当时生效的 Nation Founding Candidate Threshold Policy；没有规则时失败关闭。永久标记的 DEBUG WORLD 可以明确把实际门槛降为一人，但激活审计仍保存正式门槛和豁免事实。`nation status` 会按照当时生效的 Candidate Online Evidence Policy 领取并显示当前申请可归属的 Candidate Online Evidence，报告有效候选人数、当前门槛、FORMAL/DEBUG WORLD 模式和到期时间。没有生效证据政策时，证据领取、取消、激活和自动到期处理失败关闭，不采用隐藏的 60 天默认值；已经归属的在线区间不会因后续政策换版被释放、重分配或供另一份申请重复使用。到期申请由后台 SQLite 处理器自动转换为 `EXPIRED`；常规服务器 tick 不执行数据库查询。
 
 `nation population` 从正式 Citizenship 历史、Citizenship Correction Grace 和近 60 天已完成在线区间计算可解释的 Effective Citizen 人口；它显示每位 Citizen 的归属在线毫秒数、贡献值、有效人数和人口当量，不使用原始 FTB Team 成员数。National Strength 快照复用同一权威人口计算，以平方根边际递减将人口当量归一化；满量程所需人口当量由延迟生效、不可变且可审计的 Effective Citizen Strength Policy 决定。新世界在首个政策生效前失败关闭该组件，不采用隐藏默认值，也不改写已有 Citizenship 或在线证据。
 

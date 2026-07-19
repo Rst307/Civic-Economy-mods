@@ -337,6 +337,7 @@ public final class CivicServerRuntime {
         seedGameTestNationApplicationExpiryPolicy(database, server, clock);
         seedGameTestCandidateOnlineEvidencePolicy(database, server, clock);
         seedGameTestNationApplicationLifetimePolicy(database, server, clock);
+        seedGameTestNationFoundingCandidateThresholdPolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -4589,6 +4590,24 @@ public final class CivicServerRuntime {
                 Duration.ofDays(7).toMillis(),
                 Math.max(0L, clock.millis() - 1L),
                 "Explicit GameTest Nation Application lifetime policy fixture",
+                clock.millis());
+    }
+
+    private static void seedGameTestNationFoundingCandidateThresholdPolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentNationFoundingCandidateThresholdPolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleNationFoundingCandidateThresholdPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "nation-founding-candidate-threshold-policy-bootstrap",
+                "civic-gametest-server",
+                2,
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest formal Nation founding candidate threshold fixture",
                 clock.millis());
     }
 

@@ -34,6 +34,9 @@ A future-effective, audited server rule defining the recent observation window u
 
 **Nation Application Lifetime Policy**:
 A future-effective, audited server rule defining how long a newly created Nation Application remains pending. The effective lifetime is converted into an immutable persisted expiry deadline at creation; later policy versions never move an existing Application's deadline.
+
+**Nation Founding Candidate Threshold Policy**:
+A future-effective, audited server rule defining the minimum Effective Candidate count required to activate a Nation in a formal world. A permanently marked DEBUG WORLD may explicitly bypass the effective threshold to one candidate, while the activation audit retains the formal threshold and the fact that the bypass was used.
 _Avoid_: Effective Citizen population window, application lifetime, reusable online time
 _Avoid_: application lifetime, expiry extension, candidate evidence reset
 

@@ -51,6 +51,7 @@ import org.civiceconomy.nation.NationApplicationRegistry;
 import org.civiceconomy.nation.NationApplicationLifetimePolicyRegistry;
 import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationFoundingPolicy;
+import org.civiceconomy.nation.NationFoundingCandidateThresholdPolicyRegistry;
 import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
 import org.civiceconomy.nation.GrantNationFiscalPermission;
 import org.civiceconomy.nation.FtbTeamsNationProvider;
@@ -2148,7 +2149,6 @@ final class NationApplicationCommands {
         NationTeam team = ownedTeam(player);
         Clock commandClock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
         boolean debugWorld = CivicDebugWorldData.get(source.getServer()).enabled();
-        int requiredEffectiveCandidates = debugWorld ? 1 : 2;
         CivicServerRuntime.current()
                 .submitDatabase(database -> {
                     NationApplicationRegistry registry = new NationApplicationRegistry(
@@ -2160,6 +2160,8 @@ final class NationApplicationCommands {
                     }
                     NationApplication pending = application.orElseThrow();
                     Duration observationWindow = candidateEvidenceWindow(database, commandClock);
+                    int formalThreshold = formalFoundingThreshold(database, commandClock);
+                    int requiredEffectiveCandidates = debugWorld ? 1 : formalThreshold;
                     int effectiveCandidates = (int) registry.claimCandidateEvidence(
                                     pending.applicationId(), observationWindow)
                             .stream()
@@ -2266,11 +2268,12 @@ final class NationApplicationCommands {
                             .orElseThrow(() -> new IllegalStateException(
                                     "Your FTB Team has no PENDING Nation Application"));
                     Duration observationWindow = candidateEvidenceWindow(database, commandClock);
+                    int formalThreshold = formalFoundingThreshold(database, commandClock);
                     NationFoundingPolicy policy = debugWorld
                             ? NationFoundingPolicy.debugWorld(
-                                    2, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN)
+                                    formalThreshold, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN)
                             : NationFoundingPolicy.formal(
-                                    2, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN);
+                                    formalThreshold, observationWindow, CITIZENSHIP_TRANSFER_COOLDOWN);
                     return new NationActivationCoordinator(
                                     database, provisioner, policy, commandClock)
                             .activate(new ActivateNationApplication(
@@ -2293,6 +2296,15 @@ final class NationApplicationCommands {
                         "Candidate Online Evidence policy is not configured"))
                 .policy()
                 .observationWindow();
+    }
+
+    private static int formalFoundingThreshold(CivicDatabase database, Clock clock) {
+        return new NationFoundingCandidateThresholdPolicyRegistry(database, clock)
+                .current(clock.instant())
+                .orElseThrow(() -> new IllegalStateException(
+                        "Formal Nation founding candidate threshold policy is not configured"))
+                .policy()
+                .minimumEffectiveCandidates();
     }
 
     private static NationalTreasuryProvisioner serverThreadTreasuryProvisioner(
