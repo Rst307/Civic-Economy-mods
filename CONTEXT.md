@@ -304,6 +304,9 @@ _Avoid_: 建国人数门槛、FTB Team 成员上限、硬编码人口满分值
 
 **可审计经济活动政策（Auditable Economic Activity Policy）**:
 由受信任服务器治理安排、在未来时刻生效的全服正式经济活动解释规则；它规定 National Strength 评估使用的观察窗口和满分所需 LC 小单位规模，只解释既有 Auditable Economic Activity Evidence，不改写 Payment、Refund、General Ledger 或历史分类证据。
+
+**注册设施范围政策（Registered Facility Scope Policy）**:
+由受信任服务器治理安排、在未来时刻生效的全服 Registered Facility 最大连续 Claim 数；设施注册及后续权威管理在操作时读取当前版本，无政策时失败关闭，后续版本不扩张、裁剪或改写既有 Facility Scope。
 _Avoid_: 免费领土额度、领土维护政策、硬编码领土满分值
 
 **滚动生产边际回报评估（Rolling Production Marginal Return Assessment）**:

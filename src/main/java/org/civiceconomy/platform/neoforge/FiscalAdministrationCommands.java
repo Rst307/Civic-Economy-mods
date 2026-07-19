@@ -47,10 +47,14 @@ import org.civiceconomy.production.ProductionMarginalReturnPolicyVersion;
 import org.civiceconomy.production.ProductionStrengthPolicy;
 import org.civiceconomy.production.ProductionStrengthPolicyRegistry;
 import org.civiceconomy.production.ProductionStrengthPolicyVersion;
+import org.civiceconomy.production.RegisteredFacilityScopePolicy;
+import org.civiceconomy.production.RegisteredFacilityScopePolicyRegistry;
+import org.civiceconomy.production.RegisteredFacilityScopePolicyVersion;
 import org.civiceconomy.production.ScheduleGlobalReferencePrice;
 import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
+import org.civiceconomy.production.ScheduleRegisteredFacilityScopePolicy;
 import org.civiceconomy.strength.EffectiveCitizenStrengthPolicy;
 import org.civiceconomy.strength.AuditableEconomicActivityPolicy;
 import org.civiceconomy.strength.AuditableEconomicActivityPolicyRegistry;
@@ -100,6 +104,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-mint-compliance-policy");
     private static final ServiceIdentity AUDITABLE_ECONOMIC_ACTIVITY_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-auditable-economic-activity-policy");
+    private static final ServiceIdentity REGISTERED_FACILITY_SCOPE_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-registered-facility-scope-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -142,6 +148,7 @@ public final class FiscalAdministrationCommands {
                 .then(territoryPolicyCommand())
                 .then(globalReferencePriceCommand())
                 .then(productionPolicyCommand())
+                .then(facilityPolicyCommand())
                 .then(strengthPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
@@ -710,6 +717,43 @@ public final class FiscalAdministrationCommands {
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            facilityPolicyCommand() {
+        return Commands.literal("facility")
+                .then(Commands.literal("scope-policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showRegisteredFacilityScopePolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "maxScopeChunks",
+                                                IntegerArgumentType.integer(1))
+                                        .then(Commands.argument(
+                                                        "effectiveAtEpochMillis",
+                                                        LongArgumentType.longArg(0L))
+                                                .then(Commands.argument(
+                                                                "requestId",
+                                                                StringArgumentType.word())
+                                                        .then(Commands.argument(
+                                                                        "reason",
+                                                                        StringArgumentType.greedyString())
+                                                                .executes(context ->
+                                                                        scheduleRegisteredFacilityScopePolicy(
+                                                                                context.getSource(),
+                                                                                IntegerArgumentType.getInteger(
+                                                                                        context,
+                                                                                        "maxScopeChunks"),
+                                                                                LongArgumentType.getLong(
+                                                                                        context,
+                                                                                        "effectiveAtEpochMillis"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "requestId"),
+                                                                                StringArgumentType.getString(
+                                                                                        context,
+                                                                                        "reason")))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             strengthPolicyCommand() {
         return Commands.literal("strength")
                 .then(Commands.literal("effective-citizen")
@@ -1164,6 +1208,76 @@ public final class FiscalAdministrationCommands {
                 + " fullWeightWindowMillis=" + policy.fullWeightWindowMillis()
                 + " fullStrengthScaleMinorUnits="
                 + policy.fullStrengthScaleMinorUnits()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showRegisteredFacilityScopePolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new RegisteredFacilityScopePolicyRegistry(
+                                database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(
+                                source, "Registered Facility Scope policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Registered Facility Scope policy is not configured; Facility writes remain disabled"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatRegisteredFacilityScopePolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Registered Facility Scope policy query queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleRegisteredFacilityScopePolicy(
+            CommandSourceStack source,
+            int maxScopeChunks,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new RegisteredFacilityScopePolicyRegistry(
+                                database, clock)
+                        .schedule(new ScheduleRegisteredFacilityScopePolicy(
+                                REGISTERED_FACILITY_SCOPE_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new RegisteredFacilityScopePolicy(maxScopeChunks),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal("Scheduled "
+                                        + formatRegisteredFacilityScopePolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(
+                                source, "Registered Facility Scope policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Registered Facility Scope policy schedule queued"),
+                false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatRegisteredFacilityScopePolicy(
+            RegisteredFacilityScopePolicyVersion version) {
+        return "Registered Facility Scope policy " + version.policyId()
+                + " maxScopeChunks=" + version.policy().maxScopeChunks()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

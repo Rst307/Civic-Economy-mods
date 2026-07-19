@@ -152,6 +152,7 @@ import org.civiceconomy.production.RecordProductionInventoryExportHandoff;
 import org.civiceconomy.production.ProductionStack;
 import org.civiceconomy.production.RegisteredFacility;
 import org.civiceconomy.production.RegisteredFacilityRegistry;
+import org.civiceconomy.production.RegisteredFacilityScopePolicyRegistry;
 import org.civiceconomy.production.RegisteredFacilityTerritoryReconciler;
 import org.civiceconomy.territory.CommittedTerritoryPrepaymentVerifier;
 import org.civiceconomy.territory.TerritoryClaimPermitCompensationCoordinator;
@@ -246,7 +247,6 @@ public final class CivicServerRuntime {
     private static final Duration CITIZENSHIP_CORRECTION_GRACE = Duration.ofDays(2);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
     private static final Duration NATIONAL_STRENGTH_FULL_CITIZEN_TIME = Duration.ofHours(8);
-    private static final int REGISTERED_FACILITY_MAX_SCOPE_CHUNKS = 16;
     private static final Duration FACILITY_ACCOUNTING_RECEIPT_MATCH_WINDOW =
             Duration.ofSeconds(5);
     private static final NationTeamDirectory NO_TEAM_LOOKUPS = new NationTeamDirectory() {
@@ -1802,7 +1802,8 @@ public final class CivicServerRuntime {
                                             database,
                                             territory,
                                             commandClock,
-                                            REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                                            registeredFacilityMaxScope(
+                                                    database, commandClock)),
                                     new FacilityAccountingInterfaceRegistry(
                                             database, commandClock))
                             .register(
@@ -1840,7 +1841,8 @@ public final class CivicServerRuntime {
                                             database,
                                             (nationId, teamId, claim) -> false,
                                             commandClock,
-                                            REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                                            registeredFacilityMaxScope(
+                                                    database, commandClock)),
                                     new FacilityAccountingInterfaceRegistry(
                                             database, commandClock))
                             .bindInterface(
@@ -2150,7 +2152,7 @@ public final class CivicServerRuntime {
                         database,
                         territory,
                         operationClock,
-                        REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                        registeredFacilityMaxScope(database, operationClock)),
                 new FacilityAccountingInterfaceRegistry(database, operationClock));
     }
 
@@ -2221,7 +2223,7 @@ public final class CivicServerRuntime {
                         database,
                         territory,
                         operationClock,
-                        REGISTERED_FACILITY_MAX_SCOPE_CHUNKS),
+                        registeredFacilityMaxScope(database, operationClock)),
                 new FacilityAccountingInterfaceRegistry(database, operationClock),
                 territory,
                 operationClock);
@@ -4367,6 +4369,15 @@ public final class CivicServerRuntime {
                 CITIZENSHIP_TRANSFER_COOLDOWN,
                 NATION_APPLICATION_EVIDENCE_WINDOW,
                 NATIONAL_STRENGTH_FULL_CITIZEN_TIME);
+    }
+
+    private static int registeredFacilityMaxScope(CivicDatabase database, Clock clock) {
+        return new RegisteredFacilityScopePolicyRegistry(database, clock)
+                .current(clock.instant())
+                .orElseThrow(() -> new SecurityException(
+                        "Registered Facility Scope policy is not configured"))
+                .policy()
+                .maxScopeChunks();
     }
 
     private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(

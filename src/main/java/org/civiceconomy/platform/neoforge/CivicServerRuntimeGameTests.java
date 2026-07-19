@@ -139,6 +139,9 @@ import org.civiceconomy.production.ScheduleProductionIndustryAssignment;
 import org.civiceconomy.production.ScheduleProductionMarginalReturnPolicy;
 import org.civiceconomy.production.ScheduleProductionStrengthPolicy;
 import org.civiceconomy.production.RegisteredFacility;
+import org.civiceconomy.production.RegisteredFacilityScopePolicy;
+import org.civiceconomy.production.RegisteredFacilityScopePolicyRegistry;
+import org.civiceconomy.production.ScheduleRegisteredFacilityScopePolicy;
 import org.civiceconomy.mint.MintBatch;
 
 @GameTestHolder(CivicEconomy.MOD_ID)
@@ -1734,6 +1737,14 @@ public final class CivicServerRuntimeGameTests {
         runtime.submitDatabase(database -> {
                     ServiceIdentity setupService =
                             new ServiceIdentity("civiceconomy-gametest");
+                    new RegisteredFacilityScopePolicyRegistry(database, setupClock)
+                            .schedule(new ScheduleRegisteredFacilityScopePolicy(
+                                    setupService,
+                                    "facility-command-scope-policy-" + UUID.randomUUID(),
+                                    "civic-gametest:facility-registration",
+                                    new RegisteredFacilityScopePolicy(16),
+                                    productionPolicyEffectiveAt,
+                                    "GameTest Registered Facility Scope policy"));
                     NationRegistry nations = new NationRegistry(database, snapshot(teamSnapshot));
                     var nation = nations.register(new RegisterNation(
                             setupService,
@@ -2761,6 +2772,10 @@ public final class CivicServerRuntimeGameTests {
                 "auditable-activity-policy-command-" + UUID.randomUUID();
         String unauthorizedAuditableActivityPolicyRequestId =
                 "auditable-activity-policy-unauthorized-" + UUID.randomUUID();
+        String facilityScopePolicyRequestId =
+                "facility-scope-policy-command-" + UUID.randomUUID();
+        String unauthorizedFacilityScopePolicyRequestId =
+                "facility-scope-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2821,6 +2836,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Auditable Economic Activity policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin facility scope-policy schedule 16 "
+                        + effectiveAt + " " + facilityScopePolicyRequestId
+                        + " GameTest Registered Facility Scope policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2864,6 +2884,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin strength auditable-activity schedule 1 1 "
                         + effectiveAt + " " + unauthorizedAuditableActivityPolicyRequestId
                         + " Untrusted Auditable Economic Activity policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin facility scope-policy schedule 1 "
+                        + effectiveAt + " " + unauthorizedFacilityScopePolicyRequestId
+                        + " Untrusted Registered Facility Scope policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -2914,6 +2939,10 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, auditableActivityPolicyRequestId, effectiveAt);
             assertAuditableEconomicActivityPolicyAbsent(
                     helper, databaseFile, unauthorizedAuditableActivityPolicyRequestId);
+            assertRegisteredFacilityScopePolicyScheduled(
+                    helper, databaseFile, facilityScopePolicyRequestId, effectiveAt);
+            assertRegisteredFacilityScopePolicyAbsent(
+                    helper, databaseFile, unauthorizedFacilityScopePolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -7980,7 +8009,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(86, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(87, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8598,6 +8627,64 @@ public final class CivicServerRuntimeGameTests {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Auditable Economic Activity policy",
                     failure);
+        }
+    }
+
+    private static void assertRegisteredFacilityScopePolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, max_scope_chunks,
+                               effective_at_epoch_millis, reason
+                        FROM registered_facility_scope_policy
+                        WHERE service_identity =
+                                'civiceconomy-registered-facility-scope-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Facility Scope policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Facility Scope administrator");
+                helper.assertValueEqual(16, result.getInt(2), "Facility maximum scope");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(3),
+                        "Facility Scope policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Registered Facility Scope policy",
+                        result.getString(4),
+                        "Facility Scope policy reason");
+                helper.assertFalse(result.next(), "duplicate Facility Scope policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Registered Facility Scope policy", failure);
+        }
+    }
+
+    private static void assertRegisteredFacilityScopePolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM registered_facility_scope_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized Facility Scope policy count");
+                helper.assertValueEqual(
+                        0L, result.getLong(1), "non-OP cannot schedule Facility Scope policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Facility Scope policy", failure);
         }
     }
 

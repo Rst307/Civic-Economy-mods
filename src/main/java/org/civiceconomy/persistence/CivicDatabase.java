@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 86;
+    private static final int SCHEMA_VERSION = 87;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4570,6 +4570,21 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Auditable Economic Activity policy request", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredFacilityScopePolicy registeredFacilityScopePolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_facility_scope_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readRegisteredFacilityScopePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Registered Facility Scope policy request", failure);
         }
     }
 
@@ -9808,6 +9823,24 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredRegisteredFacilityScopePolicy currentRegisteredFacilityScopePolicy(
+            long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM registered_facility_scope_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readRegisteredFacilityScopePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Registered Facility Scope policy", failure);
+        }
+    }
+
     public synchronized StoredProductionIndustryAssignment
             currentProductionIndustryAssignment(
                     String createVersion, String recipeId, long asOfEpochMillis) {
@@ -10160,6 +10193,39 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to schedule Auditable Economic Activity policy", failure);
+        }
+    }
+
+    public synchronized StoredRegisteredFacilityScopePolicy
+            scheduleRegisteredFacilityScopePolicy(
+                    UUID policyId,
+                    String serviceIdentity,
+                    String requestId,
+                    String actorIdentity,
+                    int maxScopeChunks,
+                    long effectiveAtEpochMillis,
+                    String reason,
+                    long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO registered_facility_scope_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    max_scope_chunks, effective_at_epoch_millis,
+                    reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setInt(5, maxScopeChunks);
+            insert.setLong(6, effectiveAtEpochMillis);
+            insert.setString(7, reason);
+            insert.setLong(8, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return registeredFacilityScopePolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to schedule Registered Facility Scope policy", failure);
         }
     }
 
@@ -17415,6 +17481,36 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 86");
             }
+            if (version < 87) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS registered_facility_scope_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            max_scope_chunks INTEGER NOT NULL
+                                CHECK (max_scope_chunks > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS registered_facility_scope_policy_current
+                        ON registered_facility_scope_policy (
+                            effective_at_epoch_millis,
+                            recorded_at_epoch_millis,
+                            policy_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 87");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -18087,6 +18183,24 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("actor_identity"),
                     result.getLong("observation_window_millis"),
                     result.getLong("full_strength_scale_minor_units"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredRegisteredFacilityScopePolicy readRegisteredFacilityScopePolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredRegisteredFacilityScopePolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getInt("max_scope_chunks"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
