@@ -31,6 +31,9 @@ A future-effective, audited server rule for how often Civic discovers already-ex
 
 **Candidate Online Evidence Policy**:
 A future-effective, audited server rule defining the recent observation window used when a Nation Application claims Candidate Online Evidence. It never reassigns or releases an already claimed online interval, changes an Application expiry deadline, or permits one interval to support multiple applications.
+
+**Nation Application Lifetime Policy**:
+A future-effective, audited server rule defining how long a newly created Nation Application remains pending. The effective lifetime is converted into an immutable persisted expiry deadline at creation; later policy versions never move an existing Application's deadline.
 _Avoid_: Effective Citizen population window, application lifetime, reusable online time
 _Avoid_: application lifetime, expiry extension, candidate evidence reset
 

@@ -36,7 +36,7 @@ class CivicDatabaseV48MigrationTest {
                     List.of(new StoredNationalIssuanceQuotaAllocation(nationId, 400L)),
                     "Existing quota fact",
                     start - 1L);
-            assertEquals(92, database.schemaVersion());
+            assertEquals(93, database.schemaVersion());
         }
         try (var connection = DriverManager.getConnection(
                         "jdbc:sqlite:" + databaseFile.toAbsolutePath());
@@ -49,7 +49,7 @@ class CivicDatabaseV48MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(databaseFile, identity)) {
-            assertEquals(92, migrated.schemaVersion());
+            assertEquals(93, migrated.schemaVersion());
             assertNotNull(migrated.nationalIssuanceQuota(periodId, nationId));
             try (var connection = DriverManager.getConnection(
                             "jdbc:sqlite:" + databaseFile.toAbsolutePath());

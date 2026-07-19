@@ -25,7 +25,7 @@ class CivicDatabaseV74MigrationTest {
         downgradeToV73(file);
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(92, migrated.schemaVersion());
+            assertEquals(93, migrated.schemaVersion());
             assertNull(migrated.currentGlobalReferencePrice(
                     "minecraft:iron_ingot", "components:{}", Long.MAX_VALUE));
 

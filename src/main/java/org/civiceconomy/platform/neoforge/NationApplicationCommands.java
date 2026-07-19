@@ -48,6 +48,7 @@ import org.civiceconomy.nation.CitizenshipRegistry;
 import org.civiceconomy.nation.CreateNationApplication;
 import org.civiceconomy.nation.NationApplication;
 import org.civiceconomy.nation.NationApplicationRegistry;
+import org.civiceconomy.nation.NationApplicationLifetimePolicyRegistry;
 import org.civiceconomy.nation.NationActivationCoordinator;
 import org.civiceconomy.nation.NationFoundingPolicy;
 import org.civiceconomy.nation.NationEffectiveCitizenPopulation;
@@ -73,7 +74,6 @@ import org.slf4j.Logger;
 
 final class NationApplicationCommands {
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final Duration APPLICATION_LIFETIME = Duration.ofDays(7);
     private static final Duration EFFECTIVE_CITIZEN_OBSERVATION_WINDOW = Duration.ofDays(60);
     private static final Duration FULL_EFFECTIVE_CITIZEN_TIME = Duration.ofHours(8);
     private static final Duration CITIZENSHIP_TRANSFER_COOLDOWN = Duration.ofDays(7);
@@ -2037,12 +2037,19 @@ final class NationApplicationCommands {
                     if (pending.isPresent()) {
                         return pending.orElseThrow();
                     }
+                    Duration applicationLifetime = new NationApplicationLifetimePolicyRegistry(
+                                    database, commandClock)
+                            .current(appliedAt)
+                            .orElseThrow(() -> new IllegalStateException(
+                                    "Nation Application lifetime policy is not configured"))
+                            .policy()
+                            .lifetime();
                     return registry.create(new CreateNationApplication(
                             FOUNDING_SERVICE,
                             "player-apply:" + UUID.randomUUID(),
                             team.teamId(),
                             applicantPlayerId,
-                            appliedAt.plus(APPLICATION_LIFETIME)));
+                            appliedAt.plus(applicationLifetime)));
                 })
                 .whenComplete((application, failure) -> source.getServer().execute(() -> {
                     if (failure == null) {

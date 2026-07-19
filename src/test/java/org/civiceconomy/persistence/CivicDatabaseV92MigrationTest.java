@@ -26,7 +26,7 @@ class CivicDatabaseV92MigrationTest {
             statement.execute("PRAGMA user_version = 91");
         }
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(92, migrated.schemaVersion());
+            assertEquals(93, migrated.schemaVersion());
             assertNull(migrated.currentCandidateOnlineEvidencePolicy(Long.MAX_VALUE));
         }
     }

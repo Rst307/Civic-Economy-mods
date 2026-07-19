@@ -2792,6 +2792,10 @@ public final class CivicServerRuntimeGameTests {
                 "candidate-online-evidence-policy-command-" + UUID.randomUUID();
         String unauthorizedCandidateOnlineEvidencePolicyRequestId =
                 "candidate-online-evidence-policy-unauthorized-" + UUID.randomUUID();
+        String nationApplicationLifetimePolicyRequestId =
+                "nation-application-lifetime-policy-command-" + UUID.randomUUID();
+        String unauthorizedNationApplicationLifetimePolicyRequestId =
+                "nation-application-lifetime-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2877,6 +2881,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Candidate Online Evidence policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin nation-application lifetime-policy schedule 864000000 "
+                        + effectiveAt + " " + nationApplicationLifetimePolicyRequestId
+                        + " GameTest Nation Application lifetime policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2945,6 +2954,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin nation-application candidate-evidence-policy schedule 1 "
                         + effectiveAt + " " + unauthorizedCandidateOnlineEvidencePolicyRequestId
                         + " Untrusted Candidate Online Evidence policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin nation-application lifetime-policy schedule 1 "
+                        + effectiveAt + " " + unauthorizedNationApplicationLifetimePolicyRequestId
+                        + " Untrusted Nation Application lifetime policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -3016,6 +3030,12 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, candidateOnlineEvidencePolicyRequestId, effectiveAt, 1L);
             assertCandidateOnlineEvidencePolicy(
                     helper, databaseFile, unauthorizedCandidateOnlineEvidencePolicyRequestId,
+                    effectiveAt, 0L);
+            assertNationApplicationLifetimePolicy(
+                    helper, databaseFile, nationApplicationLifetimePolicyRequestId,
+                    effectiveAt, 1L);
+            assertNationApplicationLifetimePolicy(
+                    helper, databaseFile, unauthorizedNationApplicationLifetimePolicyRequestId,
                     effectiveAt, 0L);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
@@ -8086,7 +8106,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(92, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(93, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8955,6 +8975,41 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect Candidate Online Evidence policy", failure);
+        }
+    }
+
+    private static void assertNationApplicationLifetimePolicy(
+            GameTestHelper helper, Path databaseFile, String requestId,
+            long effectiveAtEpochMillis, long expectedCount) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, lifetime_millis,
+                               effective_at_epoch_millis, reason
+                        FROM nation_application_lifetime_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                if (expectedCount == 0L) {
+                    helper.assertFalse(result.next(),
+                            "non-OP cannot schedule Nation Application lifetime policy");
+                    return;
+                }
+                helper.assertTrue(result.next(), "persistent Nation Application lifetime policy");
+                helper.assertTrue(result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Nation Application lifetime administrator");
+                helper.assertValueEqual(864_000_000L, result.getLong(2),
+                        "Nation Application lifetime");
+                helper.assertValueEqual(effectiveAtEpochMillis, result.getLong(3),
+                        "lifetime policy effective time");
+                helper.assertValueEqual("GameTest Nation Application lifetime policy",
+                        result.getString(4), "lifetime policy reason");
+                helper.assertFalse(result.next(), "duplicate Nation Application lifetime policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Nation Application lifetime policy", failure);
         }
     }
 

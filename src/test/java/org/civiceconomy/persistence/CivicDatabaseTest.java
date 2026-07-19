@@ -26,13 +26,13 @@ class CivicDatabaseTest {
 
         try (CivicDatabase database = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", database.journalMode());
-            assertEquals(92, database.schemaVersion());
+            assertEquals(93, database.schemaVersion());
             assertEquals(identity, database.identity());
         }
 
         try (CivicDatabase reopened = CivicDatabase.open(databaseFile, identity)) {
             assertEquals("wal", reopened.journalMode());
-            assertEquals(92, reopened.schemaVersion());
+            assertEquals(93, reopened.schemaVersion());
             assertEquals(identity, reopened.identity());
         }
     }
@@ -131,7 +131,7 @@ class CivicDatabaseTest {
             UUID nationId = UUID.fromString("39ca55f7-740d-4521-a1de-f9e5f8302a4c");
             UUID teamId = UUID.fromString("3fa1dc7d-76d0-4e61-b10f-bf7d1ad99776");
 
-            assertEquals(92, migrated.schemaVersion());
+            assertEquals(93, migrated.schemaVersion());
             assertEquals(identity, migrated.identity());
             assertEquals(
                     nationId,

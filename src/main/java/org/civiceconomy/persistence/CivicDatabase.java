@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 92;
+    private static final int SCHEMA_VERSION = 93;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4571,6 +4571,21 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Candidate Online Evidence policy request", failure);
+        }
+    }
+
+    public synchronized StoredNationApplicationLifetimePolicy nationApplicationLifetimePolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application_lifetime_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readNationApplicationLifetimePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read Nation Application lifetime policy request", failure);
         }
     }
 
@@ -9883,6 +9898,24 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredNationApplicationLifetimePolicy
+            currentNationApplicationLifetimePolicy(long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM nation_application_lifetime_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readNationApplicationLifetimePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to read current Nation Application lifetime policy", failure);
+        }
+    }
+
     public synchronized StoredEffectiveTerritoryStrengthPolicy
             currentEffectiveTerritoryStrengthPolicy(long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
@@ -10320,6 +10353,33 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to schedule Candidate Online Evidence policy", failure);
+        }
+    }
+
+    public synchronized StoredNationApplicationLifetimePolicy scheduleNationApplicationLifetimePolicy(
+            UUID policyId, String serviceIdentity, String requestId, String actorIdentity,
+            long lifetimeMillis, long effectiveAtEpochMillis, String reason,
+            long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO nation_application_lifetime_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    lifetime_millis, effective_at_epoch_millis,
+                    reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setLong(5, lifetimeMillis);
+            insert.setLong(6, effectiveAtEpochMillis);
+            insert.setString(7, reason);
+            insert.setLong(8, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return nationApplicationLifetimePolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to schedule Nation Application lifetime policy", failure);
         }
     }
 
@@ -17935,6 +17995,30 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 92");
             }
+            if (version < 93) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS nation_application_lifetime_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL CHECK (length(trim(actor_identity)) > 0),
+                            lifetime_millis INTEGER NOT NULL CHECK (lifetime_millis > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS nation_application_lifetime_policy_current
+                        ON nation_application_lifetime_policy (
+                            effective_at_epoch_millis, recorded_at_epoch_millis, policy_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 93");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -18605,6 +18689,24 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("request_id"),
                     result.getString("actor_identity"),
                     result.getLong("observation_window_millis"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredNationApplicationLifetimePolicy readNationApplicationLifetimePolicy(
+            PreparedStatement query) throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredNationApplicationLifetimePolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getLong("lifetime_millis"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));

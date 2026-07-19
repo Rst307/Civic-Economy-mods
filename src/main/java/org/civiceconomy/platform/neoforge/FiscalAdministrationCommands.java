@@ -46,10 +46,14 @@ import org.civiceconomy.nation.OnlineTimeObservationPolicyVersion;
 import org.civiceconomy.nation.NationApplicationExpiryPolicy;
 import org.civiceconomy.nation.NationApplicationExpiryPolicyRegistry;
 import org.civiceconomy.nation.NationApplicationExpiryPolicyVersion;
+import org.civiceconomy.nation.NationApplicationLifetimePolicy;
+import org.civiceconomy.nation.NationApplicationLifetimePolicyRegistry;
+import org.civiceconomy.nation.NationApplicationLifetimePolicyVersion;
 import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
 import org.civiceconomy.nation.ScheduleCandidateOnlineEvidencePolicy;
 import org.civiceconomy.nation.ScheduleOnlineTimeObservationPolicy;
 import org.civiceconomy.nation.ScheduleNationApplicationExpiryPolicy;
+import org.civiceconomy.nation.ScheduleNationApplicationLifetimePolicy;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
@@ -130,6 +134,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-nation-application-expiry-policy");
     private static final ServiceIdentity CANDIDATE_ONLINE_EVIDENCE_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-candidate-online-evidence-policy");
+    private static final ServiceIdentity NATION_APPLICATION_LIFETIME_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-nation-application-lifetime-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -1054,6 +1060,24 @@ public final class FiscalAdministrationCommands {
                                                                         context, "requestId"),
                                                                 StringArgumentType.getString(
                                                                         context, "reason")))))));
+        var lifetimeSchedule = Commands.literal("schedule")
+                .then(Commands.argument("lifetimeMillis", LongArgumentType.longArg(1L))
+                        .then(Commands.argument(
+                                        "effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                        .then(Commands.argument(
+                                                        "reason", StringArgumentType.greedyString())
+                                                .executes(context ->
+                                                        scheduleNationApplicationLifetimePolicy(
+                                                                context.getSource(),
+                                                                LongArgumentType.getLong(
+                                                                        context, "lifetimeMillis"),
+                                                                LongArgumentType.getLong(
+                                                                        context, "effectiveAtEpochMillis"),
+                                                                StringArgumentType.getString(
+                                                                        context, "requestId"),
+                                                                StringArgumentType.getString(
+                                                                        context, "reason")))))));
         return Commands.literal("nation-application")
                 .then(Commands.literal("expiry-policy")
                         .then(Commands.literal("show")
@@ -1064,7 +1088,12 @@ public final class FiscalAdministrationCommands {
                         .then(Commands.literal("show")
                                 .executes(context -> showCandidateOnlineEvidencePolicy(
                                         context.getSource())))
-                        .then(candidateSchedule));
+                        .then(candidateSchedule))
+                .then(Commands.literal("lifetime-policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showNationApplicationLifetimePolicy(
+                                        context.getSource())))
+                        .then(lifetimeSchedule));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -1664,6 +1693,61 @@ public final class FiscalAdministrationCommands {
         return "Candidate Online Evidence policy " + version.policyId()
                 + " observationWindowMillis="
                 + version.policy().observationWindow().toMillis()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showNationApplicationLifetimePolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationApplicationLifetimePolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Nation Application lifetime policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Nation Application lifetime policy is not configured; new applications remain disabled"), false);
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatNationApplicationLifetimePolicy(policy.orElseThrow())), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Nation Application lifetime policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleNationApplicationLifetimePolicy(
+            CommandSourceStack source, long lifetimeMillis, long effectiveAtEpochMillis,
+            String requestId, String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationApplicationLifetimePolicyRegistry(database, clock)
+                        .schedule(new ScheduleNationApplicationLifetimePolicy(
+                                NATION_APPLICATION_LIFETIME_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new NationApplicationLifetimePolicy(Duration.ofMillis(lifetimeMillis)),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Scheduled " + formatNationApplicationLifetimePolicy(policy)), true);
+                    } else {
+                        reportDatabaseFailure(source, "Nation Application lifetime policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Nation Application lifetime policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatNationApplicationLifetimePolicy(
+            NationApplicationLifetimePolicyVersion version) {
+        return "Nation Application lifetime policy " + version.policyId()
+                + " lifetimeMillis=" + version.policy().lifetime().toMillis()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

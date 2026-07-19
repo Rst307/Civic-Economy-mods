@@ -30,7 +30,7 @@ class CivicDatabaseV79MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(92, migrated.schemaVersion());
+            assertEquals(93, migrated.schemaVersion());
             assertNull(migrated.currentProductionIndustryAssignment(
                     "6.0.6", "create:milling/wheat", Long.MAX_VALUE));
 
