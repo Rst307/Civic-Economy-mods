@@ -234,7 +234,7 @@ public final class CivicServerRuntime {
     private static final int CHECKPOINT_INTERVAL_TICKS = 20 * 60;
     private static final int FISCAL_EXPIRY_INTERVAL_TICKS = 20 * 60;
     private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
-    private static final int CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS = 20 * 60;
+    private static final long CITIZENSHIP_POLICY_DISCOVERY_INTERVAL_TICKS = 20L * 60L;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
     private static final int TREASURY_WITHDRAWAL_RECOVERY_INTERVAL_TICKS = 20 * 60;
@@ -441,7 +441,7 @@ public final class CivicServerRuntime {
         }
         current.ticksSinceCitizenshipReconciliation++;
         if (current.ticksSinceCitizenshipReconciliation
-                >= CITIZENSHIP_RECONCILIATION_INTERVAL_TICKS) {
+                >= current.citizenshipReconciliationIntervalTicks) {
             current.ticksSinceCitizenshipReconciliation = 0;
             scheduleCitizenshipReconciliation(current);
         }
@@ -3414,9 +3414,14 @@ public final class CivicServerRuntime {
         }
         Clock scanClock = Clock.fixed(clock.instant(), ZoneOffset.UTC);
         current.writer.submitDatabase(database -> {
-                    if (database.currentCitizenshipPolicy(scanClock.millis()) == null) {
+                    var policy = database.currentCitizenshipPolicy(scanClock.millis());
+                    if (policy == null) {
+                        current.citizenshipReconciliationIntervalTicks =
+                                CITIZENSHIP_POLICY_DISCOVERY_INTERVAL_TICKS;
                         return null;
                     }
+                    current.citizenshipReconciliationIntervalTicks =
+                            reconciliationIntervalTicks(policy.reconciliationIntervalMillis());
                     return new NationRegistry(database, NO_TEAM_LOOKUPS).registeredNations();
                 })
                 .whenComplete((nations, listFailure) -> {
@@ -4442,9 +4447,17 @@ public final class CivicServerRuntime {
                 "civic-gametest-server",
                 Duration.ofDays(2).toMillis(),
                 Duration.ofDays(7).toMillis(),
+                Duration.ofMinutes(1).toMillis(),
                 Math.max(0L, clock.millis() - 1L),
                 "Explicit GameTest Citizenship policy fixture",
                 clock.millis());
+    }
+
+    private static long reconciliationIntervalTicks(long intervalMillis) {
+        if (intervalMillis <= 0L) {
+            throw new IllegalArgumentException("Citizenship reconciliation interval must be positive");
+        }
+        return 1L + ((intervalMillis - 1L) / 50L);
     }
 
     private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(
@@ -4658,7 +4671,9 @@ public final class CivicServerRuntime {
         private int ticksSinceCheckpoint;
         private int ticksSinceFiscalExpiry;
         private int ticksSinceNationApplicationExpiry;
-        private int ticksSinceCitizenshipReconciliation;
+        private long ticksSinceCitizenshipReconciliation;
+        private volatile long citizenshipReconciliationIntervalTicks =
+                CITIZENSHIP_POLICY_DISCOVERY_INTERVAL_TICKS;
         private int ticksSinceTerritoryPermitCompensation;
         private int ticksSincePermanentDestructionRecovery;
         private int ticksSinceTreasuryWithdrawalRecovery;

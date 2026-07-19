@@ -771,10 +771,13 @@ public final class FiscalAdministrationCommands {
                                 .then(Commands.argument(
                                                 "correctionGraceMillis",
                                                 LongArgumentType.longArg(1L))
-                                        .then(Commands.argument(
+                                                .then(Commands.argument(
                                                         "transferCooldownMillis",
                                                         LongArgumentType.longArg(0L))
                                                 .then(Commands.argument(
+                                                                "reconciliationIntervalMillis",
+                                                                LongArgumentType.longArg(1L))
+                                                        .then(Commands.argument(
                                                                 "effectiveAtEpochMillis",
                                                                 LongArgumentType.longArg(0L))
                                                         .then(Commands.argument(
@@ -794,13 +797,16 @@ public final class FiscalAdministrationCommands {
                                                                                                 "transferCooldownMillis"),
                                                                                         LongArgumentType.getLong(
                                                                                                 context,
+                                                                                                "reconciliationIntervalMillis"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
                                                                                                 "effectiveAtEpochMillis"),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
                                                                                                 "requestId"),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
-                                                                                                "reason"))))))))));
+                                                                                                "reason")))))))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -1360,6 +1366,7 @@ public final class FiscalAdministrationCommands {
             CommandSourceStack source,
             long correctionGraceMillis,
             long transferCooldownMillis,
+            long reconciliationIntervalMillis,
             long effectiveAtEpochMillis,
             String requestId,
             String reason) {
@@ -1372,7 +1379,9 @@ public final class FiscalAdministrationCommands {
                                 administrator(source).value(),
                                 new CitizenshipPolicy(
                                         java.time.Duration.ofMillis(correctionGraceMillis),
-                                        java.time.Duration.ofMillis(transferCooldownMillis)),
+                                        java.time.Duration.ofMillis(transferCooldownMillis),
+                                        java.time.Duration.ofMillis(
+                                                reconciliationIntervalMillis)),
                                 Instant.ofEpochMilli(effectiveAtEpochMillis),
                                 reason)))
                 .whenComplete((policy, failure) -> source.getServer().execute(() -> {
@@ -1394,6 +1403,8 @@ public final class FiscalAdministrationCommands {
         return "Citizenship policy " + version.policyId()
                 + " correctionGraceMillis=" + version.policy().correctionGrace().toMillis()
                 + " transferCooldownMillis=" + version.policy().transferCooldown().toMillis()
+                + " reconciliationIntervalMillis="
+                + version.policy().reconciliationInterval().toMillis()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

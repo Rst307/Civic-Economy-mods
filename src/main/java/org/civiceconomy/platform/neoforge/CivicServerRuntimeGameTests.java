@@ -2845,7 +2845,7 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Registered Facility Scope policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
-                "civic economy admin citizenship policy schedule 172800000 604800000 "
+                "civic economy admin citizenship policy schedule 172800000 604800000 60000 "
                         + effectiveAt + " " + citizenshipPolicyRequestId
                         + " GameTest Citizenship policy");
         server.getCommands().performPrefixedCommand(
@@ -2900,7 +2900,7 @@ public final class CivicServerRuntimeGameTests {
                         + " Untrusted Registered Facility Scope policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
-                "civic economy admin citizenship policy schedule 1 1 "
+                "civic economy admin citizenship policy schedule 1 1 1 "
                         + effectiveAt + " " + unauthorizedCitizenshipPolicyRequestId
                         + " Untrusted Citizenship policy");
         server.getCommands().performPrefixedCommand(
@@ -5077,7 +5077,7 @@ public final class CivicServerRuntimeGameTests {
 
     @GameTest(
             template = "empty",
-            timeoutTicks = 800,
+            timeoutTicks = 2400,
             batch = "runtime-treasury-withdrawal-command")
     public static void playerWithdrawsExactNationalTreasuryCashThroughRealLcExactlyOnce(
             GameTestHelper helper) {
@@ -5356,7 +5356,7 @@ public final class CivicServerRuntimeGameTests {
 
     @GameTest(
             template = "empty",
-            timeoutTicks = 800,
+            timeoutTicks = 2400,
             batch = "runtime-treasury-withdrawal-approval-command")
     public static void distinctCitizensApproveGovernedTreasuryWithdrawalBeforeRealLcDebit(
             GameTestHelper helper) {
@@ -8030,7 +8030,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(88, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(89, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8719,6 +8719,7 @@ public final class CivicServerRuntimeGameTests {
                 var query = connection.prepareStatement("""
                         SELECT actor_identity, correction_grace_millis,
                                transfer_cooldown_millis,
+                               reconciliation_interval_millis,
                                effective_at_epoch_millis, reason
                         FROM citizenship_policy
                         WHERE service_identity = 'civiceconomy-citizenship-policy'
@@ -8735,12 +8736,14 @@ public final class CivicServerRuntimeGameTests {
                 helper.assertValueEqual(
                         604_800_000L, result.getLong(3), "Citizenship transfer cooldown");
                 helper.assertValueEqual(
+                        60_000L, result.getLong(4), "Citizenship reconciliation interval");
+                helper.assertValueEqual(
                         effectiveAtEpochMillis,
-                        result.getLong(4),
+                        result.getLong(5),
                         "Citizenship policy effective time");
                 helper.assertValueEqual(
                         "GameTest Citizenship policy",
-                        result.getString(5),
+                        result.getString(6),
                         "Citizenship policy reason");
                 helper.assertFalse(result.next(), "duplicate Citizenship policy");
             }

@@ -38,6 +38,7 @@ public final class CitizenshipPolicyRegistry {
                 request.actorIdentity(),
                 request.policy().correctionGrace().toMillis(),
                 request.policy().transferCooldown().toMillis(),
+                request.policy().reconciliationInterval().toMillis(),
                 request.effectiveAt().toEpochMilli(),
                 request.reason(),
                 clock.millis()));
@@ -56,6 +57,8 @@ public final class CitizenshipPolicyRegistry {
         if (!stored.actorIdentity().equals(request.actorIdentity())
                 || stored.correctionGraceMillis() != request.policy().correctionGrace().toMillis()
                 || stored.transferCooldownMillis() != request.policy().transferCooldown().toMillis()
+                || stored.reconciliationIntervalMillis()
+                        != request.policy().reconciliationInterval().toMillis()
                 || stored.effectiveAtEpochMillis() != request.effectiveAt().toEpochMilli()
                 || !stored.reason().equals(request.reason())) {
             throw new IdempotencyConflictException(request.serviceIdentity(), request.requestId());
@@ -67,7 +70,8 @@ public final class CitizenshipPolicyRegistry {
                 stored.policyId(),
                 new CitizenshipPolicy(
                         Duration.ofMillis(stored.correctionGraceMillis()),
-                        Duration.ofMillis(stored.transferCooldownMillis())),
+                        Duration.ofMillis(stored.transferCooldownMillis()),
+                        Duration.ofMillis(stored.reconciliationIntervalMillis())),
                 Instant.ofEpochMilli(stored.effectiveAtEpochMillis()),
                 stored.actorIdentity(),
                 stored.reason(),

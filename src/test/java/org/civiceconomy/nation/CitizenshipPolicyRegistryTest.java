@@ -31,7 +31,8 @@ class CitizenshipPolicyRegistryTest {
                 SERVICE,
                 "initial-citizenship-policy",
                 "civic-admin-console:test",
-                new CitizenshipPolicy(Duration.ofDays(2), Duration.ofDays(7)),
+                new CitizenshipPolicy(
+                        Duration.ofDays(2), Duration.ofDays(7), Duration.ofMinutes(3)),
                 EFFECTIVE_AT,
                 "Initial Citizenship policy");
         CitizenshipPolicyVersion scheduled;
@@ -47,6 +48,8 @@ class CitizenshipPolicyRegistryTest {
                     policies.current(EFFECTIVE_AT).orElseThrow().policy().correctionGrace());
             assertEquals(Duration.ofDays(7),
                     policies.current(EFFECTIVE_AT).orElseThrow().policy().transferCooldown());
+            assertEquals(Duration.ofMinutes(3),
+                    policies.current(EFFECTIVE_AT).orElseThrow().policy().reconciliationInterval());
         }
 
         try (CivicDatabase reopened = database()) {
@@ -62,7 +65,8 @@ class CitizenshipPolicyRegistryTest {
                     SERVICE,
                     "immutable-citizenship-policy",
                     "civic-admin-console:test",
-                    new CitizenshipPolicy(Duration.ofDays(2), Duration.ofDays(7)),
+                    new CitizenshipPolicy(
+                            Duration.ofDays(2), Duration.ofDays(7), Duration.ofMinutes(3)),
                     EFFECTIVE_AT,
                     "Original policy");
             policies.schedule(original);
@@ -73,7 +77,8 @@ class CitizenshipPolicyRegistryTest {
                             SERVICE,
                             original.requestId(),
                             original.actorIdentity(),
-                            new CitizenshipPolicy(Duration.ofDays(3), Duration.ofDays(7)),
+                            new CitizenshipPolicy(
+                                    Duration.ofDays(3), Duration.ofDays(7), Duration.ofMinutes(3)),
                             original.effectiveAt(),
                             original.reason())));
         }

@@ -9,6 +9,7 @@ public record StoredCitizenshipPolicy(
         String actorIdentity,
         long correctionGraceMillis,
         long transferCooldownMillis,
+        long reconciliationIntervalMillis,
         long effectiveAtEpochMillis,
         String reason,
         long recordedAtEpochMillis) {}

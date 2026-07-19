@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 88;
+    private static final int SCHEMA_VERSION = 89;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -9858,7 +9858,8 @@ public final class CivicDatabase implements AutoCloseable {
     public synchronized StoredCitizenshipPolicy currentCitizenshipPolicy(long asOfEpochMillis) {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT * FROM citizenship_policy
-                WHERE effective_at_epoch_millis <= ?
+                WHERE reconciliation_interval_millis IS NOT NULL
+                  AND effective_at_epoch_millis <= ?
                 ORDER BY effective_at_epoch_millis DESC,
                          recorded_at_epoch_millis DESC,
                          policy_id DESC
@@ -10266,6 +10267,7 @@ public final class CivicDatabase implements AutoCloseable {
             String actorIdentity,
             long correctionGraceMillis,
             long transferCooldownMillis,
+            long reconciliationIntervalMillis,
             long effectiveAtEpochMillis,
             String reason,
             long recordedAtEpochMillis) {
@@ -10273,8 +10275,9 @@ public final class CivicDatabase implements AutoCloseable {
                 INSERT INTO citizenship_policy (
                     policy_id, service_identity, request_id, actor_identity,
                     correction_grace_millis, transfer_cooldown_millis,
+                    reconciliation_interval_millis,
                     effective_at_epoch_millis, reason, recorded_at_epoch_millis
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             insert.setString(1, policyId.toString());
             insert.setString(2, serviceIdentity);
@@ -10282,9 +10285,10 @@ public final class CivicDatabase implements AutoCloseable {
             insert.setString(4, actorIdentity);
             insert.setLong(5, correctionGraceMillis);
             insert.setLong(6, transferCooldownMillis);
-            insert.setLong(7, effectiveAtEpochMillis);
-            insert.setString(8, reason);
-            insert.setLong(9, recordedAtEpochMillis);
+            insert.setLong(7, reconciliationIntervalMillis);
+            insert.setLong(8, effectiveAtEpochMillis);
+            insert.setString(9, reason);
+            insert.setLong(10, recordedAtEpochMillis);
             insert.executeUpdate();
             return citizenshipPolicy(serviceIdentity, requestId);
         } catch (SQLException failure) {
@@ -17606,6 +17610,57 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 88");
             }
+            if (version < 89) {
+                statement.execute("DROP INDEX citizenship_policy_current");
+                statement.execute("ALTER TABLE citizenship_policy RENAME TO citizenship_policy_v88");
+                statement.execute("""
+                        CREATE TABLE citizenship_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            correction_grace_millis INTEGER NOT NULL
+                                CHECK (correction_grace_millis > 0),
+                            transfer_cooldown_millis INTEGER NOT NULL
+                                CHECK (transfer_cooldown_millis >= 0),
+                            reconciliation_interval_millis INTEGER
+                                CHECK (reconciliation_interval_millis > 0),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO citizenship_policy (
+                            policy_id, service_identity, request_id, actor_identity,
+                            correction_grace_millis, transfer_cooldown_millis,
+                            reconciliation_interval_millis,
+                            effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                        )
+                        SELECT policy_id, service_identity, request_id, actor_identity,
+                               correction_grace_millis, transfer_cooldown_millis,
+                               NULL,
+                               effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                        FROM citizenship_policy_v88
+                        """);
+                statement.execute("DROP TABLE citizenship_policy_v88");
+                statement.execute("""
+                        CREATE INDEX citizenship_policy_current
+                        ON citizenship_policy (
+                            effective_at_epoch_millis,
+                            recorded_at_epoch_millis,
+                            policy_id
+                        )
+                        WHERE reconciliation_interval_millis IS NOT NULL
+                        """);
+                statement.execute("PRAGMA user_version = 89");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -18315,6 +18370,7 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("actor_identity"),
                     result.getLong("correction_grace_millis"),
                     result.getLong("transfer_cooldown_millis"),
+                    result.getLong("reconciliation_interval_millis"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));
