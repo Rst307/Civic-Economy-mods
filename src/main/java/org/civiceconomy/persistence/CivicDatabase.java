@@ -27,7 +27,7 @@ import org.civiceconomy.territory.TerritoryMaintenancePriorityPolicy;
 import org.sqlite.SQLiteConnection;
 
 public final class CivicDatabase implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 84;
+    private static final int SCHEMA_VERSION = 85;
     private static final long TERRITORY_FORCE_LOAD_GRACE_MILLIS = 86_400_000L;
 
     private final Connection connection;
@@ -4541,6 +4541,20 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to read Effective Territory Strength policy request", failure);
+        }
+    }
+
+    public synchronized StoredMintCompliancePolicy mintCompliancePolicy(
+            String serviceIdentity, String requestId) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_compliance_policy
+                WHERE service_identity = ? AND request_id = ?
+                """)) {
+            query.setString(1, serviceIdentity);
+            query.setString(2, requestId);
+            return readMintCompliancePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read Mint Compliance policy request", failure);
         }
     }
 
@@ -9744,6 +9758,23 @@ public final class CivicDatabase implements AutoCloseable {
         }
     }
 
+    public synchronized StoredMintCompliancePolicy currentMintCompliancePolicy(
+            long asOfEpochMillis) {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT * FROM mint_compliance_policy
+                WHERE effective_at_epoch_millis <= ?
+                ORDER BY effective_at_epoch_millis DESC,
+                         recorded_at_epoch_millis DESC,
+                         policy_id DESC
+                LIMIT 1
+                """)) {
+            query.setLong(1, asOfEpochMillis);
+            return readMintCompliancePolicy(query);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to read current Mint Compliance policy", failure);
+        }
+    }
+
     public synchronized StoredProductionIndustryAssignment
             currentProductionIndustryAssignment(
                     String createVersion, String recipeId, long asOfEpochMillis) {
@@ -10028,6 +10059,39 @@ public final class CivicDatabase implements AutoCloseable {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to schedule Effective Territory Strength policy", failure);
+        }
+    }
+
+    public synchronized StoredMintCompliancePolicy scheduleMintCompliancePolicy(
+            UUID policyId,
+            String serviceIdentity,
+            String requestId,
+            String actorIdentity,
+            long observationWindowMillis,
+            int recoveredCommitBasisPoints,
+            long effectiveAtEpochMillis,
+            String reason,
+            long recordedAtEpochMillis) {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO mint_compliance_policy (
+                    policy_id, service_identity, request_id, actor_identity,
+                    observation_window_millis, recovered_commit_basis_points,
+                    effective_at_epoch_millis, reason, recorded_at_epoch_millis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, policyId.toString());
+            insert.setString(2, serviceIdentity);
+            insert.setString(3, requestId);
+            insert.setString(4, actorIdentity);
+            insert.setLong(5, observationWindowMillis);
+            insert.setInt(6, recoveredCommitBasisPoints);
+            insert.setLong(7, effectiveAtEpochMillis);
+            insert.setString(8, reason);
+            insert.setLong(9, recordedAtEpochMillis);
+            insert.executeUpdate();
+            return mintCompliancePolicy(serviceIdentity, requestId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("Unable to schedule Mint Compliance policy", failure);
         }
     }
 
@@ -17218,6 +17282,39 @@ public final class CivicDatabase implements AutoCloseable {
                         """);
                 statement.execute("PRAGMA user_version = 84");
             }
+            if (version < 85) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS mint_compliance_policy (
+                            policy_id TEXT PRIMARY KEY,
+                            service_identity TEXT NOT NULL
+                                CHECK (length(trim(service_identity)) > 0),
+                            request_id TEXT NOT NULL
+                                CHECK (length(trim(request_id)) > 0),
+                            actor_identity TEXT NOT NULL
+                                CHECK (length(trim(actor_identity)) > 0),
+                            observation_window_millis INTEGER NOT NULL
+                                CHECK (observation_window_millis > 0),
+                            recovered_commit_basis_points INTEGER NOT NULL
+                                CHECK (recovered_commit_basis_points >= 0
+                                    AND recovered_commit_basis_points <= 10000),
+                            effective_at_epoch_millis INTEGER NOT NULL
+                                CHECK (effective_at_epoch_millis >= 0),
+                            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                            recorded_at_epoch_millis INTEGER NOT NULL
+                                CHECK (recorded_at_epoch_millis >= 0),
+                            UNIQUE (service_identity, request_id)
+                        )
+                        """);
+                statement.execute("""
+                        CREATE INDEX IF NOT EXISTS mint_compliance_policy_current
+                        ON mint_compliance_policy (
+                            effective_at_epoch_millis,
+                            recorded_at_epoch_millis,
+                            policy_id
+                        )
+                        """);
+                statement.execute("PRAGMA user_version = 85");
+            }
             connection.commit();
         } catch (SQLException failure) {
             connection.rollback();
@@ -17852,6 +17949,25 @@ public final class CivicDatabase implements AutoCloseable {
                     result.getString("request_id"),
                     result.getString("actor_identity"),
                     result.getInt("full_strength_scale_effective_claims"),
+                    result.getLong("effective_at_epoch_millis"),
+                    result.getString("reason"),
+                    result.getLong("recorded_at_epoch_millis"));
+        }
+    }
+
+    private StoredMintCompliancePolicy readMintCompliancePolicy(PreparedStatement query)
+            throws SQLException {
+        try (ResultSet result = query.executeQuery()) {
+            if (!result.next()) {
+                return null;
+            }
+            return new StoredMintCompliancePolicy(
+                    UUID.fromString(result.getString("policy_id")),
+                    result.getString("service_identity"),
+                    result.getString("request_id"),
+                    result.getString("actor_identity"),
+                    result.getLong("observation_window_millis"),
+                    result.getInt("recovered_commit_basis_points"),
                     result.getLong("effective_at_epoch_millis"),
                     result.getString("reason"),
                     result.getLong("recorded_at_epoch_millis"));

@@ -57,8 +57,12 @@ import org.civiceconomy.strength.EffectiveCitizenStrengthPolicyVersion;
 import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicy;
 import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicyRegistry;
 import org.civiceconomy.strength.EffectiveTerritoryStrengthPolicyVersion;
+import org.civiceconomy.strength.MintCompliancePolicy;
+import org.civiceconomy.strength.MintCompliancePolicyRegistry;
+import org.civiceconomy.strength.MintCompliancePolicyVersion;
 import org.civiceconomy.strength.ScheduleEffectiveCitizenStrengthPolicy;
 import org.civiceconomy.strength.ScheduleEffectiveTerritoryStrengthPolicy;
+import org.civiceconomy.strength.ScheduleMintCompliancePolicy;
 import org.civiceconomy.territory.ScheduleTerritoryFreeAllocationPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryExpansionPricingPolicy;
 import org.civiceconomy.territory.ScheduleTerritoryMaintenancePolicy;
@@ -88,6 +92,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-effective-citizen-strength-policy");
     private static final ServiceIdentity EFFECTIVE_TERRITORY_STRENGTH_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-effective-territory-strength-policy");
+    private static final ServiceIdentity MINT_COMPLIANCE_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-mint-compliance-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -763,7 +769,45 @@ public final class FiscalAdministrationCommands {
                                                                                         "requestId"),
                                                                                 StringArgumentType.getString(
                                                                                         context,
-                                                                                        "reason")))))))));
+                                                                                        "reason")))))))))
+                .then(Commands.literal("mint-compliance")
+                        .then(Commands.literal("show")
+                                .executes(context -> showMintCompliancePolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument(
+                                                "observationWindowMillis",
+                                                LongArgumentType.longArg(1L))
+                                        .then(Commands.argument(
+                                                        "recoveredCommitBasisPoints",
+                                                        IntegerArgumentType.integer(0, 10_000))
+                                                .then(Commands.argument(
+                                                                "effectiveAtEpochMillis",
+                                                                LongArgumentType.longArg(0L))
+                                                        .then(Commands.argument(
+                                                                        "requestId",
+                                                                        StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "reason",
+                                                                                StringArgumentType.greedyString())
+                                                                        .executes(context ->
+                                                                                scheduleMintCompliancePolicy(
+                                                                                        context.getSource(),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "observationWindowMillis"),
+                                                                                        IntegerArgumentType.getInteger(
+                                                                                                context,
+                                                                                                "recoveredCommitBasisPoints"),
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "effectiveAtEpochMillis"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "requestId"),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "reason"))))))))));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
@@ -1222,6 +1266,74 @@ public final class FiscalAdministrationCommands {
         return "Effective Territory Strength policy " + version.policyId()
                 + " fullStrengthScaleEffectiveClaims="
                 + version.policy().fullStrengthScaleEffectiveClaims()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
+    }
+
+    private static int showMintCompliancePolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new MintCompliancePolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Mint Compliance policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Mint Compliance policy is not configured; the compliance component remains paused"),
+                                false);
+                    } else {
+                        source.sendSuccess(
+                                () -> Component.literal(formatMintCompliancePolicy(
+                                        policy.orElseThrow())),
+                                false);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Mint Compliance policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleMintCompliancePolicy(
+            CommandSourceStack source,
+            long observationWindowMillis,
+            int recoveredCommitBasisPoints,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new MintCompliancePolicyRegistry(database, clock)
+                        .schedule(new ScheduleMintCompliancePolicy(
+                                MINT_COMPLIANCE_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new MintCompliancePolicy(
+                                        Duration.ofMillis(observationWindowMillis),
+                                        recoveredCommitBasisPoints),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "Scheduled " + formatMintCompliancePolicy(policy)),
+                                true);
+                    } else {
+                        reportDatabaseFailure(source, "Mint Compliance policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(
+                () -> Component.literal("Mint Compliance policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatMintCompliancePolicy(MintCompliancePolicyVersion version) {
+        return "Mint Compliance policy " + version.policyId()
+                + " observationWindow=" + version.policy().observationWindow()
+                + " recoveredCommitBasisPoints="
+                + version.policy().recoveredCommitBasisPoints()
                 + " effectiveAt=" + version.effectiveAt()
                 + " actor=" + version.actorIdentity();
     }

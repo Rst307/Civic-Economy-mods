@@ -54,7 +54,7 @@ class NationalStrengthStatusFormattingTest {
                         false,
                         List.of()),
                 new MintComplianceCalculator().assess(
-                        nationId, 1_000L, recalculatedAt, List.of()),
+                        nationId, 1_000L, recalculatedAt, 5_000, List.of()),
                 new AuditableEconomicActivityWindowAssessment(
                         nationId, 1_000L, recalculatedAt, 625L, 2_500, 2, 1, Map.of()));
 

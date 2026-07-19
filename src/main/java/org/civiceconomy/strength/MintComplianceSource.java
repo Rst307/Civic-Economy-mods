@@ -15,7 +15,10 @@ public final class MintComplianceSource {
     }
 
     public MintComplianceAssessment assess(
-            NationId nationId, long windowStartEpochMillis, long windowEndEpochMillis) {
+            NationId nationId,
+            long windowStartEpochMillis,
+            long windowEndEpochMillis,
+            int recoveredCommitBasisPoints) {
         if (nationId == null) {
             throw new IllegalArgumentException("Mint Compliance Nation is required");
         }
@@ -33,6 +36,10 @@ public final class MintComplianceSource {
                                         : MintComplianceOutcome.CLEAN_COMMIT))
                 .toList();
         return calculator.assess(
-                nationId, windowStartEpochMillis, windowEndEpochMillis, observations);
+                nationId,
+                windowStartEpochMillis,
+                windowEndEpochMillis,
+                recoveredCommitBasisPoints,
+                observations);
     }
 }

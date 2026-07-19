@@ -86,7 +86,7 @@ class NationalStrengthRecalculatorTest {
                                     false,
                                     List.of()),
                             new MintComplianceCalculator().assess(
-                                    NATION, 0L, 100L, List.of()),
+                                    NATION, 0L, 100L, 5_000, List.of()),
                             new NationalStrengthComponents(
                                     1_000,
                                     2_000,

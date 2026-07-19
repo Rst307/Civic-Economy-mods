@@ -340,7 +340,6 @@ class NationalStrengthSnapshotBuilderTest {
                                             Duration.ofDays(60),
                                             Duration.ofHours(8),
                                             Duration.ofDays(30),
-                                            Duration.ofDays(30),
                                             10_000L),
                                     Map.of(teamId, List.of(effective, suspended)))
                             .recalculateAll(RECALCULATED_AT.toEpochMilli())
@@ -373,7 +372,6 @@ class NationalStrengthSnapshotBuilderTest {
                                             Duration.ofDays(60),
                                             Duration.ofHours(8),
                                             Duration.ofDays(30),
-                                            Duration.ofDays(30),
                                             10_000L),
                                     Map.of(teamId, List.of(effective, suspended)))
                             .recalculateAll(firstPolicyAt.toEpochMilli())
@@ -396,7 +394,6 @@ class NationalStrengthSnapshotBuilderTest {
                                             Duration.ofDays(7),
                                             Duration.ofDays(60),
                                             Duration.ofHours(8),
-                                            Duration.ofDays(30),
                                             Duration.ofDays(30),
                                             10_000L),
                                     Map.of(teamId, List.of(effective, suspended)))

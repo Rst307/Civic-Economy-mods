@@ -2753,6 +2753,10 @@ public final class CivicServerRuntimeGameTests {
                 "effective-territory-strength-policy-command-" + UUID.randomUUID();
         String unauthorizedEffectiveTerritoryStrengthPolicyRequestId =
                 "effective-territory-strength-policy-unauthorized-" + UUID.randomUUID();
+        String mintCompliancePolicyRequestId =
+                "mint-compliance-policy-command-" + UUID.randomUUID();
+        String unauthorizedMintCompliancePolicyRequestId =
+                "mint-compliance-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2803,6 +2807,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Effective Territory Strength policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin strength mint-compliance schedule 2592000000 5000 "
+                        + effectiveAt + " " + mintCompliancePolicyRequestId
+                        + " GameTest Mint Compliance policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2836,6 +2845,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin strength effective-territory schedule 1 "
                         + effectiveAt + " " + unauthorizedEffectiveTerritoryStrengthPolicyRequestId
                         + " Untrusted Effective Territory Strength policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin strength mint-compliance schedule 1 1 "
+                        + effectiveAt + " " + unauthorizedMintCompliancePolicyRequestId
+                        + " Untrusted Mint Compliance policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -2878,6 +2892,10 @@ public final class CivicServerRuntimeGameTests {
                     helper,
                     databaseFile,
                     unauthorizedEffectiveTerritoryStrengthPolicyRequestId);
+            assertMintCompliancePolicyScheduled(
+                    helper, databaseFile, mintCompliancePolicyRequestId, effectiveAt);
+            assertMintCompliancePolicyAbsent(
+                    helper, databaseFile, unauthorizedMintCompliancePolicyRequestId);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -7944,7 +7962,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(84, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(85, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8424,6 +8442,71 @@ public final class CivicServerRuntimeGameTests {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Effective Territory Strength policy",
                     failure);
+        }
+    }
+
+    private static void assertMintCompliancePolicyScheduled(
+            GameTestHelper helper,
+            Path databaseFile,
+            String requestId,
+            long effectiveAtEpochMillis) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, observation_window_millis,
+                               recovered_commit_basis_points,
+                               effective_at_epoch_millis, reason
+                        FROM mint_compliance_policy
+                        WHERE service_identity = 'civiceconomy-mint-compliance-policy'
+                          AND request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "persistent Mint Compliance policy");
+                helper.assertTrue(
+                        result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Mint Compliance administrator");
+                helper.assertValueEqual(
+                        2_592_000_000L,
+                        result.getLong(2),
+                        "Mint Compliance observation window");
+                helper.assertValueEqual(
+                        5_000, result.getInt(3), "recovered Mint commit weight");
+                helper.assertValueEqual(
+                        effectiveAtEpochMillis,
+                        result.getLong(4),
+                        "Mint Compliance policy effective time");
+                helper.assertValueEqual(
+                        "GameTest Mint Compliance policy",
+                        result.getString(5),
+                        "Mint Compliance policy reason");
+                helper.assertFalse(result.next(), "duplicate Mint Compliance policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Mint Compliance policy command result", failure);
+        }
+    }
+
+    private static void assertMintCompliancePolicyAbsent(
+            GameTestHelper helper, Path databaseFile, String requestId) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT COUNT(*) FROM mint_compliance_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                helper.assertTrue(result.next(), "unauthorized Mint Compliance policy count");
+                helper.assertValueEqual(
+                        0L,
+                        result.getLong(1),
+                        "non-OP cannot schedule Mint Compliance policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect unauthorized Mint Compliance policy", failure);
         }
     }
 

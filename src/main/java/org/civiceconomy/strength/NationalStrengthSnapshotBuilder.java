@@ -36,7 +36,6 @@ public final class NationalStrengthSnapshotBuilder {
     private final Duration citizenshipTransferCooldown;
     private final Duration effectiveCitizenObservationWindow;
     private final Duration fullCitizenContributionTime;
-    private final Duration complianceWindow;
     private final boolean productionScoringAvailable;
     private final Map<UUID, List<TerritoryClaimPosition>> currentClaimsByTeam;
 
@@ -61,7 +60,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.citizenshipTransferCooldown = citizenshipTransferCooldown;
         this.effectiveCitizenObservationWindow = effectiveCitizenObservationWindow;
         this.fullCitizenContributionTime = fullCitizenContributionTime;
-        this.complianceWindow = Duration.ofMillis(activityWindowMillis);
         this.productionScoringAvailable = false;
         this.currentClaimsByTeam = Map.of();
         this.recalculator = new NationalStrengthRecalculator(
@@ -91,7 +89,6 @@ public final class NationalStrengthSnapshotBuilder {
         this.effectiveCitizenObservationWindow =
                 configuration.effectiveCitizenObservationWindow();
         this.fullCitizenContributionTime = configuration.fullCitizenContributionTime();
-        this.complianceWindow = configuration.complianceWindow();
         this.productionScoringAvailable = productionScoringAvailable;
         this.currentClaimsByTeam = currentClaimsByTeam.entrySet().stream()
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -120,6 +117,9 @@ public final class NationalStrengthSnapshotBuilder {
         TerritoryMaintenanceRegistry maintenance =
                 new TerritoryMaintenanceRegistry(database, recalculationClock);
         MintComplianceSource complianceSource = new MintComplianceSource(database);
+        Optional<MintCompliancePolicyVersion> mintCompliancePolicy =
+                new MintCompliancePolicyRegistry(database, recalculationClock)
+                        .current(recalculatedAt);
         Optional<EffectiveCitizenStrengthPolicyVersion> effectiveCitizenPolicy =
                 new EffectiveCitizenStrengthPolicyRegistry(database, recalculationClock)
                         .current(recalculatedAt);
@@ -179,11 +179,26 @@ public final class NationalStrengthSnapshotBuilder {
                             stored.ftbTeamId(),
                             currentClaims != null,
                             territoryClaims);
-            long complianceStart = recalculatedAtEpochMillis <= complianceWindow.toMillis()
-                    ? 0L
-                    : recalculatedAtEpochMillis - complianceWindow.toMillis();
-            MintComplianceAssessment compliance = complianceSource.assess(
-                    nationId, complianceStart, recalculatedAtEpochMillis);
+            MintComplianceAssessment compliance = mintCompliancePolicy
+                    .map(MintCompliancePolicyVersion::policy)
+                    .map(policy -> {
+                        long windowMillis = policy.observationWindow().toMillis();
+                        long complianceStart = recalculatedAtEpochMillis <= windowMillis
+                                ? 0L
+                                : recalculatedAtEpochMillis - windowMillis;
+                        return complianceSource.assess(
+                                nationId,
+                                complianceStart,
+                                recalculatedAtEpochMillis,
+                                policy.recoveredCommitBasisPoints());
+                    })
+                    .orElseGet(() -> new MintComplianceAssessment(
+                            nationId,
+                            Math.max(0L, recalculatedAtEpochMillis - 1L),
+                            recalculatedAtEpochMillis,
+                            List.of(),
+                            0,
+                            true));
             RollingProductionMarginalReturnAssessment production =
                     productionSource != null
                             ? productionSource.assess(nationId, recalculatedAt)

@@ -298,6 +298,9 @@ _Avoid_: 建国人数门槛、FTB Team 成员上限、硬编码人口满分值
 
 **有效领土国力政策（Effective Territory Strength Policy）**:
 由受信任服务器治理安排、在未来时刻生效的全服 Effective Territory 国力满分尺度；它按 National Strength 评估时刻解释 Effective Claim 数，不改写 FTB Claim、Territory Fiscal Assessment、Settlement、Restoration 或历史领土证据。
+
+**铸币合规政策（Mint Compliance Policy）**:
+由受信任服务器治理安排、在未来时刻生效的全服铸币合规解释规则；它规定评估时使用的观察窗口和 `RECOVERED_COMMIT` 权重，只决定哪些既有 Mint Compliance Observation 进入当前 National Strength 快照及其分值，不改写 Mint Batch、Mint Recovery Incident、Monetary Stock Correction 或历史观察证据。
 _Avoid_: 免费领土额度、领土维护政策、硬编码领土满分值
 
 **滚动生产边际回报评估（Rolling Production Marginal Return Assessment）**:

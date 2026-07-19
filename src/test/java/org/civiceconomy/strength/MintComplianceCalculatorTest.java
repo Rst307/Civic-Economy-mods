@@ -18,6 +18,7 @@ class MintComplianceCalculatorTest {
                 nationId,
                 1_000L,
                 2_000L,
+                2_000,
                 List.of(
                         new MintComplianceObservation(
                                 UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
@@ -29,7 +30,7 @@ class MintComplianceCalculatorTest {
         assertEquals(2, assessment.observationCount());
         assertEquals(1, assessment.cleanCommitCount());
         assertEquals(1, assessment.recoveredCommitCount());
-        assertEquals(7_500, assessment.normalizedBasisPoints());
+        assertEquals(6_000, assessment.normalizedBasisPoints());
         assertFalse(assessment.anomalous());
     }
 
@@ -43,6 +44,7 @@ class MintComplianceCalculatorTest {
                 nationId,
                 1_000L,
                 2_000L,
+                5_000,
                 List.of(
                         new MintComplianceObservation(
                                 batchId, MintComplianceOutcome.OPEN_INCIDENT),

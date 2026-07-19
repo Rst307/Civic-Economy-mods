@@ -46,9 +46,20 @@ class MintComplianceSourceTest {
             var pending = recovery.pendingExternal().getFirst();
             recovery.recordFailure(pending, new IllegalStateException("LC unavailable"));
             recovery.recordFailure(pending, new IllegalStateException("LC still unavailable"));
+            new MintCompliancePolicyRegistry(
+                            database,
+                            Clock.fixed(Instant.ofEpochMilli(START), ZoneOffset.UTC))
+                    .schedule(new ScheduleMintCompliancePolicy(
+                            new org.civiceconomy.fiscal.ServiceIdentity(
+                                    "civiceconomy-mint-compliance-policy"),
+                            "source-test-policy",
+                            "civic-admin-console:test",
+                            new MintCompliancePolicy(Duration.ofDays(30), 5_000),
+                            Instant.ofEpochMilli(START + 1L),
+                            "Test Mint Compliance policy"));
 
             MintComplianceAssessment assessment = new MintComplianceSource(database).assess(
-                    new NationId(NATION), START, START + 120_000L);
+                    new NationId(NATION), START, START + 120_000L, 5_000);
 
             assertEquals(1, assessment.observationCount());
             assertEquals(1, assessment.openIncidentCount());
@@ -62,7 +73,6 @@ class MintComplianceSourceTest {
                                             Duration.ofDays(7),
                                             Duration.ofDays(60),
                                             Duration.ofHours(8),
-                                            Duration.ofDays(30),
                                             Duration.ofDays(30),
                                             10_000L),
                                     Map.of(TEAM, List.of()))
@@ -94,7 +104,7 @@ class MintComplianceSourceTest {
                             "Treasury credit independently confirmed"));
 
             MintComplianceAssessment assessment = new MintComplianceSource(database).assess(
-                    new NationId(NATION), START, START + 120_000L);
+                    new NationId(NATION), START, START + 120_000L, 5_000);
 
             assertEquals(1, assessment.observationCount());
             assertEquals(1, assessment.quarantinedRecoveryCount());
@@ -115,7 +125,8 @@ class MintComplianceSourceTest {
                     new NationId(UUID.fromString(
                             "99999999-9999-9999-9999-999999999999")),
                     START,
-                    START + 120_000L);
+                    START + 120_000L,
+                    5_000);
 
             assertEquals(0, assessment.observationCount());
             assertEquals(0, assessment.normalizedBasisPoints());
@@ -132,10 +143,10 @@ class MintComplianceSourceTest {
             MintComplianceSource source = new MintComplianceSource(database);
 
             assertEquals(1, source.assess(
-                            new NationId(NATION), DUE.millis(), DUE.millis() + 1L)
+                            new NationId(NATION), DUE.millis(), DUE.millis() + 1L, 5_000)
                     .observationCount());
             assertEquals(0, source.assess(
-                            new NationId(NATION), START, DUE.millis())
+                            new NationId(NATION), START, DUE.millis(), 5_000)
                     .observationCount());
         }
     }
@@ -155,7 +166,7 @@ class MintComplianceSourceTest {
             recovery.confirmExternal(materialConsumption);
 
             MintComplianceAssessment assessment = new MintComplianceSource(database).assess(
-                    new NationId(NATION), START, START + 120_000L);
+                    new NationId(NATION), START, START + 120_000L, 5_000);
 
             assertEquals(1, assessment.observationCount());
             assertEquals(1, assessment.recoveredCommitCount());

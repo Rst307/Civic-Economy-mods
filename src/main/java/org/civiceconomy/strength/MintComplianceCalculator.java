@@ -9,8 +9,10 @@ public final class MintComplianceCalculator {
             NationId nationId,
             long windowStartEpochMillis,
             long windowEndEpochMillis,
+            int recoveredCommitBasisPoints,
             List<MintComplianceObservation> observations) {
-        if (nationId == null || observations == null) {
+        if (nationId == null || observations == null
+                || recoveredCommitBasisPoints < 0 || recoveredCommitBasisPoints > 10_000) {
             throw new IllegalArgumentException("Mint Compliance calculation is invalid");
         }
         var observedBatches = new HashSet<java.util.UUID>();
@@ -22,7 +24,7 @@ public final class MintComplianceCalculator {
             }
             total = Math.addExact(total, switch (observation.outcome()) {
                 case CLEAN_COMMIT -> 10_000L;
-                case RECOVERED_COMMIT -> 5_000L;
+                case RECOVERED_COMMIT -> recoveredCommitBasisPoints;
                 case QUARANTINED_RECOVERY -> 0L;
                 case OPEN_INCIDENT -> 0L;
             });

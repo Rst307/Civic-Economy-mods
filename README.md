@@ -202,6 +202,8 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 /civic economy admin strength effective-citizen schedule <fullStrengthScaleCitizenEquivalents> <effectiveAtEpochMillis> <requestId> <reason>
 /civic economy admin strength effective-territory show
 /civic economy admin strength effective-territory schedule <fullStrengthScaleEffectiveClaims> <effectiveAtEpochMillis> <requestId> <reason>
+/civic economy admin strength mint-compliance show
+/civic economy admin strength mint-compliance schedule <observationWindowMillis> <recoveredCommitBasisPoints> <effectiveAtEpochMillis> <requestId> <reason>
 ```
 
 激活时玩家必须是绑定 FTB Team 的负责人，当前位置所在区块必须已由同一 Team 在 FTB Chunks 中占领。正式世界必须满足有效候选人门槛；只有永久标记的 `DEBUG WORLD` 才能使用单人绕过。
@@ -212,7 +214,7 @@ National Treasury Permanent Destruction 匹配世界进程重启演练为两个�
 
 Effective Territory 同样使用延迟生效、不可变且可审计的 Effective Territory Strength Policy 决定满分所需 Effective Claim 数。首个版本生效前，领土组件保持 `PAUSED_ANOMALY` 和 0 分，但仍显示真实 current/EFFECTIVE/SUSPENDED/未评估 Claim 数；后续版本只影响后续快照，不改写 FTB Claim 或领土财政历史。
 
-`nation strength status` 显示同一快照中的 Effective Citizen basis points、有效人数、人口当量、当前/EFFECTIVE/SUSPENDED/未评估 Claim 数、Effective Territory basis points、30 天 Mint Compliance basis points 与 observation 分类、30 天可审计活动 basis points、30 天滚动 Production Marginal Return、接受/排除计数、总国力和新铸币暂停状态。领土只统计当前仍由精确 FTB Team 占领且最新财政结论为 EFFECTIVE 的区块。Mint Compliance 每个 Batch 最多形成一个 observation：无事故完成为 `CLEAN_COMMIT`（100%），事故解决且 Batch 最终完成为 `RECOVERED_COMMIT`（50%），仍有事故为 `OPEN_INCIDENT`（0 且暂停），事故虽解决但 Batch 尚未 `COMMITTED` 为 `QUARANTINED_RECOVERY`（0 且暂停）；无样本时合规保持 ACTIVE、0 分。生产贡献按证据时刻排序，最近 7 天满权重，之后衰减到 30 天窗口边界，并连续累计单设施和单产业软上限；Create 缺失/不兼容，或窗口内存在已出口但没有完整价格、产业和边际策略绑定的真实 `INCLUDED` 观察时，生产/基础设施保持 `PAUSED_ANOMALY`。
+`nation strength status` 显示同一快照中的 Effective Citizen basis points、有效人数、人口当量、当前/EFFECTIVE/SUSPENDED/未评估 Claim 数、Effective Territory basis points、Mint Compliance basis points 与 observation 分类、30 天可审计活动 basis points、30 天滚动 Production Marginal Return、接受/排除计数、总国力和新铸币暂停状态。领土只统计当前仍由精确 FTB Team 占领且最新财政结论为 EFFECTIVE 的区块。Mint Compliance 每个 Batch 最多形成一个 observation：无事故完成为 `CLEAN_COMMIT`（100%），事故解决且 Batch 最终完成为 `RECOVERED_COMMIT`（由生效政策定权重），仍有事故为 `OPEN_INCIDENT`（0 且暂停），事故虽解决但 Batch 尚未 `COMMITTED` 为 `QUARANTINED_RECOVERY`（0 且暂停）；观察窗口同样来自延迟生效、不可变且可审计的 Mint Compliance Policy。首个政策生效前该组件失败关闭为 `PAUSED_ANOMALY` 和 0 分，不改写任何 Batch 或事故证据。生产贡献按证据时刻排序，最近 7 天满权重，之后衰减到 30 天窗口边界，并连续累计单设施和单产业软上限；Create 缺失/不兼容，或窗口内存在已出口但没有完整价格、产业和边际策略绑定的真实 `INCLUDED` 观察时，生产/基础设施保持 `PAUSED_ANOMALY`。
 
 `nation role` 管理精确的国家财政权限。只有实时 FTB Team owner、同时具有未暂停的正式 Citizenship 时才能授予或撤销；目标 UUID 必须是同一 Nation 的有效 Citizen。授权和撤销都持久化审计，普通 FTB 等级不会自动获得财政权限。可用权限包括账户/账本查看、预算编制/批准、付款发起/批准、提现、领土财政、设施核算、发行、财政角色、审批策略、公共政策和恢复管理。设施范围、核算接口和基线管理使用独立的 `MANAGE_FACILITY_ACCOUNTING`，不同时授予领土、国库支出或铸币权限。
 
