@@ -27,7 +27,7 @@ class CivicDatabaseV90MigrationTest {
         }
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(90, migrated.schemaVersion());
+            assertEquals(91, migrated.schemaVersion());
             assertNull(migrated.currentOnlineTimeObservationPolicy(Long.MAX_VALUE));
         }
     }

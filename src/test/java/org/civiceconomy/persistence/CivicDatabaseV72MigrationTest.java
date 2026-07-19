@@ -62,7 +62,7 @@ class CivicDatabaseV72MigrationTest {
         downgradeToV71(file);
 
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
-            assertEquals(90, migrated.schemaVersion());
+            assertEquals(91, migrated.schemaVersion());
             assertNotNull(migrated.nationFiscalPermissionGrant(OLD_GRANT_ID));
             assertNotNull(migrated.nationFiscalPermissionRevocation(OLD_GRANT_ID));
             migrated.grantNationFiscalPermission(

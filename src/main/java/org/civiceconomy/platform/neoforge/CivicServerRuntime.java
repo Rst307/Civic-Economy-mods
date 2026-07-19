@@ -234,7 +234,7 @@ public final class CivicServerRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final long ONLINE_TIME_POLICY_DISCOVERY_INTERVAL_TICKS = 20L * 60L;
     private static final int FISCAL_EXPIRY_INTERVAL_TICKS = 20 * 60;
-    private static final int NATION_APPLICATION_EXPIRY_INTERVAL_TICKS = 20 * 60;
+    private static final long NATION_APPLICATION_EXPIRY_POLICY_DISCOVERY_TICKS = 20L * 60L;
     private static final long CITIZENSHIP_POLICY_DISCOVERY_INTERVAL_TICKS = 20L * 60L;
     private static final int TERRITORY_PERMIT_COMPENSATION_INTERVAL_TICKS = 20 * 60;
     private static final int PERMANENT_DESTRUCTION_RECOVERY_INTERVAL_TICKS = 20 * 60;
@@ -334,6 +334,7 @@ public final class CivicServerRuntime {
         CivicDatabase database = CivicDatabase.open(databaseDirectory.resolve("civic.sqlite3"), identity);
         seedGameTestCitizenshipPolicy(database, server, clock);
         seedGameTestOnlineTimeObservationPolicy(database, server, clock);
+        seedGameTestNationApplicationExpiryPolicy(database, server, clock);
         LightmansCurrencyPublicMaintenanceFundProvisioner.forLevel(server.overworld())
                 .ensureExists();
         AsyncOnlineTimeWriter writer = new AsyncOnlineTimeWriter(database);
@@ -437,9 +438,9 @@ public final class CivicServerRuntime {
         }
         current.ticksSinceNationApplicationExpiry++;
         if (current.ticksSinceNationApplicationExpiry
-                >= NATION_APPLICATION_EXPIRY_INTERVAL_TICKS) {
+                >= current.nationApplicationExpiryIntervalTicks) {
             current.ticksSinceNationApplicationExpiry = 0;
-            scheduleNationApplicationExpiry(current);
+            scheduleGovernedNationApplicationExpiry(current);
         }
         current.ticksSinceCitizenshipReconciliation++;
         if (current.ticksSinceCitizenshipReconciliation
@@ -3211,6 +3212,26 @@ public final class CivicServerRuntime {
                 });
     }
 
+    private void scheduleGovernedNationApplicationExpiry(RuntimeState current) {
+        long asOfEpochMillis = clock.millis();
+        current.writer.submitDatabase(database ->
+                        database.currentNationApplicationExpiryPolicy(asOfEpochMillis))
+                .whenComplete((policy, failure) -> current.server.execute(() -> {
+                    if (failure != null) {
+                        LOGGER.warn("Nation Application expiry policy lookup failed", failure);
+                        return;
+                    }
+                    if (policy == null) {
+                        current.nationApplicationExpiryIntervalTicks =
+                                NATION_APPLICATION_EXPIRY_POLICY_DISCOVERY_TICKS;
+                        return;
+                    }
+                    current.nationApplicationExpiryIntervalTicks =
+                            intervalTicks(policy.scanIntervalMillis());
+                    scheduleNationApplicationExpiry(current);
+                }));
+    }
+
     private void scheduleFiscalExpiry(RuntimeState current) {
         if (state != current || !current.fiscalExpiryQueued.compareAndSet(false, true)) {
             return;
@@ -4515,6 +4536,24 @@ public final class CivicServerRuntime {
                 clock.millis());
     }
 
+    private static void seedGameTestNationApplicationExpiryPolicy(
+            CivicDatabase database, MinecraftServer server, Clock clock) {
+        if (!server.getClass().getName().equals(
+                "net.minecraft.gametest.framework.GameTestServer")
+                || database.currentNationApplicationExpiryPolicy(clock.millis()) != null) {
+            return;
+        }
+        database.scheduleNationApplicationExpiryPolicy(
+                UUID.randomUUID(),
+                "civiceconomy-gametest-bootstrap",
+                "nation-application-expiry-policy-bootstrap",
+                "civic-gametest-server",
+                Duration.ofMinutes(1).toMillis(),
+                Math.max(0L, clock.millis() - 1L),
+                "Explicit GameTest Nation Application expiry policy fixture",
+                clock.millis());
+    }
+
     private static Map<UUID, List<TerritoryClaimPosition>> snapshotNationalStrengthClaims(
             List<UUID> teamIds) {
         FtbNationTeamDirectory teams = FtbNationTeamDirectory.live();
@@ -4728,7 +4767,9 @@ public final class CivicServerRuntime {
         private volatile long onlineTimeCheckpointIntervalTicks =
                 ONLINE_TIME_POLICY_DISCOVERY_INTERVAL_TICKS;
         private int ticksSinceFiscalExpiry;
-        private int ticksSinceNationApplicationExpiry;
+        private long ticksSinceNationApplicationExpiry;
+        private volatile long nationApplicationExpiryIntervalTicks =
+                NATION_APPLICATION_EXPIRY_POLICY_DISCOVERY_TICKS;
         private long ticksSinceCitizenshipReconciliation;
         private volatile long citizenshipReconciliationIntervalTicks =
                 CITIZENSHIP_POLICY_DISCOVERY_INTERVAL_TICKS;

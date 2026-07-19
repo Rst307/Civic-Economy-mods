@@ -2784,6 +2784,10 @@ public final class CivicServerRuntimeGameTests {
                 "online-time-observation-policy-command-" + UUID.randomUUID();
         String unauthorizedOnlineTimeObservationPolicyRequestId =
                 "online-time-observation-policy-unauthorized-" + UUID.randomUUID();
+        String nationApplicationExpiryPolicyRequestId =
+                "nation-application-expiry-policy-command-" + UUID.randomUUID();
+        String unauthorizedNationApplicationExpiryPolicyRequestId =
+                "nation-application-expiry-policy-unauthorized-" + UUID.randomUUID();
         String industryRequestId = "production-industry-command-" + UUID.randomUUID();
         String unauthorizedIndustryRequestId =
                 "production-industry-unauthorized-" + UUID.randomUUID();
@@ -2859,6 +2863,11 @@ public final class CivicServerRuntimeGameTests {
                         + " GameTest Online Time Observation policy");
         server.getCommands().performPrefixedCommand(
                 server.createCommandSourceStack(),
+                "civic economy admin nation-application expiry-policy schedule 60000 "
+                        + effectiveAt + " " + nationApplicationExpiryPolicyRequestId
+                        + " GameTest Nation Application expiry policy");
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
                 "civic economy admin production industry schedule 6.0.6 create:milling/wheat food-processing "
                         + effectiveAt + " " + industryRequestId
                         + " GameTest Production Industry assignment");
@@ -2917,6 +2926,11 @@ public final class CivicServerRuntimeGameTests {
                 "civic economy admin online-time policy schedule 1 "
                         + effectiveAt + " " + unauthorizedOnlineTimeObservationPolicyRequestId
                         + " Untrusted Online Time Observation policy");
+        server.getCommands().performPrefixedCommand(
+                nonOperator.createCommandSourceStack().withSuppressedOutput(),
+                "civic economy admin nation-application expiry-policy schedule 1 "
+                        + effectiveAt + " " + unauthorizedNationApplicationExpiryPolicyRequestId
+                        + " Untrusted Nation Application expiry policy");
         server.getCommands().performPrefixedCommand(
                 nonOperator.createCommandSourceStack().withSuppressedOutput(),
                 "civic economy admin production industry schedule 6.0.6 create:pressing/iron_ingot metals "
@@ -2979,6 +2993,11 @@ public final class CivicServerRuntimeGameTests {
                     helper, databaseFile, onlineTimeObservationPolicyRequestId, effectiveAt);
             assertOnlineTimeObservationPolicyAbsent(
                     helper, databaseFile, unauthorizedOnlineTimeObservationPolicyRequestId);
+            assertNationApplicationExpiryPolicy(
+                    helper, databaseFile, nationApplicationExpiryPolicyRequestId, effectiveAt, 1L);
+            assertNationApplicationExpiryPolicy(
+                    helper, databaseFile, unauthorizedNationApplicationExpiryPolicyRequestId,
+                    effectiveAt, 0L);
             assertProductionIndustryAssignmentScheduled(
                     helper, databaseFile, industryRequestId, effectiveAt);
             assertProductionIndustryAssignmentAbsent(
@@ -8048,7 +8067,7 @@ public final class CivicServerRuntimeGameTests {
             helper.assertValueEqual("ok", integrity.getString(1), "backup SQLite integrity");
             try (var version = statement.executeQuery("PRAGMA user_version")) {
                 helper.assertTrue(version.next(), "backup schema version result");
-                helper.assertValueEqual(90, version.getInt(1), "backup schema version");
+                helper.assertValueEqual(91, version.getInt(1), "backup schema version");
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("Unable to validate published database backup", failure);
@@ -8848,6 +8867,40 @@ public final class CivicServerRuntimeGameTests {
         } catch (SQLException failure) {
             throw new IllegalStateException(
                     "Unable to inspect unauthorized Online Time Observation policy", failure);
+        }
+    }
+
+    private static void assertNationApplicationExpiryPolicy(
+            GameTestHelper helper, Path databaseFile, String requestId,
+            long effectiveAtEpochMillis, long expectedCount) {
+        try (var connection = DriverManager.getConnection(
+                        "jdbc:sqlite:" + databaseFile.toAbsolutePath());
+                var query = connection.prepareStatement("""
+                        SELECT actor_identity, scan_interval_millis,
+                               effective_at_epoch_millis, reason
+                        FROM nation_application_expiry_policy
+                        WHERE request_id = ?
+                        """)) {
+            query.setString(1, requestId);
+            try (var result = query.executeQuery()) {
+                if (expectedCount == 0L) {
+                    helper.assertFalse(result.next(),
+                            "non-OP cannot schedule Nation Application expiry policy");
+                    return;
+                }
+                helper.assertTrue(result.next(), "persistent Nation Application expiry policy");
+                helper.assertTrue(result.getString(1).startsWith("civic-admin-console:"),
+                        "server-derived Nation Application expiry administrator");
+                helper.assertValueEqual(60_000L, result.getLong(2), "expiry scan interval");
+                helper.assertValueEqual(effectiveAtEpochMillis, result.getLong(3),
+                        "expiry policy effective time");
+                helper.assertValueEqual("GameTest Nation Application expiry policy",
+                        result.getString(4), "expiry policy reason");
+                helper.assertFalse(result.next(), "duplicate Nation Application expiry policy");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to inspect Nation Application expiry policy", failure);
         }
     }
 

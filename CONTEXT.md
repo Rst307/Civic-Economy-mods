@@ -26,6 +26,10 @@ _Avoid_: FTB Team member, Citizen, inactive candidate
 The one-way founding transition that creates the permanent NationId, formal Citizenship, Capital, and National Treasury after eligibility is satisfied. A DEBUG WORLD may explicitly bypass the minimum Candidate Member threshold; a formal world may not.
 _Avoid_: Application creation, automatic team promotion
 
+**Nation Application Expiry Policy**:
+A future-effective, audited server rule for how often Civic discovers already-expired Nation Applications. It never changes an Application's persisted expiry deadline or restores expired Candidate Online Evidence.
+_Avoid_: application lifetime, expiry extension, candidate evidence reset
+
 Civic Economy 是多国家 Minecraft 服务器的财政与货币领域。它以统一实体货币为基础，区分国家政治身份、财政控制、可审计经济活动与自由现金活动。
 
 ## 国家与治理

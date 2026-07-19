@@ -40,8 +40,12 @@ import org.civiceconomy.nation.CitizenshipPolicyVersion;
 import org.civiceconomy.nation.OnlineTimeObservationPolicy;
 import org.civiceconomy.nation.OnlineTimeObservationPolicyRegistry;
 import org.civiceconomy.nation.OnlineTimeObservationPolicyVersion;
+import org.civiceconomy.nation.NationApplicationExpiryPolicy;
+import org.civiceconomy.nation.NationApplicationExpiryPolicyRegistry;
+import org.civiceconomy.nation.NationApplicationExpiryPolicyVersion;
 import org.civiceconomy.nation.ScheduleCitizenshipPolicy;
 import org.civiceconomy.nation.ScheduleOnlineTimeObservationPolicy;
+import org.civiceconomy.nation.ScheduleNationApplicationExpiryPolicy;
 import org.civiceconomy.persistence.StoredDatabaseBackupOperation;
 import org.civiceconomy.persistence.StoredDatabaseRestoreOperation;
 import org.civiceconomy.production.GlobalReferencePriceRegistry;
@@ -118,6 +122,8 @@ public final class FiscalAdministrationCommands {
             new ServiceIdentity("civiceconomy-citizenship-policy");
     private static final ServiceIdentity ONLINE_TIME_OBSERVATION_POLICY_SERVICE =
             new ServiceIdentity("civiceconomy-online-time-observation-policy");
+    private static final ServiceIdentity NATION_APPLICATION_EXPIRY_POLICY_SERVICE =
+            new ServiceIdentity("civiceconomy-nation-application-expiry-policy");
 
     private FiscalAdministrationCommands() {}
 
@@ -163,6 +169,7 @@ public final class FiscalAdministrationCommands {
                 .then(facilityPolicyCommand())
                 .then(citizenshipPolicyCommand())
                 .then(onlineTimeObservationPolicyCommand())
+                .then(nationApplicationExpiryPolicyCommand())
                 .then(strengthPolicyCommand());
         var civic = Commands.literal("civic")
                 .then(Commands.literal("economy")
@@ -999,6 +1006,26 @@ public final class FiscalAdministrationCommands {
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
+            nationApplicationExpiryPolicyCommand() {
+        return Commands.literal("nation-application")
+                .then(Commands.literal("expiry-policy")
+                        .then(Commands.literal("show")
+                                .executes(context -> showNationApplicationExpiryPolicy(
+                                        context.getSource())))
+                        .then(Commands.literal("schedule")
+                                .then(Commands.argument("scanIntervalMillis", LongArgumentType.longArg(1L))
+                                        .then(Commands.argument("effectiveAtEpochMillis", LongArgumentType.longArg(0L))
+                                                .then(Commands.argument("requestId", StringArgumentType.word())
+                                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                                .executes(context -> scheduleNationApplicationExpiryPolicy(
+                                                                        context.getSource(),
+                                                                        LongArgumentType.getLong(context, "scanIntervalMillis"),
+                                                                        LongArgumentType.getLong(context, "effectiveAtEpochMillis"),
+                                                                        StringArgumentType.getString(context, "requestId"),
+                                                                        StringArgumentType.getString(context, "reason")))))))));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack>
             productionStrengthPolicyCommand() {
         return Commands.literal("strength-policy")
                 .then(Commands.literal("show")
@@ -1476,6 +1503,65 @@ public final class FiscalAdministrationCommands {
         source.sendSuccess(
                 () -> Component.literal("Online Time Observation policy query queued"), false);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int showNationApplicationExpiryPolicy(CommandSourceStack source) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationApplicationExpiryPolicyRegistry(database, clock)
+                        .current(Instant.now(clock)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure != null) {
+                        reportDatabaseFailure(source, "Nation Application expiry policy query", failure);
+                    } else if (policy.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Nation Application expiry policy is not configured; automatic expiry scans remain disabled"), false);
+                    } else {
+                        source.sendSuccess(() -> Component.literal(
+                                formatNationApplicationExpiryPolicy(policy.orElseThrow())), false);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Nation Application expiry policy query queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int scheduleNationApplicationExpiryPolicy(
+            CommandSourceStack source,
+            long scanIntervalMillis,
+            long effectiveAtEpochMillis,
+            String requestId,
+            String reason) {
+        Clock clock = Clock.systemUTC();
+        CivicServerRuntime.current()
+                .submitDatabase(database -> new NationApplicationExpiryPolicyRegistry(database, clock)
+                        .schedule(new ScheduleNationApplicationExpiryPolicy(
+                                NATION_APPLICATION_EXPIRY_POLICY_SERVICE,
+                                requestId,
+                                administrator(source).value(),
+                                new NationApplicationExpiryPolicy(
+                                        java.time.Duration.ofMillis(scanIntervalMillis)),
+                                Instant.ofEpochMilli(effectiveAtEpochMillis),
+                                reason)))
+                .whenComplete((policy, failure) -> source.getServer().execute(() -> {
+                    if (failure == null) {
+                        source.sendSuccess(() -> Component.literal(
+                                "Scheduled " + formatNationApplicationExpiryPolicy(policy)), true);
+                    } else {
+                        reportDatabaseFailure(source, "Nation Application expiry policy schedule", failure);
+                    }
+                }));
+        source.sendSuccess(() -> Component.literal(
+                "Nation Application expiry policy schedule queued"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static String formatNationApplicationExpiryPolicy(
+            NationApplicationExpiryPolicyVersion version) {
+        return "Nation Application expiry policy " + version.policyId()
+                + " scanIntervalMillis=" + version.policy().scanInterval().toMillis()
+                + " effectiveAt=" + version.effectiveAt()
+                + " actor=" + version.actorIdentity();
     }
 
     private static int scheduleOnlineTimeObservationPolicy(

@@ -9,28 +9,25 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class CivicDatabaseV86MigrationTest {
+class CivicDatabaseV91MigrationTest {
     @TempDir Path temporaryDirectory;
 
     @Test
-    void v85DatabaseAddsEmptyAuditableEconomicActivityPolicyHistory() throws Exception {
-        Path file = temporaryDirectory.resolve("schema-v85.sqlite3");
+    void v90DatabaseAddsEmptyNationApplicationExpiryPolicyHistory() throws Exception {
+        Path file = temporaryDirectory.resolve("schema-v90.sqlite3");
         DatabaseIdentity identity = new DatabaseIdentity(
-                UUID.fromString("f8ed8356-3cf0-4c91-a175-d409d14092f4"),
+                UUID.fromString("1fb741eb-0032-455c-bb5c-25dfedfb913a"),
                 "0.1.0-probe", "1.21-2.3.0.5", "2101.1.10", "2101.1.20");
-        try (CivicDatabase ignored = CivicDatabase.open(file, identity)) {
-            // Establish current schema before constructing a genuine v85 fixture.
-        }
+        try (CivicDatabase ignored = CivicDatabase.open(file, identity)) {}
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file);
                 var statement = connection.createStatement()) {
-            statement.execute("DROP INDEX auditable_economic_activity_policy_current");
-            statement.execute("DROP TABLE auditable_economic_activity_policy");
-            statement.execute("PRAGMA user_version = 85");
+            statement.execute("DROP INDEX nation_application_expiry_policy_current");
+            statement.execute("DROP TABLE nation_application_expiry_policy");
+            statement.execute("PRAGMA user_version = 90");
         }
-
         try (CivicDatabase migrated = CivicDatabase.open(file, identity)) {
             assertEquals(91, migrated.schemaVersion());
-            assertNull(migrated.currentAuditableEconomicActivityPolicy(Long.MAX_VALUE));
+            assertNull(migrated.currentNationApplicationExpiryPolicy(Long.MAX_VALUE));
         }
     }
 }
